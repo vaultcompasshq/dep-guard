@@ -1,0 +1,75 @@
+{
+  "name": "test-app",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "test-app",
+      "version": "1.0.0",
+      "dependencies": {
+        "lodash": "^4.17.21",
+        "fsevents": "^2.3.3",
+        "malicious-pkg": "^1.0.0",
+        "git-pkg": "github:user/git-pkg",
+        "@scope/pkg": "^1.0.0",
+        "host-pkg": "^1.0.0",
+        "@test/app": "workspace:*"
+      },
+      "workspaces": ["packages/app"]
+    },
+    "packages/app": {
+      "name": "@test/app",
+      "version": "1.0.0",
+      "dependencies": {
+        "lodash": "^4.17.21"
+      }
+    },
+    "node_modules/@test/app": {
+      "resolved": "packages/app",
+      "link": true
+    },
+    "node_modules/lodash": {
+      "version": "4.17.21",
+      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
+      "integrity": "sha512-v2kDEe57lecTulaDIuNTPy3Ry4/GNQBALk5xz1CtLwjmpfKUZ0BX57iZfIuA1G+VuHrf1qJUkG5ycOHkQaqQdA=="
+    },
+    "node_modules/fsevents": {
+      "version": "2.3.3",
+      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+      "hasInstallScript": true,
+      "os": ["darwin"]
+    },
+    "node_modules/malicious-pkg": {
+      "version": "1.0.0",
+      "resolved": "https://evil.example.com/x.tgz",
+      "integrity": "sha512-9WYp8Nz3q9C0LwGYqXUdVCkuJNsBQeGz3aXPKfxE4SbxOayZbP6fFT7WGZm3jNwGvA3xkY4XxRZ7WOOaLLPZmg=="
+    },
+    "node_modules/git-pkg": {
+      "version": "1.0.0",
+      "resolved": "git+https://github.com/user/git-pkg.git#abcdef1234567890abcdef1234567890abcdef12"
+    },
+    "node_modules/git-pkg/node_modules/nested-dep": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/nested-dep/-/nested-dep-2.0.0.tgz",
+      "integrity": "sha512-kY0DfX9fL8faATqagoWPqcFuwi/S88XnNNrqHHT76D4wwC1ZIshG+C2YoZ4552uNk6o323313YOpKxAmigfRQx=="
+    },
+    "node_modules/@scope/pkg": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/@scope/pkg/-/pkg-1.0.0.tgz",
+      "integrity": "sha512-mZ1DfX2fL0faATnagmWPqcGuwh/T99YnOOsqIHU87E5xxD2ZJthH+D3ZoZ5663vOl7p434424ZPqLyBnihgSRy=="
+    },
+    "node_modules/host-pkg": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/host-pkg/-/host-pkg-1.0.0.tgz",
+      "integrity": "sha512-nA2EgY3gM1gbBUobnhXQrdHvxi/U00ZoPPtrJIV98F6yyE3aKuiI+E4apa6774wPm545535aQrMzCojhTSz==",
+      "os": ["darwin"]
+    },
+    "node_modules/host-pkg/node_modules/@scope/b": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/@scope/b/-/b-1.0.0.tgz",
+      "integrity": "sha512-oB3FhZ4hN2hcCVpcoiYRseIwyj/V11aqQQuslJW09G7zzF4bLvjJ+F5bqb6885xQn656646bRsN0DpkiUT0=="
+    }
+  }
+}

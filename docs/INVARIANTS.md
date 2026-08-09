@@ -1,0 +1,583 @@
+# dep-guard invariants
+
+These are the cross-cutting rules the engine depends on. They are here
+because every one of them was already true somewhere in the code and
+written down nowhere both sides of a boundary could see it. This engine's
+worst bugs have had the same shape, again and again: two pieces of code
+each honouring a local invariant, neither aware of the other's. A
+cohesion audit reads this file rather than re-deriving the list from
+memory, and every new architectural decision appends to it.
+
+Read this before changing the delta, the fingerprint, the path handling, or
+anything that decides an exit code.
+
+Derive, do not describe. This engine's defects keep landing in the same
+place: a hand-maintained list of facts, kept alongside logic that lives in
+another file, which has to stay in step with that logic and does not. `comparabilityKey`'s account of what the comparison rules read;
+two diagnostics' copies of the tamper signal list; the pin-mismatch rule's
+absence from the list of which walk feeds which rule; the claim below about
+which values may enter a fingerprint. Every one of them was correct when it
+was written and silently wrong afterwards, and every one failed in the
+direction that lets an attacker through, because a stale description says
+"nothing to see here" and a missing entry never announces itself. So when a
+decision depends on what some other code does, compute it by running that
+code and reading the result, or generate it from that code. If a parallel
+list is genuinely unavoidable, make it the thing the logic is written
+against, so an omission is a compile error rather than a silence.
+
+This file records INTENT, and intent is not coverage. Every claim here
+about what the engine already handles has to be checked against the code
+before it is relied on: prose in this document has been wrong before, and
+each time, the bug sat exactly where the prose waved a hand. A cohesion
+audit that reads
+this file as a statement of fact will confirm the gaps rather than find
+them. Read it for what the engine is trying to do, then go and see.
+
+## The fingerprint is a promise about facts, not about categories
+
+A finding's fingerprint is a sha256 over exactly four things, in this
+order: the rule id, the canonical package name, the manifest path, and
+`details.signal`. Nothing else may enter it. Severity, the message, the
+version, the corpus build date, and every other `details` key are excluded
+on purpose, because all of them move under a review, a version bump, or a
+corpus refresh without the underlying finding being a different fact, and a
+fingerprint that shifted with them would silently invalidate every stored
+baseline.
+
+The signal is where the specificity lives, and it carries two distinct
+duties. First, it separates findings one rule can raise about one
+dependency at once: a tampered entry can lose its integrity hash, move
+host, and downgrade its scheme simultaneously, and baselining one of those
+must not silence the other two. Second, it must identify the *fact* and
+not merely its category. Baselining a
+benign migration to an internal registry used to accept every later repoint
+of that package to any host, because both findings hashed the same
+`host-changed`. So where a signal has a value-bearing subject, that value
+belongs inside the signal string: `host-changed:https://artifactory.example`,
+`pin-mismatch:registry.npmjs.org`. The four-component hash stays exactly as
+specified; the fourth component just says something.
+
+The test for whether a value may be folded into a signal is the stability
+contract, not taste: it may go in only if it cannot move under a corpus
+refresh or a version bump. A resolved host cannot, so it goes in.
+Typosquat's matched target, matched rule, and target rank all can -- they
+come from the shipped corpus -- so they stay out, and typosquat's slightly
+coarse baselining is a deliberate consequence, not an oversight.
+
+`local-source-changed` is the signal that rule caught out, and it is worth
+naming because it looked like it obeyed the rule while breaking it. Its
+subject is an origin, and an origin was already established as stable --
+but a HOSTLESS origin is the path (see the tamper section below), and a
+vendored tarball's path moves on every bump of it. Folding it in minted a
+fresh fingerprint per bump that no baseline could ever absorb, which is
+precisely what the stability contract exists to prevent. That signal is
+therefore bare: `local-source-changed`, with both origins in `details`,
+where nothing hashes them. The lesson generalises -- the question is never
+"is this a value-bearing subject", it is "can this value move under a
+version bump", and for a path the answer is always yes.
+
+Renaming or splitting a rule id invalidates every baseline that mentions
+it, so it waits for a major version.
+
+## The delta has two walks, and neither is derivable from the other
+
+`computeDelta` produces two independent lists, and the distinction is a
+security property rather than an implementation detail.
+
+`changes` is the manifest walk: which declared dependencies were added or
+changed. It carries the specifier, the dependency section, the protocol,
+and the manifest path, and it is what the name-based rules (existence,
+typosquat, confusion's internal-name rule) and the specifier-based rules
+(hygiene, tamper's git-source and url-source signals) need.
+
+`lockEntryChanges` is the lockfile walk: which resolved entries differ from
+the before lockfile, entry by entry, whether or not a manifest declares
+them, and however many entries share one name. This is what the
+resolution-based rules need -- tamper's integrity, host, scheme, tarball
+and local source signals, install-script's flag acquisition, AND
+confusion's pin-mismatch rule -- because in a real lockfile the
+overwhelming majority of entries are transitive and no manifest names
+them, and because one name can carry several entries, of which a single
+"which version does this specifier resolve to" answer selects exactly one.
+
+pin-mismatch was missing from that list for a while, in this file and in
+the code both. It asks whether a RESOLUTION came from the host its scope
+was pinned to, which is a resolution question wearing a name-shaped rule
+id, and reading it off the manifest walk alone left it blind to exactly
+the case it exists for: a transitive package under a scope pinned to a
+private registry, quietly resolving from the public one. It reads both
+walks now. Its sibling, the internal-name rule, stays on the manifest walk
+and belongs there: it judges a name somebody declared, not a resolution.
+
+Rules that judge a resolution must consume the second list. Rules that
+judge a name or a specifier must consume the first. A rule that consumes
+the first when it means the second is blind to transitive entries and to
+any entry a decoy can hide behind, which is exactly how a repointed
+transitive tarball and a same-version decoy both used to scan clean. A fact
+reached by both walks is deduplicated on (manifest path, package name,
+signal), so a tampered direct dependency is still one finding.
+
+`kind` is `added` or `changed`, and never `removed`: dropping a dependency
+cannot introduce any of the risks this tool looks for. Which checks gate on
+`kind` is deliberate and worth stating, because getting it wrong is silent
+in both directions. Existence and typosquat consider added dependencies and
+aliases at any kind, since a retargeted alias has never been judged before.
+Confusion's internal-name rule does the same; its pin-mismatch rule ignores
+`kind` entirely, because a resolution that stopped matching its pin is
+exactly as serious when no manifest line moved. Install-script treats
+`added` and `flag-acquired` as different signals but reports both, and
+never reports a bump that leaves an already-true flag true. Tamper ignores
+`kind` for every signal: the git-source swap in particular almost always
+arrives as a changed specifier, never as a new dependency.
+
+## Pairing two lockfiles is a chain of guesses, and each guess owes a diagnostic
+
+`selectEntry` picks which of a name's entries a specifier resolves to, and
+has always said so when it could not tell. `pickCounterpart` answers the
+other half of the same question -- which earlier entry a changed one
+should be compared against -- and for a long time said nothing at all: it
+fell through to whichever entry the lockfile happened to list first and
+then let the checks assert a change against it. Two entries under one name
+are ordinary (a mirrored older copy nested under another package, a second
+version for a different peer set), so that positional pick turned routine
+bumps into criticals whose message was backwards and which vanished if the
+two lockfile keys were swapped.
+
+Both selectors are therefore guesses under the same rule. A counterpart is
+narrowed from the strongest evidence down: an identical resolved URL, then
+a shared origin, then a matching install-script flag, and each step only
+applies when it leaves a candidate standing. A pairing that survives all of
+that with more than one candidate is a guess, and a guess may not
+manufacture a fact.
+
+What a guess costs, though, is narrower than it looks, and getting that
+wrong made the suppression attacker-constructible. Suppressing every
+comparison signal for a guessed pairing was a defensible-sounding rule with
+a hole in it: any name carrying two before entries -- which nested
+duplicates make ubiquitous in a real lockfile -- could be repointed to any
+host in one move by giving the evil entry a version no candidate shares.
+Every narrowing step then fails, every signal goes quiet, and the scan
+exits 0 with a note. The mistake was treating the VERDICT as the guess. It
+usually is not: an entry resolving from a host none of the candidates ever
+resolved from has moved whichever one it succeeds. What the guess really
+costs is the before-value a message would print.
+
+So the rule is: compare against every surviving candidate, and report a
+signal every one of them produces, worded in terms of what is certain --
+"not where any of the N earlier entries resolved from", never one
+candidate's origin, and `details.counterpartCandidates` in place of ANY
+before-side value. That means `details.beforeOrigin`, and it means
+`tarball-repointed`'s `details.beforePath` too, which carried the first
+candidate's tarball path for a while: no credential is in a pathname, but a
+value read off one candidate is a fact about which candidate the delta
+guessed at, and printing it as though the lockfile said so is the same
+defect wearing a smaller consequence. Suppress only a signal that some candidates produce
+and others do not, because that one really would be a fact about which
+candidate was picked. Install-script follows the same rule: an acquisition
+when no candidate ran scripts, silence when one of them did.
+
+`delta-ambiguous-lock-entry` follows the suppression rather than the guess.
+It is raised when a comparison actually dropped something, and not
+otherwise -- which is what makes it mean something. Firing on every guess
+made it simultaneously the only honesty channel covering this hole and the
+noisiest note in the set, since a nested duplicate of any bumped package
+produces an undecidable pairing on nearly every routine refresh.
+
+How that is decided is the part worth stating carefully, because the first
+answer to it was wrong in the way this file is most concerned with. The
+delta used to predict it: `comparabilityKey` listed the FACTS the
+comparison rules read -- origin, hash presence, hash equality, version,
+URL, install-script flag -- and two candidates sharing that key were
+declared indistinguishable, so no note was raised. The list was not a copy
+of the rules, only a description of them, and a description drifts the
+moment a rule reads something it does not mention. Its failure mode is
+silent and one-directional. A partially migrated lockfile holding a package
+at `sha512-clean` beside a nested duplicate at the same version and the same
+URL still carrying `sha1-old` gave both candidates the same key -- same
+origin, same version, same URL, both "not the new hash" -- while the
+algorithm ladder read a rewritten `sha512` as a forgery against one and as a
+routine `sha1`-to-`sha512` rehash against the other. The critical was
+dropped for disagreement, the key saw nothing to disagree about, and the
+scan exited 0 with no findings and no diagnostics: attacker-benefiting
+silence inside the mechanism built to end it.
+
+So the decision is DERIVED, not described. The delta hands over every
+surviving candidate (`beforeCandidates`) and says nothing about what a
+comparison will make of them. Each check runs its real comparison once per
+candidate, intersects the RESULTS, and raises `delta-ambiguous-lock-entry`
+itself for anything the intersection dropped -- `certainFindings` in
+`checks/tamper.ts`, and the acquisition suppression in
+`checks/install-script.ts`. The drop and the announcement are one event, so
+they cannot drift apart, and a rule that starts reading a new fact needs no
+bookkeeping anywhere: the new fact changes the results, and the results are
+what is compared. The invariant is therefore structural rather than
+maintained -- a finding any candidate produces is either reported, when they
+all agree, or announced as ambiguous. Neither silence nor a note about a
+guess that cost nothing is reachable.
+
+Do not reintroduce a key that describes these rules from outside them.
+This engine's defects keep landing in a hand-maintained parallel list that
+has to stay in step with logic living somewhere else, and this was
+another one. If a derived key is ever wanted for speed, it has to be
+generated from the comparison functions, not written alongside them.
+
+The intersection has ONE implementation, in `checks/agreement.ts`, and both
+checks that need it call it. That is not tidiness either. install-script
+carried a hand-written approximation of it for a while --
+`candidates.some(flagged)` plus a candidate count -- and the approximation
+got a cell of the truth table wrong that the real intersection gets right
+for free: when EVERY candidate already ran install scripts they all reach
+the same verdict, so nothing is dropped and the scan can say plainly that
+running one is not new. `some()` fires on "at least one", which is also true
+when they all agree, so a bump of a scripted package beside a flagged nested
+duplicate -- routine, and common -- announced an ambiguity with a false
+message on every refresh. An imitation of a derived mechanism is a described
+mechanism wearing the right words.
+
+## What a dropped verdict costs, and what it must not cost
+
+A dropped verdict is announced twice over, and the two channels do different
+jobs. `delta-ambiguous-lock-entry` explains; it never touches the exit code,
+because diagnostics never do. That left a real hole: a consumer reading only
+the exit code saw a clean scan while some candidate had produced a CRITICAL.
+So a drop whose set contains a critical ALSO produces a finding --
+`lockfile-tamper`, signal `ambiguous-critical`, severity high, which blocks
+at the default medium gate -- worded to say the engine could not determine
+which earlier entry applies and the entry should be treated as suspect.
+
+High rather than critical is the honest severity: a critical asserts the
+tampering happened, and this cannot assert that. One escalation per
+undecidable entry, however many verdicts went undecided, because they are
+one admission. Drops carrying nothing above high stay diagnostic-only --
+install-script's suppressed acquisition is the case, and making an
+unattributable high block would put a note on every lockfile with a nested
+duplicate back into the gate. The blocking decision stays in findings, where
+it belongs; the diagnostic keeps its standing promise not to reach the exit
+code.
+
+## The narrowing ladder is the list that is still a description
+
+`pickCounterpart`'s ladder -- version, then resolved URL, then origin, then
+the install-script flag -- is the remaining described-not-derived list in
+the engine. It decides which candidates
+survive to be compared at all, and it is a hand-written account of what
+distinguishes two entries rather than anything derived from the comparison
+rules. It has not gone wrong yet. It is written down here because the
+mechanism above only holds for the candidates the ladder hands it.
+
+The bound below is recorded so the next maintainer re-tests it rather
+than rediscovers it: a pairing the ladder narrows to a
+SINGLE candidate is not a guess, so it announces nothing and escalates
+nothing. That is reachable on purpose. It also means a before side holding
+one hashed entry at one version and one hashless entry at another lets an
+attacker's entry be steered to the hashless candidate -- match its version
+and the first rung decides the pairing -- so `integrity-removed` never
+arises, nothing is dropped, and there is nothing to announce.
+
+That behaviour is deliberate and buys an attacker nothing they could not
+get by editing the steered-to entry directly, which is why it is not
+treated as a finding. It is nonetheless a real edge of the guarantee, and it
+is load-bearing on the ladder staying as it is. ANY future change to the
+comparison rules, or to the ladder itself, has to re-check this case
+explicitly. Do not assume the derive-and-intersect mechanism above covers
+it: that mechanism protects the comparison of surviving candidates, and this
+is about which candidates survive.
+
+The older half of this trade still stands where it applies: a critical
+nobody can reproduce by reading the lockfile is how a gate loses its
+reader.
+
+Both selectors judge "same origin" through `resolution.ts`, which is also
+what the tamper rules judge a move by. That is not tidiness: a second copy
+of "same origin" would let the delta pair two entries the check then calls
+different.
+
+An added entry -- no before side at all -- is a third case, and it is not
+judged. There is nothing to compare, so the comparison signals do not run,
+and the entry is not held to an absolute standard either; an absolute rule
+that would judge a new entry on its own merits is deferred. What is owed is
+the admission, and in the delta modes it used to be missing entirely: a
+fresh install scanned exactly like a scan that had evaluated every entry.
+One aggregate `delta-new-lock-entries` diagnostic per scan names the count.
+One, not one per entry -- a fresh install adds hundreds, and a per-entry
+note would bury the diagnostics that name something specific. Audit mode
+does not raise it, because `audit-no-tamper-comparison` already says the
+same thing about the whole lockfile.
+
+## A scan with no comparison base may report facts, never events
+
+With no earlier revision behind the scan -- audit mode, or a staged scan of
+a repository with no commit yet -- every dependency reads as added and
+every install-script flag reads as newly acquired. Both are true of the
+scan and false of the repository, and a check that spells them as events
+files a blocking finding per flagged package on the first sweep of a real
+repository, which is the sweep a new adopter runs first and abandons
+fastest.
+
+The delta carries `hasComparisonBase` so a check can tell the two
+situations apart. install-script is the rule this bites: with a comparison
+base it keeps its acquisition semantics, its `added` and `flag-acquired`
+signals, and its blocking high. Without one, the same fact is reported as a
+fact -- signal `present`, severity low, wording that says the package runs
+an install script and that this scan cannot tell whether that is new. Low
+sits under the default medium gate on purpose: knowing which dependencies
+execute code at install time is most of why someone audits, so the finding
+stays, and it stays out of the exit code. Any future rule that wants to say
+"this is new" must consult the same flag rather than reading `kind`, which
+in these modes says `added` about everything.
+
+This is a rule about every reporting path, not about one of them, and it
+holds however small the affected list is. pnpm's `onlyBuiltDependencies`
+findings are the sibling case: `onlyBuiltDifference` reads the entire
+allowlist as added when there is no before state, so `only-built-added` at
+high said "newly added" about a list nobody had touched. It reports
+`present` at low in that mode too, on the same wording pattern, and keeps
+its acquisition signal and severity in the delta modes. That allowlist is
+short enough that the false sentence could never have wrecked a sweep the
+way the per-entry flag did; it was fixed anyway, because two paths
+answering the same question differently is precisely the drift this file
+exists to catch.
+
+## What the tamper signals cover, and what the manifest walk cannot reach
+
+The comparison-derived tamper signals are `integrity-removed`,
+`integrity-changed`, `integrity-downgraded`, `tarball-repointed`,
+`host-changed`, `scheme-downgrade`, `local-source-changed`, and
+`resolution-unreadable`, and they are declared once, in
+`tamper-signals.ts`.
+
+A diagnostic that describes coverage lost across the board -- audit mode's
+`audit-no-tamper-comparison`, the delta's `delta-new-lock-entries` -- names
+them all, because naming a subset under-reports the engine's own blind spot,
+which is the failure mode the whole diagnostic exists to prevent. This file
+used to state that as a fact about every such diagnostic, and it was false:
+both of those messages carried their own copy of the list, both copies were
+written when there were six signals, and neither learned about
+`tarball-repointed` or `resolution-unreadable` when those were added to the
+check. Both messages are now built from the one declaration, and every
+`details.signal` is produced through a helper typed against it, so a signal
+absent from the list does not compile and cannot go unnamed.
+
+A diagnostic about ONE entry says which comparisons did not run for that
+entry, which is a different and narrower sentence:
+`tamper-resolution-unreadable` names the host, scheme and local-source
+comparisons because those are the three that were skipped, while the
+integrity branches still ran for it. Naming all eight there would be the
+same misreport in the other direction.
+
+`integrity-changed` closes what was a known gap: a hash removed was
+critical, a hash rewritten in place was silent, and forging is strictly
+worse than stripping. Registry tarballs are immutable, so one version
+fetched from one URL has one hash forever; a different one is tampering or
+a corrupt lockfile. It requires the version to be unchanged, which is what
+keeps an ordinary bump out of it (version, URL and hash all move together
+there), and it sits in an else-if with `integrity-removed` so a deleted
+hash is reported once.
+
+It used to require the resolved URL to be unchanged as well, and this file
+defended that with the claim that a repoint "is already the more specific
+`host-changed`". That claim was false, and the composition it hid is the
+worst bug this engine has had. A repoint is only host-changed when the
+ORIGIN changes. Within one origin -- lodash's resolution rewritten to
+`https://registry.npmjs.org/evil/-/evil-1.0.0.tgz`, carrying evil's own
+genuine hash, version untouched -- the integrity branch declined it for the
+moved URL and the resolution comparison below dismissed it as a version's
+tarball moving, so npm installed the attacker's bytes from the trusted host
+and the scan emitted nothing at all. Not a finding, not a diagnostic.
+
+`tarball-repointed` is that case: the version held, the origin held, the
+URL and the hash moved together. One version has one tarball and one hash,
+so this is a different artifact under the same name, and it is critical.
+The algorithm ladder below deliberately does not run for it -- the ladder
+forgives a rehash of the SAME bytes at the same URL, which this is not. The
+one shape it must stay silent for is the ordinary bump, and the VERSION is
+what tells them apart: when the version moved too, the URL and hash were
+expected to move with it. An identical hash across the move also settles
+it, in the other direction: same bytes, so the path change is a detail.
+
+`resolution-unreadable` is the fail-closed case. A resolved URL the engine
+cannot parse used to end the comparison with a bare return, and npm
+genuinely writes such values (a bare relative path like
+`vendor/payload.tgz`), so repointing an entry at one of them with the hash
+rewritten to match was silent too. That broke two rules this file states
+outright -- every guess owes a diagnostic, and a URL or hash the engine
+cannot read must never be treated as one it approved. The package is now
+named in a `tamper-resolution-unreadable` diagnostic whichever way it ends,
+because the host, scheme and local-source comparisons genuinely did not run
+for it; and when the resolution moved to or from something unreadable with
+nothing vouching for the bytes, it is a critical. An identical hash on both
+sides vouches for them, the same settlement `local-source-changed` makes.
+The unreadable value itself never reaches the message or the details: a
+string that failed URL parsing is exactly where a malformed credential
+would survive the parsing that strips one everywhere else.
+
+An integrity value is not an opaque string, though, and comparing two of
+them without reading the algorithm prefix conflates three different events.
+So a rewritten hash goes through a ladder, and the ladder -- not the branch
+that reaches it -- decides which signal it is, or whether it is one:
+
+- Same algorithm, different digest: `integrity-changed`, critical. This is
+  the case with no innocent explanation.
+- A stronger algorithm than before (sha1 to sha512, sha1 to sha384): a
+  benign rehash, which is what migrating a lockfile off an older npm does
+  to every entry it touches. No finding. Without this, a routine migration
+  files a critical per dependency.
+- A weaker algorithm than before (sha512 to sha1): `integrity-downgraded`,
+  critical. This is the "removed or downgraded" half of the spec's rule
+  said out loud -- an attacker who cannot forge a sha512 digest can try to
+  get the lockfile to accept a weaker one instead.
+- An algorithm either side does not recognize: reported as
+  `integrity-changed`. Unknown is not weak and it is not benign; the
+  comparison fails closed, because a hash the engine cannot read must never
+  be treated as a hash it approved.
+
+The strengths are an explicit ordered list, never a string comparison:
+"sha1" sorts after "sha384" and before "sha512" lexically, which is two
+wrong answers out of two. A value carrying several space-separated hashes
+is worth its strongest one.
+
+`local-source-changed` is the hostless counterpart of `host-changed`:
+every `file:` URL has an empty host, so scheme-and-host comparison alone
+left a vendored tarball swapped for a planted one completely silent, and
+for such a resolution the path is the only thing that says which bytes.
+That makes it fire on path moves, and two of those are ordinary work --
+renaming a vendored tarball, moving the vendor directory -- so it now
+requires that the integrity hash be absent, removed, or rewritten. An
+identical hash on both sides proves the bytes did not move, which makes the
+path change a reorg.
+
+Its relationship to the `file:` protocol exemption is the part worth
+writing down, because the two look like they contradict each other. The
+manifest walk exempts `file:` (with workspace, catalog, link, and patch)
+as internal wiring, so a dependency DECLARED as `file:../x.tgz` never
+reaches this or any other registry-oriented rule. The exemption is about
+declared specifiers; `local-source-changed` is about resolutions, and an
+ordinary registry specifier can resolve to a hostless URL -- which is
+exactly the swap being looked for. So the rule lives entirely on the
+resolution side, and the lockfile walk is what carries it: for a
+file-resolved entry the manifest walk either exempted the dependency or
+never declared it in the first place.
+
+The other two tamper signals, `git-source` and `url-source`, are the
+mirror image and must be kept out of every lockfile gate. They read a
+manifest specifier and nothing else. The whole check nonetheless sat behind
+a "npm or pnpm only" early return, so a specifier rewritten to
+`git+https://evil/...` reported nothing in a yarn, a bun, or a
+lockfile-less repository -- against what the audit-mode diagnostic says in
+as many words ("only the specifier-based git-source and url-source signals
+ran") and what the yarn and bun loaders promise users ("lockfile-backed
+checks fall back to manifest evidence"). The format gate belongs where the
+resolution comparison begins, and nowhere above it.
+
+## Path spellings have one source
+
+Every path in a finding, a diagnostic, or a config match is anchored to the
+git repository root and spelled the way `git-source.ts` produced it. It
+resolves workspace directories by identity rather than by the spelling that
+reached them, so a symlinked package directory is reported once, under its
+real path, on both sides of a scan.
+
+This matters far beyond tidiness, because three separate consumers key off
+that spelling and none of them can tell a different spelling from a
+different file. `ignorePaths` matches against it. The baseline matches
+against it through the fingerprint, which hashes the manifest path. And the
+two sides of a delta are paired by it -- if the git side and the working
+tree side spell one package differently, every dependency of it reads as
+removed from one path and added at the other. Anything that invents a path
+of its own has to justify it against those three.
+
+A finding the lockfile walk discovered is located IN THE LOCKFILE, and is
+anchored there. It used to borrow the root manifest -- a file that has
+nothing to do with a transitive entry -- on the reasoning that the root
+manifest always exists. That reasoning ignored the three consumers above:
+`ignorePaths: ["package.json"]`, a spelling `config-invalid` deliberately
+allows so a monorepo can say it only cares about its workspace packages,
+silently deleted every transitive tamper, install-script and pin-mismatch
+finding in the repository. Anchoring them to the lockfile makes ignoring
+them an explicit, comprehensible choice instead of a side effect, at the
+cost of changing those fingerprints once -- cheap now, expensive after a
+release. An entry a manifest DOES declare keeps that manifest, which is
+also what lets a fact reached by both walks deduplicate into one finding.
+
+Two fabricated anchors remain, both deliberate. `checkSingle` uses a
+synthetic `package.json` for a question that has no file behind it, and
+therefore skips both path-based filters, so that a repository's config for
+an unrelated location cannot launder "is this name safe" into "clean". And
+pnpm's workspace-wide `onlyBuiltDependencies` findings are anchored to the
+root manifest, because the setting really is a property of the workspace
+root and can live in that very file.
+
+## Diagnostics never change the exit code
+
+The exit code comes from findings and the `fail_on` threshold, and from
+nothing else. A diagnostic is how the engine says "I looked at this and
+could not judge it" or "this coverage did not run", and it is deliberately
+not a finding, because inventing a finding for a package the engine cannot
+name is how a gate becomes noise people learn to skip.
+
+The obligation this creates runs the other way: any coverage the engine
+cannot provide must produce a diagnostic rather than silence, because
+silence is indistinguishable from a clean result. That is why a missing
+lockfile, an unparsed lockfile format, a binary lockfile, pnpm's absent
+install-script flag, audit mode's unreachable tamper comparisons,
+`checkSingle`'s reduced coverage, an unparseable npmrc pin, an unreadable
+resolved URL, an ambiguous lock entry selection, an unmatched ignore entry
+and findings dropped by a matched one all have codes. Adding a code is the cheapest possible fix for
+a gap, and a gap with no code is a bug even when the code that has the gap
+is correct.
+
+Current diagnostic codes: `audit-anchor-differs`,
+`audit-no-tamper-comparison`, `check-single-name-only`,
+`delta-ambiguous-lock-entry`, `delta-new-lock-entries`,
+`ignore-path-dropped`,
+`ignore-path-unmatched`, `lockfile-binary-skipped`,
+`lockfile-format-manifest-only`, `lockfile-missing`,
+`manifest-alias-empty`, `npm-lockfile-invalid-entry`, `npm-lockfile-v1`,
+`npmrc-pin-unparseable`, `pnpm-lockfile-invalid-entry`,
+`pnpm-no-install-script-flag`, `tamper-resolution-unreadable`,
+`workspace-duplicate-directory`, `workspace-glob-unsupported`.
+
+## Failing closed, and the error codes that do it
+
+Anything the engine cannot parse or trust stops the scan with a
+`DepGuardError` carrying a code, because a security gate that passes on a
+parse failure is how tampering hides. A malformed lockfile is not an empty
+lockfile; a config file that is present but broken is not an absent one.
+
+The codes, and what each one means:
+
+- `config-invalid` -- a config file is present but unreadable, not JSON,
+  not an object, carries an unknown key, or holds a value the gate cannot
+  honour. Includes an `ignorePaths` entry that would match everything: a
+  security gate does not get a quiet off switch, and dropping findings
+  before the gate weighs them is one. "Everything" is any entry with no
+  literal in it at all -- every character a wildcard or a separator, so
+  `**`, `**/*` and `*/**` are all the same switch differently punctuated.
+  A bare `package.json` is deliberately allowed: ignoring the root manifest
+  names one file, and is how a monorepo says it only cares about its
+  workspace packages.
+- `baseline-invalid` -- the baseline file is present but not the shape a
+  baseline has. Accepting a broken baseline would accept everything in it.
+- `manifest-parse` -- a manifest is present and unparseable.
+- `lockfile-parse` -- a lockfile is present and unparseable, including a
+  lockfile that declares a format version whose required structure is
+  missing. This case is a throw and not a diagnostic on purpose: falling
+  back would leave the entries map empty and every lockfile-backed check
+  silently satisfied.
+- `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
+  corpus is absent or damaged. A corpus that reads as empty would bless
+  every hallucinated name.
+- `path-missing` -- the path to scan does not exist, or is not a directory.
+  A path nobody looked at must not report a clean result.
+- `read-error` -- a path exists but cannot be read.
+- `git-error` -- git could not resolve what a delta mode needs, including a
+  base ref that is not a usable ref.
+- `name-invalid` -- `checkSingle` was asked about an empty name, which has
+  no meaningful answer and must not be answered "safe".
+- `severity-invalid` -- a finding or threshold carried a severity outside
+  the known order. Unreachable today; it exists so that the day it becomes
+  reachable, the scan stops instead of scoring the finding below every
+  threshold and passing it.
+
+Online checks are the one deliberate exception to failing closed: a network
+problem degrades to the offline result with a diagnostic, and never blocks.

@@ -1,0 +1,21 @@
+{
+  "name": "@vaultcompass/dep-guard",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "dep-guard": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepublishOnly": "tsc -b"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "@vaultcompass/dep-guard-core": "workspace:*"
+  }
+}

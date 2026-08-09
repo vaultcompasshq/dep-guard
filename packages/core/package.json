@@ -1,0 +1,19 @@
+{
+  "name": "@vaultcompass/dep-guard-core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepublishOnly": "tsc -b"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  }
+}

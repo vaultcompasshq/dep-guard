@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+*.log
+.DS_Store
+TODO.local.md
+ROADMAP.local.md
+.local/
+.superpowers/
+docs/superpowers/
+docs/sessions/
+docs/plans/
+.claude/

@@ -1,0 +1,22 @@
+{
+  "name": "@vaultcompass/dep-guard-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -b packages/core packages/cli",
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest",
+    "typecheck": "tsc -b packages/core packages/cli && tsc --noEmit -p tsconfig.test.json",
+    "lint": "echo 'lint: no-op placeholder, real rules land in Plan C'"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^22.19.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.12",
+    "typescript": "^5.9.3"
+  }
+}
