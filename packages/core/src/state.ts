@@ -22,7 +22,7 @@ function unquote(value: string): string {
   return quoted ? value.slice(1, -1) : value;
 }
 
-// Matches a URL scheme prefix ("https:", but also "user:" — any label-colon).
+// Matches a URL scheme prefix ("https:", but also "user:" -- any label-colon).
 const SCHEME_PREFIX = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 
 // A maximal run of non-slash, non-whitespace characters sitting immediately
@@ -31,7 +31,7 @@ const SCHEME_PREFIX = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 // scope segment are untouched. No colon group: ":" is already inside the
 // class, so "user:tok@" is one run, and the earlier optional "(:...)?"
 // spelling of the same language backtracked cubically on colon-dense input
-// with no "@" at all — a measurable stall on a value an attacker writes.
+// with no "@" at all -- a measurable stall on a value an attacker writes.
 const CREDENTIAL_RUN = /[^/\s@]+@/g;
 
 // Nothing legitimate is anywhere near this long; anything longer is capped
@@ -69,19 +69,19 @@ function hostAndPath(url: URL): string {
 // authority scan missed ("//user:tok@h/", "///user:tok@h/",
 // "///https://user:tok@h/"), so this no longer tries to locate the one true
 // authority itself. Instead it asks the platform parser, generously: the
-// value as written, then — because npm accepts protocol-relative and the
-// reviewers kept hiding URLs behind slash runs — the value with its leading
+// value as written, then -- because npm accepts protocol-relative and the
+// reviewers kept hiding URLs behind slash runs -- the value with its leading
 // slash run peeled off, both bare and behind an "https://" placeholder. Any
 // interpretation that yields a userinfo wins, and the value is rebuilt from
 // parsed components without it, keeping the original prefix style (a
 // scheme'd value keeps its scheme, a slash run is put back verbatim, a bare
 // value stays bare).
 //
-// Whatever survives parsing — the rebuilt value or one that parsed clean —
+// Whatever survives parsing -- the rebuilt value or one that parsed clean --
 // then passes a textual floor: a credential-like run may still hide before
 // the query (WHATWG reads "https:///https://user:tok@h/" as host "https"
 // with the token in the PATH), so the pre-query part is redacted while
-// query and fragment survive — a credential inside the query of a parseable
+// query and fragment survive -- a credential inside the query of a parseable
 // value is the documented consumer-side residual. If nothing parses at all,
 // the whole value gets the redaction. Either can mangle a legitimately
 // weird path, and that is the accepted trade: a value that strange cannot
