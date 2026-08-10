@@ -1,6 +1,6 @@
 # dep-guard
 
-Blocks risky dependencies at the moment they are added — before install,
+Blocks risky dependencies at the moment they are added -- before install,
 before commit, before CI.
 
 **Status: pre-release.** The engine and CLI work and are covered by 738
@@ -20,28 +20,28 @@ registered hallucinated name reached 237 repositories through
 agent-generated files, with automated fetches starting within days.
 
 The tools that gate installs sit after the point where this lands. dep-guard
-reads the dependency diff — or answers a proposed addition over MCP — and
+reads the dependency diff -- or answers a proposed addition over MCP -- and
 scores it before anything is fetched.
 
 ## What it checks
 
 Six rules, all offline and deterministic:
 
-- **Unknown package** — a new name absent from a corpus of real npm package
+- **Unknown package** -- a new name absent from a corpus of real npm package
   names. The hallucination signal.
-- **Typosquat** — edit distance against a popularity list, plus transform
+- **Typosquat** -- edit distance against a popularity list, plus transform
   rules that catch what distance misses: separator swaps, scope flattening
   (`babel-core` against `@babel/core`), repeated and omitted characters,
   keyboard adjacency, and a curated list of known confusion pairs.
-- **Install script** — a dependency that gains the ability to run install
+- **Install script** -- a dependency that gains the ability to run install
   scripts. Acquisition only: a version bump of a package that already ran
   them is not a finding, or every `npm update` would be noise.
-- **Lockfile tamper** — resolutions moving to another host, integrity
+- **Lockfile tamper** -- resolutions moving to another host, integrity
   hashes removed, forged, or downgraded to a weaker algorithm, and tarballs
   repointed within the same host.
-- **Version hygiene** — wildcard and `latest` specifiers on new
+- **Version hygiene** -- wildcard and `latest` specifiers on new
   dependencies.
-- **Dependency confusion** — a scope pinned to a private registry that
+- **Dependency confusion** -- a scope pinned to a private registry that
   resolves from the public one, and internal names arriving from outside.
 
 Findings carry a severity and a stable fingerprint. A fingerprint survives
@@ -84,7 +84,7 @@ Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
 ```
 
 Two things worth knowing before you use them. `allow` means "ignore this
-package everywhere" — it silences every rule except lockfile tampering,
+package everywhere" -- it silences every rule except lockfile tampering,
 which is a fact about where bytes come from rather than about the package.
 And `ignorePaths` drops findings before the gate sees them, so a pattern
 broad enough to match everything would switch the tool off; patterns made
@@ -95,7 +95,7 @@ only of wildcards are rejected for that reason.
 The corpus is a bloom filter over known npm package names, a popularity
 list, and a list of confusion pairs. It is not bundled yet. Until it is,
 `packages/core/fixtures/corpus` holds a small development corpus that is
-useful for trying the CLI out and useless for real work — it knows fifty
+useful for trying the CLI out and useless for real work -- it knows fifty
 package names.
 
 ## How it compares
@@ -123,12 +123,12 @@ Coverage is honest per format rather than uniform. Where a format cannot
 answer a question, the scan says so in a diagnostic instead of staying
 quiet:
 
-- `package-lock.json` v2 and v3 — full coverage.
-- `pnpm-lock.yaml` v9+ — full, except install scripts, which the format
+- `package-lock.json` v2 and v3 -- full coverage.
+- `pnpm-lock.yaml` v9+ -- full, except install scripts, which the format
   stopped recording. Additions to `onlyBuiltDependencies` are used instead.
-- `yarn.lock`, `bun.lock` — manifest-level checks only. Neither records
+- `yarn.lock`, `bun.lock` -- manifest-level checks only. Neither records
   install scripts, and yarn berry records no resolved URL.
-- `bun.lockb` — skipped. Undocumented binary format.
+- `bun.lockb` -- skipped. Undocumented binary format.
 
 ## Development
 
