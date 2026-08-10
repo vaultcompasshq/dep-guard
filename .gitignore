@@ -12,3 +12,19 @@ docs/superpowers/
 docs/sessions/
 docs/plans/
 .claude/
+
+# The resumable name store the corpus builder walks the registry into: one
+# line per package name, around ninety megabytes at full size. It is an
+# intermediate, not an artifact.
+.corpus-work/
+
+# A built corpus. Ten megabytes of generated data whose provenance is a
+# dated registry walk -- it belongs to a release, not to a commit.
+packages/core/data/
+
+# The private dogfood tier: the list of local repositories to scan, and
+# anything a run writes about them. The harness only ever emits counts, but
+# the list itself names paths, so it stays out of the repository.
+bench/repos.local.json
+bench/baseline.local.json
+bench/results.local.json

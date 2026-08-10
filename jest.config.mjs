@@ -40,5 +40,15 @@ export default {
       },
     ],
   },
-  testMatch: ["<rootDir>/packages/*/tests/**/*.test.ts"],
+  // The packages hold TypeScript sources and TypeScript tests. scripts/ and
+  // bench/ hold plain ESM tooling -- it runs under node directly, with no
+  // build step ahead of it -- so those tests are .mjs and execute as native
+  // modules rather than through the transform above. They live under this
+  // one config so `pnpm test` stays the single answer to "did I break
+  // anything".
+  testMatch: [
+    "<rootDir>/packages/*/tests/**/*.test.ts",
+    "<rootDir>/scripts/tests/**/*.test.mjs",
+    "<rootDir>/bench/tests/**/*.test.mjs",
+  ],
 };
