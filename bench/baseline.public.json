@@ -1,0 +1,559 @@
+{
+  "version": 1,
+  "tier": "public",
+  "corpus": {
+    "builtAt": "2026-08-01",
+    "nameCount": 53
+  },
+  "repos": [
+    {
+      "repo": "npm/cli",
+      "sha": "4cdcceac047f82571d0ec734e18b87d1d130e042",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 276,
+          "byRule": {
+            "unknown-package": 258,
+            "typosquat": 0,
+            "install-script": 18,
+            "lockfile-tamper": 0,
+            "version-hygiene": 0,
+            "dependency-confusion": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 0,
+            "high": 258,
+            "medium": 0,
+            "low": 18,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 1,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-no-tamper-comparison": 1,
+            "check-single-name-only": 0,
+            "delta-ambiguous-lock-entry": 0,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-format-manifest-only": 0,
+            "lockfile-missing": 0,
+            "manifest-alias-empty": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-no-install-script-flag": 0,
+            "tamper-resolution-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 0,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 1,
+          "pnpm": 0,
+          "yarn": 0,
+          "bun": 0,
+          "none": 0,
+          "other": 0
+        }
+      }
+    },
+    {
+      "repo": "axios/axios",
+      "sha": "ba98559a7f5a18e531b5762387e5957bd281af3d",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 35,
+          "byRule": {
+            "unknown-package": 34,
+            "typosquat": 0,
+            "install-script": 1,
+            "lockfile-tamper": 0,
+            "version-hygiene": 0,
+            "dependency-confusion": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 0,
+            "high": 34,
+            "medium": 0,
+            "low": 1,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 1,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-no-tamper-comparison": 1,
+            "check-single-name-only": 0,
+            "delta-ambiguous-lock-entry": 0,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-format-manifest-only": 0,
+            "lockfile-missing": 0,
+            "manifest-alias-empty": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-no-install-script-flag": 0,
+            "tamper-resolution-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 0,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 1,
+          "pnpm": 0,
+          "yarn": 0,
+          "bun": 0,
+          "none": 0,
+          "other": 0
+        }
+      }
+    },
+    {
+      "repo": "vitejs/vite",
+      "sha": "57fea001d154e7dd8d5d74d3082731f1dcfd31be",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 170,
+          "byRule": {
+            "unknown-package": 170,
+            "typosquat": 0,
+            "install-script": 0,
+            "lockfile-tamper": 0,
+            "version-hygiene": 0,
+            "dependency-confusion": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 0,
+            "high": 170,
+            "medium": 0,
+            "low": 0,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 6,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-no-tamper-comparison": 1,
+            "check-single-name-only": 0,
+            "delta-ambiguous-lock-entry": 2,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-format-manifest-only": 0,
+            "lockfile-missing": 0,
+            "manifest-alias-empty": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-no-install-script-flag": 1,
+            "tamper-resolution-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 2,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 0,
+          "pnpm": 1,
+          "yarn": 0,
+          "bun": 0,
+          "none": 0,
+          "other": 0
+        }
+      }
+    },
+    {
+      "repo": "vuejs/core",
+      "sha": "8f89be88faaadd9e1025f7dc1430b3854341fb72",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 55,
+          "byRule": {
+            "unknown-package": 53,
+            "typosquat": 1,
+            "install-script": 0,
+            "lockfile-tamper": 0,
+            "version-hygiene": 1,
+            "dependency-confusion": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 1,
+            "high": 53,
+            "medium": 1,
+            "low": 0,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 4,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-no-tamper-comparison": 1,
+            "check-single-name-only": 0,
+            "delta-ambiguous-lock-entry": 2,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-format-manifest-only": 0,
+            "lockfile-missing": 0,
+            "manifest-alias-empty": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-no-install-script-flag": 1,
+            "tamper-resolution-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 0,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 0,
+          "pnpm": 1,
+          "yarn": 0,
+          "bun": 0,
+          "none": 0,
+          "other": 0
+        }
+      }
+    },
+    {
+      "repo": "prettier/prettier",
+      "sha": "903845c7d16ce66dedd9d5ab4b858d233f48341a",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 143,
+          "byRule": {
+            "unknown-package": 142,
+            "typosquat": 1,
+            "install-script": 0,
+            "lockfile-tamper": 0,
+            "version-hygiene": 0,
+            "dependency-confusion": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 1,
+            "high": 142,
+            "medium": 0,
+            "low": 0,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 1,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-no-tamper-comparison": 0,
+            "check-single-name-only": 0,
+            "delta-ambiguous-lock-entry": 0,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-format-manifest-only": 1,
+            "lockfile-missing": 0,
+            "manifest-alias-empty": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-no-install-script-flag": 0,
+            "tamper-resolution-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 0,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 0,
+          "pnpm": 0,
+          "yarn": 1,
+          "bun": 0,
+          "none": 0,
+          "other": 0
+        }
+      }
+    },
+    {
+      "repo": "jestjs/jest",
+      "sha": "3c94c26395f473f077af4ce89ba7b0733cc513a1",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 360,
+          "byRule": {
+            "unknown-package": 332,
+            "typosquat": 0,
+            "install-script": 0,
+            "lockfile-tamper": 0,
+            "version-hygiene": 28,
+            "dependency-confusion": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 0,
+            "high": 332,
+            "medium": 28,
+            "low": 0,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 1,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-no-tamper-comparison": 0,
+            "check-single-name-only": 0,
+            "delta-ambiguous-lock-entry": 0,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-format-manifest-only": 1,
+            "lockfile-missing": 0,
+            "manifest-alias-empty": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-no-install-script-flag": 0,
+            "tamper-resolution-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 0,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 0,
+          "pnpm": 0,
+          "yarn": 1,
+          "bun": 0,
+          "none": 0,
+          "other": 0
+        }
+      }
+    },
+    {
+      "repo": "expressjs/express",
+      "sha": "a3714473feb3d2908add734d340e7755fd85e0a3",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 42,
+          "byRule": {
+            "unknown-package": 42,
+            "typosquat": 0,
+            "install-script": 0,
+            "lockfile-tamper": 0,
+            "version-hygiene": 0,
+            "dependency-confusion": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 0,
+            "high": 42,
+            "medium": 0,
+            "low": 0,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 1,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-no-tamper-comparison": 0,
+            "check-single-name-only": 0,
+            "delta-ambiguous-lock-entry": 0,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-format-manifest-only": 0,
+            "lockfile-missing": 1,
+            "manifest-alias-empty": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-no-install-script-flag": 0,
+            "tamper-resolution-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 0,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 0,
+          "pnpm": 0,
+          "yarn": 0,
+          "bun": 0,
+          "none": 1,
+          "other": 0
+        }
+      }
+    },
+    {
+      "repo": "eslint/eslint",
+      "sha": "f3993b0547bace7370e9728ee7408af49d367d76",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 86,
+          "byRule": {
+            "unknown-package": 83,
+            "typosquat": 2,
+            "install-script": 0,
+            "lockfile-tamper": 0,
+            "version-hygiene": 1,
+            "dependency-confusion": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 0,
+            "high": 85,
+            "medium": 1,
+            "low": 0,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 1,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-no-tamper-comparison": 0,
+            "check-single-name-only": 0,
+            "delta-ambiguous-lock-entry": 0,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-format-manifest-only": 0,
+            "lockfile-missing": 1,
+            "manifest-alias-empty": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-no-install-script-flag": 0,
+            "tamper-resolution-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 0,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 0,
+          "pnpm": 0,
+          "yarn": 0,
+          "bun": 0,
+          "none": 1,
+          "other": 0
+        }
+      }
+    },
+    {
+      "repo": "chalk/chalk",
+      "sha": "661317e6f91fe7c90306c2c48ea9354562ee9146",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 9,
+          "byRule": {
+            "unknown-package": 9,
+            "typosquat": 0,
+            "install-script": 0,
+            "lockfile-tamper": 0,
+            "version-hygiene": 0,
+            "dependency-confusion": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 0,
+            "high": 9,
+            "medium": 0,
+            "low": 0,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 1,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-no-tamper-comparison": 0,
+            "check-single-name-only": 0,
+            "delta-ambiguous-lock-entry": 0,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-format-manifest-only": 0,
+            "lockfile-missing": 1,
+            "manifest-alias-empty": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-no-install-script-flag": 0,
+            "tamper-resolution-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 0,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 0,
+          "pnpm": 0,
+          "yarn": 0,
+          "bun": 0,
+          "none": 1,
+          "other": 0
+        }
+      }
+    }
+  ]
+}

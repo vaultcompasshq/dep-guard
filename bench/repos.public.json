@@ -1,0 +1,69 @@
+{
+  "description": "Public repositories the dogfood harness scans, pinned to exact commits. The pin is the point: without it the baseline moves whenever upstream lands a dependency bump, and a real regression in this tool becomes indistinguishable from somebody else's commit. Chosen for shape rather than fame, so that every lockfile format the scanner claims to read is exercised, including the absence of one.",
+  "version": 1,
+  "repos": [
+    {
+      "repo": "npm/cli",
+      "url": "https://github.com/npm/cli.git",
+      "sha": "4cdcceac047f82571d0ec734e18b87d1d130e042",
+      "expectLockfile": "npm",
+      "shape": "npm workspaces monorepo with a v3 package-lock; the format with full coverage, at the size where transitive entries dominate"
+    },
+    {
+      "repo": "axios/axios",
+      "url": "https://github.com/axios/axios.git",
+      "sha": "ba98559a7f5a18e531b5762387e5957bd281af3d",
+      "expectLockfile": "npm",
+      "shape": "single-package npm lockfile, no workspaces"
+    },
+    {
+      "repo": "vitejs/vite",
+      "url": "https://github.com/vitejs/vite.git",
+      "sha": "57fea001d154e7dd8d5d74d3082731f1dcfd31be",
+      "expectLockfile": "pnpm",
+      "shape": "pnpm workspace, many packages, exercises onlyBuiltDependencies in place of the install-script flag pnpm stopped recording"
+    },
+    {
+      "repo": "vuejs/core",
+      "url": "https://github.com/vuejs/core.git",
+      "sha": "8f89be88faaadd9e1025f7dc1430b3854341fb72",
+      "expectLockfile": "pnpm",
+      "shape": "pnpm workspace with a different package layout to vite's, and catalog specifiers"
+    },
+    {
+      "repo": "prettier/prettier",
+      "url": "https://github.com/prettier/prettier.git",
+      "sha": "903845c7d16ce66dedd9d5ab4b858d233f48341a",
+      "expectLockfile": "yarn",
+      "shape": "yarn berry, single package; manifest-level checks only, since berry records no resolved URL"
+    },
+    {
+      "repo": "jestjs/jest",
+      "url": "https://github.com/jestjs/jest.git",
+      "sha": "3c94c26395f473f077af4ce89ba7b0733cc513a1",
+      "expectLockfile": "yarn",
+      "shape": "yarn workspace monorepo under lerna, so the manifest walk has many roots"
+    },
+    {
+      "repo": "expressjs/express",
+      "url": "https://github.com/expressjs/express.git",
+      "sha": "a3714473feb3d2908add734d340e7755fd85e0a3",
+      "expectLockfile": "none",
+      "shape": "no committed lockfile; the scan has to say what it could not check rather than report clean"
+    },
+    {
+      "repo": "eslint/eslint",
+      "url": "https://github.com/eslint/eslint.git",
+      "sha": "f3993b0547bace7370e9728ee7408af49d367d76",
+      "expectLockfile": "none",
+      "shape": "no committed lockfile at a size where the manifest alone carries a long dependency list"
+    },
+    {
+      "repo": "chalk/chalk",
+      "url": "https://github.com/chalk/chalk.git",
+      "sha": "661317e6f91fe7c90306c2c48ea9354562ee9146",
+      "expectLockfile": "none",
+      "shape": "small, no lockfile, few dependencies; the cheap end of the range"
+    }
+  ]
+}

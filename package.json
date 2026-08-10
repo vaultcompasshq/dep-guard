@@ -13,7 +13,11 @@
     "lint": "echo 'lint: no-op placeholder, real rules land in Plan C'",
     "corpus:build": "node scripts/build-corpus.mjs",
     "corpus:refresh": "node scripts/build-corpus.mjs --refresh",
-    "corpus:slice": "node scripts/build-corpus.mjs --max-names 20000"
+    "corpus:slice": "node scripts/build-corpus.mjs --max-names 20000",
+    "bench": "node bench/dogfood.mjs",
+    "bench:compare": "node bench/dogfood.mjs --compare",
+    "bench:baseline": "node bench/dogfood.mjs --write-baseline",
+    "bench:local": "node bench/dogfood.mjs --tier local"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
