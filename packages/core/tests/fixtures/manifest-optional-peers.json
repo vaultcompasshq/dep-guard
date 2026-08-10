@@ -1,0 +1,24 @@
+{
+  "name": "test-runner",
+  "version": "3.2.4",
+  "dependencies": {
+    "chai": "^5.2.0",
+    "tinypool": "^1.1.1"
+  },
+  "devDependencies": {
+    "local-pkg": "^1.1.1",
+    "strip-literal": "*"
+  },
+  "peerDependencies": {
+    "@edge-runtime/vm": "*",
+    "@types/node": "^18.0.0 || ^20.0.0 || >=22.0.0",
+    "happy-dom": "*",
+    "jsdom": "*"
+  },
+  "peerDependenciesMeta": {
+    "@edge-runtime/vm": { "optional": true },
+    "@types/node": { "optional": true },
+    "happy-dom": { "optional": true },
+    "jsdom": { "optional": true }
+  }
+}

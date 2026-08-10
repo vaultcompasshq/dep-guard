@@ -1,4 +1,8 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { hygieneCheck } from '../src/checks/hygiene.js';
+import { parseManifest } from '../src/manifest.js';
 import type { CheckContext, ResolvedConfig } from '../src/checks/types.js';
 import type { Corpus } from '../src/corpus.js';
 import type { DepChange, DependencyDelta } from '../src/delta.js';
@@ -181,5 +185,90 @@ describe('hygieneCheck: allow list', () => {
   test('an allow-listed package does not fire even with specifier "*"', () => {
     const context = makeContext([makeChange({ name: 'left-pad', specifier: '*' })], { allow: ['left-pad'] });
     expect(hygieneCheck(context)).toEqual([]);
+  });
+});
+
+// A peer range is a compatibility statement addressed to whoever installs
+// this package; nothing is installed from it by the package declaring it.
+// The wildcard-plus-peerDependenciesMeta shape below is how a library says
+// "I work with any version of this, and you do not need it at all", and it
+// is completely standard.
+describe('hygieneCheck: peerDependencies are exempt', () => {
+  test.each(['*', 'latest', ''])(
+    'a peer dependency with specifier "%s" is silent',
+    (specifier) => {
+      const changes = [makeChange({ name: 'happy-dom', specifier, depType: 'peerDependencies' })];
+      expect(hygieneCheck(makeContext(changes))).toEqual([]);
+    }
+  );
+
+  test('a real library manifest declaring optional wildcard peers reports nothing for them', () => {
+    const content = readFileSync(
+      fileURLToPath(new URL('./fixtures/manifest-optional-peers.json', import.meta.url)),
+      'utf8'
+    );
+    const manifest = parseManifest('packages/runner/package.json', content);
+    const changes: DepChange[] = manifest.deps.map((dep) => ({
+      name: dep.name,
+      registryName: dep.registryName,
+      specifier: dep.specifier,
+      kind: 'added',
+      depType: dep.depType,
+      protocol: dep.protocol,
+      manifestPath: manifest.path,
+    }));
+
+    const findings = hygieneCheck(makeContext(changes));
+
+    // Three wildcard peers in that manifest, and one wildcard dev
+    // dependency. Only the dev one is this tool's business.
+    expect(findings.map((finding) => finding.packageName)).toEqual(['strip-literal']);
+    expect(findings[0].severity).toBe('low');
+  });
+});
+
+// Who carries the risk decides the severity. npm resolves a package's
+// runtime dependencies for everyone who installs it, so a wildcard there is
+// inflicted on strangers; it does not install dependencies' dev
+// dependencies, so a wildcard there is inflicted only on the maintainer of
+// this repository. Optional dependencies ship to consumers the same way
+// runtime ones do, so they group with dependencies. Low keeps the dev case
+// visible without blocking at the default medium gate.
+describe('hygieneCheck: severity by dependency section', () => {
+  test('a wildcard in dependencies is medium', () => {
+    const changes = [makeChange({ name: 'left-pad', specifier: '*', depType: 'dependencies' })];
+    expect(hygieneCheck(makeContext(changes))[0].severity).toBe('medium');
+  });
+
+  test('a wildcard in optionalDependencies is medium', () => {
+    const changes = [
+      makeChange({ name: 'left-pad', specifier: '*', depType: 'optionalDependencies' }),
+    ];
+    expect(hygieneCheck(makeContext(changes))[0].severity).toBe('medium');
+  });
+
+  test('a wildcard in devDependencies is low', () => {
+    const changes = [makeChange({ name: 'left-pad', specifier: '*', depType: 'devDependencies' })];
+    expect(hygieneCheck(makeContext(changes))[0].severity).toBe('low');
+  });
+
+  test('one name in two sections is reported at the more severe of the two, whichever arrives first', () => {
+    // The two sections collapse to one finding (they share a fingerprint),
+    // so which severity survives must not depend on the order the delta
+    // happened to produce them in.
+    const devFirst = [
+      makeChange({ name: 'left-pad', specifier: '*', depType: 'devDependencies' }),
+      makeChange({ name: 'left-pad', specifier: '*', depType: 'dependencies' }),
+    ];
+    const findings = hygieneCheck(makeContext(devFirst));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('medium');
+  });
+
+  test('the section is in the details, so the severity can be read back to its cause', () => {
+    const changes = [makeChange({ name: 'left-pad', specifier: '*', depType: 'devDependencies' })];
+    expect(hygieneCheck(makeContext(changes))[0].details).toMatchObject({
+      depType: 'devDependencies',
+    });
   });
 });

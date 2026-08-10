@@ -1,6 +1,7 @@
 import type { DepChange } from '../delta.js';
 import { versionRangeOf } from '../delta.js';
-import type { Finding } from '../types.js';
+import type { DepType } from '../manifest.js';
+import type { Finding, Severity } from '../types.js';
 import { isAllowed } from './allow.js';
 import type { Check } from './types.js';
 
@@ -29,6 +30,42 @@ import type { Check } from './types.js';
 
 const FLAGGED_SPECIFIERS: ReadonlySet<string> = new Set(['*', 'latest', '']);
 
+// peerDependencies are exempt, and this is a statement about what a peer
+// range IS rather than a tolerance for noise. Nothing is installed from a
+// peer range by the package declaring it: it is a compatibility statement
+// addressed to whoever installs that package, and "*" there means "any
+// version of this works with me", which is a claim about compatibility and
+// not a decision to accept whatever gets published next. Paired with
+// peerDependenciesMeta.optional it is how a library declares an optional
+// integration, which is completely standard -- and because this rule
+// reports at medium, and medium is the default threshold, flagging it
+// blocked any such library on its very first run.
+//
+// The remaining three sections split on who carries the risk. npm resolves
+// a package's runtime dependencies for everyone who installs it, so a
+// wildcard in dependencies is inflicted on strangers; it does not install
+// dependencies' dev dependencies, so a wildcard in devDependencies is
+// inflicted only on whoever works in this repository. optionalDependencies
+// ship to consumers exactly as runtime ones do, so they group with
+// dependencies. Low keeps the dev case visible while leaving it under the
+// default gate. Nothing here looks at whether the package is a library or
+// an application: that is not knowable from a manifest, and guessing it
+// would make the severity depend on a heuristic rather than on the section
+// the author actually wrote.
+const SEVERITY_BY_DEP_TYPE: Readonly<Record<DepType, Severity | null>> = {
+  dependencies: 'medium',
+  optionalDependencies: 'medium',
+  devDependencies: 'low',
+  peerDependencies: null,
+};
+
+const SEVERITY_RANK: Readonly<Record<Severity, number>> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
 function rangeToJudge(change: DepChange): string | null {
   if (change.protocol === 'registry') {
     return change.specifier;
@@ -51,30 +88,51 @@ export const hygieneCheck: Check = (ctx) => {
   // fingerprint and baselining it silently suppresses the rest -- the same
   // hazard candidates.ts's newRegistryNames already guards against for the
   // two name checks.
-  const seen = new Set<string>();
+  const seen = new Map<string, number>();
 
   for (const change of delta.changes) {
     const range = rangeToJudge(change);
     if (range === null || !FLAGGED_SPECIFIERS.has(range)) {
       continue;
     }
+    const severity = SEVERITY_BY_DEP_TYPE[change.depType];
+    if (severity === null) {
+      continue;
+    }
     if (isAllowed(change.registryName, config.allow)) {
       continue;
     }
+
     const key = JSON.stringify([change.manifestPath, change.registryName]);
-    if (seen.has(key)) {
+    const existing = seen.get(key);
+    if (existing !== undefined) {
+      // One name declared in two sections collapses to one finding, because
+      // both would hash to the same fingerprint. Which severity survives is
+      // therefore decided by comparing them rather than by whichever the
+      // delta happened to produce first: a name that is a wildcard in both
+      // dependencies and devDependencies carries the runtime risk, and
+      // taking the first arrival would silently report it as low the day
+      // that ordering changed.
+      const kept = findings[existing];
+      if (SEVERITY_RANK[severity] > SEVERITY_RANK[kept.severity]) {
+        kept.severity = severity;
+        (kept.details as Record<string, unknown>).depType = change.depType;
+      }
       continue;
     }
-    seen.add(key);
+    seen.set(key, findings.length);
 
     const shown = change.specifier === '' ? '(empty)' : change.specifier;
     findings.push({
       ruleId: 'version-hygiene',
-      severity: 'medium',
+      severity,
       packageName: change.registryName,
       message: `"${change.registryName}" is specified as "${shown}", which pins no version at all.`,
       manifestPath: change.manifestPath,
-      details: { specifier: change.specifier, kind: change.kind },
+      // depType is here because the severity is decided by it, and without
+      // it a reader cannot tell why one wildcard reported low and another
+      // medium.
+      details: { specifier: change.specifier, kind: change.kind, depType: change.depType },
     });
   }
 
