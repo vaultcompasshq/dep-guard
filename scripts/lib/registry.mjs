@@ -14,6 +14,7 @@ export const USER_AGENT =
 
 export const DEFAULT_REPLICA = 'https://replicate.npmjs.com';
 export const DEFAULT_DOWNLOADS_API = 'https://api.npmjs.org';
+export const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
 
 // Retried: a transport failure, a rate limit, and anything the server calls
 // its own fault. Not retried: a 4xx that is not 429, because asking again
@@ -167,6 +168,48 @@ export function splitDownloadBatches(names, batchSize = DOWNLOADS_BATCH_SIZE) {
     batches.push(bulkable.slice(index, index + batchSize));
   }
   return batches;
+}
+
+// The registry's own search endpoint, asked for a popularity-ordered page.
+// Two things make it worth talking to at all, given that it is rate limited
+// far harder than the replica: it answers with two hundred and fifty
+// packages per request where the downloads API answers with one for a
+// scoped name, and it reports npm's own weekly download figure inline. That
+// figure is used to decide which names are worth spending a verification
+// request on. It is never used as the verification: what earns a name its
+// place is the downloads API answering for it directly.
+//
+// popularity=1.0 with quality and maintenance at zero asks the ranker to
+// order purely by how much a package is used, which is the axis this list
+// cares about. A package that is unmaintained but universally installed is
+// still a name people type.
+export const SEARCH_PAGE_SIZE = 250;
+
+export function readSearchPage(payload) {
+  const objects = Array.isArray(payload?.objects) ? payload.objects : [];
+  const rows = [];
+  for (const entry of objects) {
+    const name = entry?.package?.name;
+    if (typeof name !== 'string' || name.length === 0) {
+      continue;
+    }
+    const weekly = entry?.downloads?.weekly;
+    rows.push({ name, weekly: typeof weekly === 'number' ? weekly : null });
+  }
+  return rows;
+}
+
+export async function fetchSearchPage(base, { text, from, size = SEARCH_PAGE_SIZE }, options) {
+  const params = new URLSearchParams({
+    text,
+    size: String(size),
+    from: String(from),
+    popularity: '1.0',
+    quality: '0.0',
+    maintenance: '0.0',
+  });
+  const payload = await fetchJson(`${base}/-/v1/search?${params.toString()}`, options);
+  return readSearchPage(payload);
 }
 
 export function readDownloadCounts(payload, requested) {
