@@ -59,6 +59,28 @@ const SEVERITY_BY_DEP_TYPE: Readonly<Record<DepType, Severity | null>> = {
   peerDependencies: null,
 };
 
+// An unpinned range is flagged because you do not know what code you will
+// get from it. That reasoning is about type-only packages, not about the
+// @types scope specifically: a package whose declarations are erased at
+// compile time ships no runtime code, so an unpinned range on one cannot
+// hand an attacker code that executes. @types is the only scope this rule
+// can currently recognize as type-only without registry metadata this
+// check does not have -- every DefinitelyTyped package lives there, and
+// nothing else does -- so it is what the check keys on, but the exemption
+// is conceptually about the property, not the scope. A future rule
+// widening detection to other type-only packages should read as extending
+// this same reasoning, not as a second, unrelated rule.
+//
+// Demoted rather than exempted: an auditor scanning the manifest should
+// still see that the range is unpinned, and install-script still covers
+// whatever residual risk a compromised @types package's install scripts
+// would carry. Only dependencies and optionalDependencies move -- both
+// scored medium, which blocks at the default gate -- because
+// devDependencies is already low and peerDependencies is already exempt.
+function isTypeOnlyPackage(registryName: string): boolean {
+  return registryName.startsWith('@types/');
+}
+
 const SEVERITY_RANK: Readonly<Record<Severity, number>> = {
   critical: 4,
   high: 3,
@@ -95,9 +117,12 @@ export const hygieneCheck: Check = (ctx) => {
     if (range === null || !FLAGGED_SPECIFIERS.has(range)) {
       continue;
     }
-    const severity = SEVERITY_BY_DEP_TYPE[change.depType];
+    let severity = SEVERITY_BY_DEP_TYPE[change.depType];
     if (severity === null) {
       continue;
+    }
+    if (isTypeOnlyPackage(change.registryName)) {
+      severity = 'low';
     }
     if (isAllowed(change.registryName, config.allow)) {
       continue;

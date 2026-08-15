@@ -273,3 +273,58 @@ describe('hygieneCheck: severity by dependency section', () => {
     });
   });
 });
+
+// A DefinitelyTyped package ships no runtime code -- its declarations are
+// erased at compile time -- so an unpinned range on one cannot hand an
+// attacker code that executes the way a wildcard on an ordinary runtime
+// dependency can. Demoted rather than exempted: the finding stays visible
+// to an auditor, and install-script still covers the residual risk. This
+// was measured against nine well maintained public repositories: every one
+// of jest's 19 blocking version-hygiene findings was a wildcard on
+// "@types/node" in dependencies.
+describe('hygieneCheck: type-only packages are demoted', () => {
+  test('a wildcard on an @types package in dependencies is low, not medium', () => {
+    const changes = [makeChange({ name: '@types/node', specifier: '*', depType: 'dependencies' })];
+    const findings = hygieneCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('low');
+  });
+
+  test('a wildcard on an @types package in optionalDependencies is low, not medium', () => {
+    const changes = [
+      makeChange({ name: '@types/node', specifier: '*', depType: 'optionalDependencies' }),
+    ];
+    expect(hygieneCheck(makeContext(changes))[0].severity).toBe('low');
+  });
+
+  test('a wildcard on an @types package in devDependencies stays low', () => {
+    const changes = [
+      makeChange({ name: '@types/node', specifier: '*', depType: 'devDependencies' }),
+    ];
+    expect(hygieneCheck(makeContext(changes))[0].severity).toBe('low');
+  });
+
+  test('a wildcard on an @types package in peerDependencies stays exempt', () => {
+    const changes = [makeChange({ name: '@types/node', specifier: '*', depType: 'peerDependencies' })];
+    expect(hygieneCheck(makeContext(changes))).toEqual([]);
+  });
+
+  test('a non-@types scoped package is unaffected and stays medium', () => {
+    const changes = [makeChange({ name: '@babel/core', specifier: '*', depType: 'dependencies' })];
+    expect(hygieneCheck(makeContext(changes))[0].severity).toBe('medium');
+  });
+
+  // A name merely containing "types" is not the @types scope; only a
+  // package actually published under it is type-only by this rule's
+  // reasoning.
+  test('an unscoped package named "types-something" is unaffected', () => {
+    const changes = [makeChange({ name: 'types-utils', specifier: '*', depType: 'dependencies' })];
+    expect(hygieneCheck(makeContext(changes))[0].severity).toBe('medium');
+  });
+
+  test('an @types package still respects the allow list', () => {
+    const changes = [makeChange({ name: '@types/node', specifier: '*', depType: 'dependencies' })];
+    const context = makeContext(changes, { allow: ['@types/node'] });
+    expect(hygieneCheck(context)).toEqual([]);
+  });
+});
