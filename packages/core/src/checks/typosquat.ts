@@ -119,6 +119,42 @@ function flattenScope(name: string): string | null {
   return `${name.slice(1, slash)}-${name.slice(slash + 1)}`;
 }
 
+// A scoped name split at its first slash, e.g. "@types/ms" -> { scope:
+// "@types", tail: "ms" }. Returns null for a name that is not scoped --
+// the same shape flattenScope already parses, kept as a second function
+// rather than reused because flattenScope answers a different question
+// (the hyphen-joined flattened form) and has its own null cases baked in.
+function splitScope(name: string): { scope: string; tail: string } | null {
+  if (!name.startsWith('@')) {
+    return null;
+  }
+  const slash = name.indexOf('/');
+  if (slash <= 1 || slash === name.length - 1) {
+    return null;
+  }
+  return { scope: name.slice(0, slash), tail: name.slice(slash + 1) };
+}
+
+// When `name` and `target` are both scoped under the IDENTICAL scope, the
+// scope contributes nothing to how different the two names are -- nobody
+// mistypes "@types/" itself, and every edit that matters sits in the part
+// after the slash. Comparing (and sizing the short-target floor against)
+// the full string then scores a short tail as though it were the whole,
+// longer name: "@types/co" against "@types/ms" is really "co" against
+// "ms", and at distance 2 that means any two-character tail matches any
+// other. Returns null for an unscoped name or a pair under different
+// scopes, which are compared exactly as they were before this existed --
+// a scope mismatch is itself part of what makes the two names different,
+// so it stays inside the comparison rather than being stripped from it.
+function sameScopeTails(name: string, target: string): { nameTail: string; targetTail: string } | null {
+  const nameScope = splitScope(name);
+  const targetScope = splitScope(target);
+  if (nameScope === null || targetScope === null || nameScope.scope !== targetScope.scope) {
+    return null;
+  }
+  return { nameTail: nameScope.tail, targetTail: targetScope.tail };
+}
+
 function buildTopIndex(corpus: Corpus): TopIndex {
   const lengths = new Set<number>();
   const separatorForms = new Map<string, string>();
@@ -307,7 +343,14 @@ function keyboardMatch(name: string, corpus: Corpus, index: TopIndex): Match | n
 }
 
 // One edit is a much bigger deal in a six-character name than in a
-// sixteen-character one, so short names get the tighter band.
+// sixteen-character one, so short names get the tighter band. When name
+// and a candidate target share an identical scope, that sizing (and the
+// distance itself) runs on the part after the slash instead of the whole
+// string -- see sameScopeTails -- since the scope cannot be what makes
+// them differ. A tail is always shorter than the name it came from, so
+// its band can only ever be as tight or tighter than the full-string one,
+// which is what keeps bestDistance's initial sentinel (sized off the
+// full-string band) a safe upper bound across every candidate.
 function distanceMatch(name: string, corpus: Corpus): Match | null {
   const maxK: 1 | 2 = name.length <= SHORT_NAME_MAX_LENGTH ? 1 : 2;
   let best: Match | null = null;
@@ -316,11 +359,16 @@ function distanceMatch(name: string, corpus: Corpus): Match | null {
   const top = corpus.topNames;
   for (let index = 0; index < top.length; index += 1) {
     const target = top[index];
-    const gap = target.length - name.length;
-    if (gap > maxK || -gap > maxK) {
+    const shared = sameScopeTails(name, target);
+    const compareName = shared === null ? name : shared.nameTail;
+    const compareTarget = shared === null ? target : shared.targetTail;
+    const compareMaxK: 1 | 2 =
+      shared === null ? maxK : compareName.length <= SHORT_NAME_MAX_LENGTH ? 1 : 2;
+    const gap = compareTarget.length - compareName.length;
+    if (gap > compareMaxK || -gap > compareMaxK) {
       continue;
     }
-    const distance = bandedDistance(name, target, maxK);
+    const distance = bandedDistance(compareName, compareTarget, compareMaxK);
     if (distance === null || distance === 0) {
       continue;
     }
@@ -362,7 +410,7 @@ function matchName(name: string, ctx: CheckContext, index: TopIndex): Match | nu
 // Curated pairs are certain, and so is a one-edit resemblance to something
 // in the top thousand. A two-edit resemblance, or one to a less popular
 // package, is worth reporting but not worth calling certain.
-function severityFor(match: Match): Severity {
+function severityFor(name: string, match: Match): Severity {
   if (match.rule === 'alias-list') {
     return 'critical';
   }
@@ -375,9 +423,25 @@ function severityFor(match: Match): Severity {
   // precise rules (curated pairs, separators, scoping, repetition,
   // transposition) still say what they always said, because each of those
   // describes a specific mistake rather than mere proximity.
+  //
+  // When name and target share an identical scope, "short" is measured on
+  // the tail rather than the full string, for the same reason distanceMatch
+  // compares tails: the shared scope cannot be what makes the two names
+  // look alike, so it cannot be what makes a one-character difference
+  // inside a short tail look like evidence either. "@types/co" one edit
+  // from "@types/ms" is "co" from "ms", not a nine-character resemblance,
+  // and without this the floor never fires because it is measuring a
+  // string neither rule actually varied. A different scope is compared as
+  // the full string, same as ever -- the scope itself is then part of what
+  // makes the two names different, not a fixed prefix around the part that
+  // varies.
   const imprecise = match.rule === 'edit-distance' || match.rule === 'keyboard-adjacency';
-  if (imprecise && match.target.length < IMPRECISE_TARGET_LENGTH) {
-    return 'low';
+  if (imprecise) {
+    const shared = sameScopeTails(name, match.target);
+    const targetLength = shared === null ? match.target.length : shared.targetTail.length;
+    if (targetLength < IMPRECISE_TARGET_LENGTH) {
+      return 'low';
+    }
   }
   const oneEdit = match.distance === undefined || match.distance === 1;
   const rank = match.targetRank;
@@ -436,7 +500,7 @@ export const typosquatCheck: Check = (ctx) => {
 
     findings.push({
       ruleId: 'typosquat',
-      severity: severityFor(match),
+      severity: severityFor(registryName, match),
       packageName: registryName,
       message:
         `"${registryName}"${via} ${describe(match.rule)} "${match.target}"${rankNote}. ` +
