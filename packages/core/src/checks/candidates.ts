@@ -22,6 +22,16 @@ import type { CheckContext } from './types.js';
 // - registry and alias protocols only. workspace/catalog/link/patch/file
 //   never reach the delta at all, and git/url dependencies are not
 //   registry names, so asking a registry corpus about them is meaningless.
+// - not a workspace-local package name (ctx.delta.workspaceLocalNames).
+//   npm gives a workspace sibling no distinguishing protocol -- unlike
+//   pnpm and yarn's "workspace:" specifier, which is already exempt via
+//   the protocol filter above -- so an npm sibling reaches this function
+//   looking exactly like an ordinary registry dependency. It is not one:
+//   nobody installs it from a registry, so it cannot be an unpublished or
+//   hallucinated name and it cannot be a typosquat of anything either.
+//   Checked here, once, for both name-based checks, rather than in each,
+//   because two checks each deciding for themselves what counts as
+//   workspace-local is how one of them ends up disagreeing.
 // - not on the allow list, matched against the registry name. Allowing the
 //   manifest key would make '"react": "npm:evil"' silent by writing
 //   'react', which is the alias attack rather than a defence against it.
@@ -68,6 +78,10 @@ export function newRegistryNames(ctx: CheckContext): NewName[] {
       // packageName would produce an unactionable row and a fingerprint
       // that collides with every other malformed alias.
       noteEmptyAlias(ctx, change);
+      continue;
+    }
+
+    if (ctx.delta.workspaceLocalNames.has(registryName)) {
       continue;
     }
 

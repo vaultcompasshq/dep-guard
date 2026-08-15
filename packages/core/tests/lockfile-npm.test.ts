@@ -116,6 +116,16 @@ describe('parseNpmLockfile entry extraction', () => {
     expect(result.entries.has('@test/app')).toBe(false);
   });
 
+  test('the link entry name is not simply dropped -- it is surfaced in workspaceLocalNames', () => {
+    const result = parseNpmLockfile(PATH, FIXTURE_CONTENT);
+    expect(result.workspaceLocalNames).toEqual(new Set(['@test/app']));
+  });
+
+  test('an ordinary registry dependency never appears in workspaceLocalNames', () => {
+    const result = parseNpmLockfile(PATH, FIXTURE_CONTENT);
+    expect(result.workspaceLocalNames.has('lodash')).toBe(false);
+  });
+
   test('the root "" entry is not in entries', () => {
     const result = parseNpmLockfile(PATH, FIXTURE_CONTENT);
     expect(result.entries.size).toBe(8);
@@ -130,6 +140,59 @@ describe('parseNpmLockfile entry extraction', () => {
   test('the fixture parses with no diagnostics', () => {
     const result = parseNpmLockfile(PATH, FIXTURE_CONTENT);
     expect(result.diagnostics).toEqual([]);
+  });
+});
+
+// Reproduces the real npm/cli shape: a workspace sibling declared with an
+// ordinary version range (npm gives it no "workspace:" specifier the way
+// pnpm and yarn do) and a "link": true entry in the lockfile that is the
+// only place recording that the name is local rather than a registry
+// install.
+describe('parseNpmLockfile workspaceLocalNames', () => {
+  const content = JSON.stringify({
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': {
+        name: 'npm',
+        version: '1.0.0',
+        dependencies: {
+          '@npmcli/mock-registry': '^1.0.0',
+          '@npmcli/mock-globals': '^1.0.0',
+          lodash: '^4.17.21',
+        },
+        workspaces: ['workspaces/mock-registry', 'workspaces/mock-globals'],
+      },
+      'workspaces/mock-registry': { name: '@npmcli/mock-registry', version: '1.0.0' },
+      'workspaces/mock-globals': { name: '@npmcli/mock-globals', version: '1.0.0' },
+      'node_modules/@npmcli/mock-registry': { resolved: 'workspaces/mock-registry', link: true },
+      'node_modules/@npmcli/mock-globals': { resolved: 'workspaces/mock-globals', link: true },
+      'node_modules/lodash': {
+        version: '4.17.21',
+        resolved: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
+        integrity: 'sha512-abc==',
+      },
+    },
+  });
+
+  test('every linked workspace member is in workspaceLocalNames', () => {
+    const result = parseNpmLockfile(PATH, content);
+    expect(result.workspaceLocalNames).toEqual(
+      new Set(['@npmcli/mock-registry', '@npmcli/mock-globals'])
+    );
+  });
+
+  test('linked entries stay out of entries, and a real registry dep is unaffected', () => {
+    const result = parseNpmLockfile(PATH, content);
+    expect(result.entries.has('@npmcli/mock-registry')).toBe(false);
+    expect(result.entries.has('@npmcli/mock-globals')).toBe(false);
+    expect(result.entries.get('lodash')).toEqual([
+      {
+        version: '4.17.21',
+        resolvedUrl: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
+        integrity: 'sha512-abc==',
+      },
+    ]);
   });
 });
 

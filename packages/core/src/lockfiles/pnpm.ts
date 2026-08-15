@@ -147,7 +147,7 @@ export function parsePnpmLockfile(path: string, content: string): ParsedLockfile
     // lockfileVersion 2 on), pnpm omits the "packages" key entirely when a
     // workspace has no external dependencies at all. That is valid-empty,
     // not corrupt.
-    return { format: 'pnpm', path, entries, diagnostics };
+    return { format: 'pnpm', path, entries, diagnostics, workspaceLocalNames: new Set() };
   }
   if (!isPlainObject(packages)) {
     // A lockfile with a "packages" key that is present but not a mapping
@@ -205,7 +205,7 @@ export function parsePnpmLockfile(path: string, content: string): ParsedLockfile
     }
   }
 
-  return { format: 'pnpm', path, entries, diagnostics };
+  return { format: 'pnpm', path, entries, diagnostics, workspaceLocalNames: new Set() };
 }
 
 // Merges the onlyBuiltDependencies allowlist from pnpm-workspace.yaml (the

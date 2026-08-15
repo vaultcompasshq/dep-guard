@@ -31,17 +31,23 @@
 // instead of walking four million names again to discover a few thousand
 // new ones.
 //
-// Where the popularity order comes from
-// -------------------------------------
-// Real download counts for four million packages are not obtainable -- no
-// endpoint will hand them over -- so top.json is seeded from a curated list
-// whose order reflects rough ecosystem prominence rather than measured
-// rank. --rank-downloads reorders that same list by last-week downloads
-// from the public downloads API, which IS answerable for a list this size.
-// meta.json records which of the two a given corpus used. See
-// lib/top-seed.mjs for the longer version; the short version is that the
-// order is used for a membership test and a severity threshold, and neither
-// needs an exact rank.
+// Where the popularity list comes from
+// ------------------------------------
+// scripts/data/top-packages.txt, a reviewed and versioned file in this
+// repository. Every name in it exists in a registry walk this project
+// performed and cleared a measured last-week download floor when the file
+// was built; its header records both, along with what nominated the name in
+// the first place. scripts/refresh-top-list.mjs is what rebuilds it, and
+// that is a deliberate command rather than something a corpus build does
+// behind anyone's back: a supply-chain tool that fetches its own trust data
+// from somebody else's server on every build is arguing against itself.
+//
+// --rank-downloads re-measures the same list against the downloads API now
+// and drops anything that no longer clears the floor, which is the same
+// verification the refresh script performs, done inline. It is slow for a
+// reason worth knowing: the bulk endpoint refuses scoped names, so every
+// scoped name costs a request of its own. meta.json records which of the
+// two a given corpus used.
 //
 // Two things this script refuses to do
 // ------------------------------------
@@ -50,7 +56,7 @@
 // that keys a name also present in the top list (lib/corpus-guards.mjs).
 // Both are silent failures in production and loud ones here.
 
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -78,12 +84,15 @@ import {
   DEFAULT_REPLICA,
   fetchAllDocsPage,
   fetchChangesPage,
-  fetchJson,
   fetchReplicaInfo,
-  readDownloadCounts,
-  splitDownloadBatches,
 } from './lib/registry.mjs';
-import { TOP_SEED } from './lib/top-seed.mjs';
+import {
+  DEFAULT_DOWNLOAD_FLOOR,
+  measureDownloads,
+  parseNameList,
+  presentIn,
+  selectPopular,
+} from './lib/top-list.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATE_VERSION = 1;
@@ -106,6 +115,10 @@ const DEFAULTS = {
   replica: DEFAULT_REPLICA,
   downloadsApi: DEFAULT_DOWNLOADS_API,
   maxNames: null,
+  // The shipped popularity list. Overridable with --top-file, which is what
+  // a test or an experiment uses; the default is the reviewed file.
+  topFile: path.join(REPO_ROOT, 'scripts', 'data', 'top-packages.txt'),
+  topFloor: DEFAULT_DOWNLOAD_FLOOR,
 };
 
 const USAGE = `Usage: node scripts/build-corpus.mjs [options]
@@ -121,8 +134,9 @@ const USAGE = `Usage: node scripts/build-corpus.mjs [options]
   --refresh            read _changes from the stored update sequence instead of walking
   --rebuild            discard the stored walk state and start from the first name
   --skip-fetch         build the artifacts from the existing name store, fetch nothing
-  --rank-downloads     order top.json by last-week downloads instead of curated order
-  --top-file <path>    newline-delimited popularity list, in order, replacing the seed
+  --rank-downloads     re-measure the popularity list against the downloads API
+  --top-floor <n>      downloads a name must clear under --rank-downloads (default ${DEFAULTS.topFloor})
+  --top-file <path>    popularity list to ship (default scripts/data/top-packages.txt)
   --aliases-file <p>   JSON object of confusion pairs, replacing the seed
   -h, --help           print this
 `;
@@ -137,13 +151,14 @@ function log(message) {
 }
 
 function parseArgs(argv) {
-  const options = { ...DEFAULTS, refresh: false, rebuild: false, skipFetch: false, rankDownloads: false, topFile: null, aliasesFile: null };
+  const options = { ...DEFAULTS, refresh: false, rebuild: false, skipFetch: false, rankDownloads: false, aliasesFile: null };
   const numeric = new Map([
     ['--fp-rate', 'fpRate'],
     ['--page-size', 'pageSize'],
     ['--max-names', 'maxNames'],
     ['--delay', 'delayMs'],
     ['--attempts', 'attempts'],
+    ['--top-floor', 'topFloor'],
   ]);
   const strings = new Map([
     ['--out', 'out'],
@@ -199,14 +214,22 @@ function formatBytes(bytes) {
 }
 
 function loadTopList(options) {
-  if (options.topFile === null) {
-    return { names: [...TOP_SEED], ordering: 'curated' };
+  const shipped = options.topFile === DEFAULTS.topFile;
+  if (!existsSync(options.topFile)) {
+    throw new Error(
+      `no popularity list at ${options.topFile}. ` +
+        (shipped
+          ? 'Run scripts/refresh-top-list.mjs to build one; a corpus without it would report ' +
+            'every popular package as a typosquat of its neighbour.'
+          : 'Check the path passed to --top-file.')
+    );
   }
-  const names = readFileSync(options.topFile, 'utf8')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith('#'));
-  return { names, ordering: 'supplied-file' };
+  const { names } = parseNameList(readFileSync(options.topFile, 'utf8'));
+  return {
+    names,
+    ordering: shipped ? 'verified-downloads-last-week' : 'supplied-file',
+    source: path.relative(REPO_ROOT, options.topFile),
+  };
 }
 
 function loadAliases(options) {
@@ -220,41 +243,49 @@ function loadAliases(options) {
   return parsed;
 }
 
-// Reorders the curated list by measured downloads. Names the API has no
-// answer for keep their curated position relative to each other and sort
-// below everything with a count, rather than being dropped: absence of a
-// download figure is not evidence of unpopularity, and dropping a name from
-// the top list turns it into a typosquat candidate.
-async function rankByDownloads(names, options, fetchOptions) {
-  const counts = new Map();
-  const batches = splitDownloadBatches(names);
-  let done = 0;
-  for (const batch of batches) {
-    const url = `${options.downloadsApi}/downloads/point/last-week/${batch.join(',')}`;
-    const payload = await fetchJson(url, fetchOptions);
-    for (const [name, value] of readDownloadCounts(payload, batch)) {
-      counts.set(name, value);
-    }
-    done += batch.length;
-    log(`  downloads: ${done}/${names.length}`);
-    await sleep(options.delayMs);
+// Re-runs the popularity list's own verification against live data: does
+// the walk still hold this name, and does the downloads API still report it
+// above the floor. A name that fails either is dropped rather than kept in
+// place, because the whole value of the list is that membership means
+// something, and a name nobody can measure any more is a name nobody has
+// checked.
+//
+// This is the same work scripts/refresh-top-list.mjs does, and it is slow
+// for the same reason: the bulk downloads endpoint refuses scoped names, so
+// each of those costs a request of its own against an API that sustains
+// about one a second.
+async function verifyTopList(names, namesPath, options, fetchOptions) {
+  const present = presentIn(readNames(namesPath), names);
+  const absent = names.length - present.size;
+  if (absent > 0) {
+    log(`  ${absent} listed name(s) are not in the walked name store and will be dropped`);
   }
 
-  const curatedRank = new Map(names.map((name, index) => [name, index]));
-  return [...names].sort((left, right) => {
-    const leftCount = counts.get(left);
-    const rightCount = counts.get(right);
-    if (leftCount === undefined && rightCount === undefined) {
-      return curatedRank.get(left) - curatedRank.get(right);
-    }
-    if (leftCount === undefined) {
-      return 1;
-    }
-    if (rightCount === undefined) {
-      return -1;
-    }
-    return rightCount - leftCount;
+  const startedAt = Date.now();
+  const counts = await measureDownloads({
+    names: names.filter((name) => present.has(name)),
+    downloadsApi: options.downloadsApi,
+    fetchOptions,
+    delayMs: options.delayMs,
+    onProgress: ({ done, total }) => {
+      if (done % 500 === 0 || done === total) {
+        const rate = done / Math.max(1, (Date.now() - startedAt) / 1000);
+        log(`  downloads: ${done}/${total}, about ${Math.round((total - done) / Math.max(rate, 0.01) / 60)}m left`);
+      }
+    },
   });
+
+  const { listed, dropped } = selectPopular({
+    candidates: names,
+    counts,
+    present,
+    floor: options.topFloor,
+  });
+  log(
+    `  kept ${listed.length}; dropped ${dropped.absent.length} absent, ` +
+      `${dropped.unmeasured.length} unmeasured, ${dropped.belowFloor.length} below ${options.topFloor}`
+  );
+  return listed.map((entry) => entry.name);
 }
 
 async function walkAllDocs(options, state, statePath, namesPath, fetchOptions) {
@@ -505,8 +536,8 @@ async function main() {
   let top = topSource.names;
   let ordering = topSource.ordering;
   if (options.rankDownloads) {
-    log('Ordering the top list by last-week downloads.');
-    top = await rankByDownloads(top, options, fetchOptions);
+    log(`Re-measuring ${top.length} listed name(s) against ${options.downloadsApi}.`);
+    top = await verifyTopList(top, namesPath, options, fetchOptions);
     ordering = 'downloads-last-week';
     assertTopListWellFormed(top);
     assertAliasKeysNotPopular(aliases, top);
@@ -541,6 +572,7 @@ async function main() {
     observedFpRate,
     topCount: top.length,
     topOrdering: ordering,
+    topSource: topSource.source,
     aliasCount: Object.keys(aliases).length,
     bitCount,
     hashCount,

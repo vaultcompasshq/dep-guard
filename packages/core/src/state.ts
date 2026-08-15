@@ -10,6 +10,13 @@ export interface RepoState {
   lockfile: ParsedLockfile | null;
   onlyBuilt: string[];
   npmrcRegistryPins: Map<string, string>;
+  // Every name this side's lockfile records as workspace-local (see
+  // ParsedLockfile.workspaceLocalNames). A straight carry of the
+  // lockfile's own field to the level checks actually read -- RepoState is
+  // the object the delta step consumes, so this is where the fact has to
+  // surface for computeDelta to pass it on, not a place that re-derives it
+  // by walking lockfile entries a second time.
+  workspaceLocalNames: ReadonlySet<string>;
 }
 
 const SCOPE_PIN_SUFFIX = ':registry';

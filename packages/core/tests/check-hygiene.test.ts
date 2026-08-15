@@ -46,6 +46,7 @@ function makeContext(changes: DepChange[], config: Partial<ResolvedConfig> = {})
     onlyBuiltAdded: [],
     lockfileFormat: 'npm',
     hasComparisonBase: true,
+    workspaceLocalNames: new Set(),
     diagnostics: [],
   };
   return {

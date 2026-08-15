@@ -40,6 +40,7 @@ function makeChange(overrides: Partial<DepChange> & { name: string }): DepChange
 interface ContextOptions {
   config?: Partial<ResolvedConfig>;
   corpus?: Corpus;
+  workspaceLocalNames?: Set<string>;
 }
 
 function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckContext {
@@ -52,6 +53,7 @@ function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckC
       onlyBuiltAdded: [],
       lockfileFormat: 'npm',
       hasComparisonBase: true,
+      workspaceLocalNames: options.workspaceLocalNames ?? new Set(),
       diagnostics: [],
     },
     npmrcRegistryPins: new Map<string, string>(),
@@ -337,6 +339,90 @@ describe('typosquatCheck: short targets', () => {
   });
 });
 
+// "@types/co" vs "@types/ms" is really "co" against "ms": an identical
+// scope contributes nothing to how different the names are, so comparing
+// (and sizing the short-target floor against) the full nine-character
+// string scores a two-character tail as though it were a long name, and
+// at distance 2 that means any two-character tail matches any other.
+describe('typosquatCheck: scoped names compare on the differing tail', () => {
+  const scopedCorpus = writeCorpus(['@types/ms', 'react', 'vue']);
+
+  test('a two-character tail two edits from another top-list tail under the same scope is not reported', () => {
+    // This is the exact repro against jest's real dependency tree:
+    // "@types/co" was reported as a typosquat of "@types/ms". Once the
+    // comparison runs on the tail ("co" vs "ms"), the short-tail band
+    // (maxK 1, same as any other <= 6 character name) excludes a
+    // distance-2 pair outright, the way it already would for the
+    // unscoped "co" against "ms".
+    const findings = findingsFor('@types/co', { corpus: scopedCorpus });
+    expect(findings).toEqual([]);
+  });
+
+  test('a one-edit tail under the same scope still matches, but at the short-target floor', () => {
+    // 'p' and 'm' are not QWERTY neighbours, so this reaches distanceMatch
+    // rather than keyboardMatch.
+    const findings = findingsFor('@types/ps', { corpus: scopedCorpus });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('low');
+    expect(findings[0].details).toMatchObject({
+      matchedBy: 'edit-distance',
+      target: '@types/ms',
+      distance: 1,
+    });
+  });
+
+  // 'n' and 'm' are QWERTY neighbours, so this is a keyboard-adjacency
+  // match rather than a plain distance-1 one -- the same short-tail floor
+  // has to apply to that rule too, not just edit-distance.
+  test('a keyboard-adjacency tail hit under the same scope is also floored to low', () => {
+    const findings = findingsFor('@types/ns', { corpus: scopedCorpus });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].details).toMatchObject({ matchedBy: 'keyboard-adjacency' });
+    expect(findings[0].severity).toBe('low');
+  });
+
+  test('a same-scope precise transform (not edit-distance or keyboard) keeps its severity on a short tail', () => {
+    // "sm" is an adjacent transposition of "ms" -- a precise rule, not the
+    // imprecise pair the short-target floor exists for, so this is
+    // unaffected by the fix and stays critical exactly as an unscoped
+    // transposition would.
+    const findings = findingsFor('@types/sm', { corpus: scopedCorpus });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('critical');
+    expect(findings[0].details).toMatchObject({
+      matchedBy: 'character-transposition',
+      target: '@types/ms',
+    });
+  });
+
+  test('a different scope with the identical short tail is not tail-compared, and keeps full-string severity', () => {
+    // Only the scope differs (an extra "x" in "typesx" vs "types"); the
+    // tail "ms" is identical on both sides. Because the scopes are not the
+    // same, this must still be judged as the full-length strings, exactly
+    // as before the fix -- not floored to low just because the shared
+    // suffix happens to be short. ("typesx" is not a QWERTY neighbour
+    // substitution of "types" at any single position and the lengths
+    // differ, so this reaches distanceMatch rather than keyboardMatch.)
+    const findings = findingsFor('@typesx/ms', { corpus: scopedCorpus });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('critical');
+    expect(findings[0].details).toMatchObject({
+      matchedBy: 'edit-distance',
+      target: '@types/ms',
+      distance: 1,
+    });
+  });
+
+  test('an unscoped short name is unaffected by the scoped-tail change', () => {
+    // Regression guard: 'hue' one edit from 'vue' must still be the
+    // already-existing unscoped short-target behaviour.
+    const findings = findingsFor('hue');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('low');
+    expect(findings[0].details).toMatchObject({ matchedBy: 'edit-distance', target: 'vue' });
+  });
+});
+
 describe('typosquatCheck: severity by target rank', () => {
   test('a distance-1 hit on a top-1000 target is critical', () => {
     const findings = findingsFor('pkg-0500x', { corpus: deepCorpus });
@@ -409,6 +495,19 @@ describe('typosquatCheck: scope of the check', () => {
   test('a workspace-protocol dependency is not checked', () => {
     const findings = typosquatCheck(
       makeContext([makeChange({ name: 'raect', protocol: 'workspace', specifier: 'workspace:*' })])
+    );
+    expect(findings).toEqual([]);
+  });
+
+  // A workspace-local package (an npm sibling, marked in the delta rather
+  // than by protocol -- see candidates.ts) is never installed from a
+  // registry, so it cannot be a typosquat of anything on the popularity
+  // list, however close the two names happen to look.
+  test('a workspace-local name is not checked, even one edit from a top-list name', () => {
+    const findings = typosquatCheck(
+      makeContext([makeChange({ name: 'raect', specifier: '^1.0.0' })], {
+        workspaceLocalNames: new Set(['raect']),
+      })
     );
     expect(findings).toEqual([]);
   });

@@ -1,34 +1,26 @@
-// The seed for top.json: an ordered list of npm package names that the
-// typosquat check measures candidate names against.
+// A hand-curated list of npm package names, kept as one of the candidate
+// sources scripts/refresh-top-list.mjs feeds into the popularity list.
 //
-// What this ordering is, stated plainly so nobody later reads it as
-// something it is not. It is a hand-curated ranking of ecosystem prominence
-// -- how likely a name is to be one an author meant to type -- assembled by
-// reading the registry's own most-depended-upon and most-downloaded lists
-// and grouping by rough tier, not by pulling an exact number for each name.
-// Positions inside a tier are arbitrary. It is NOT download rank, and two
-// adjacent entries are not claimed to be ordered relative to each other.
+// This used to BE the popularity list, and it is worth saying plainly why
+// it no longer is. It is five hundred and thirty names grouped by rough
+// ecosystem prominence, where the typosquat check's design assumes ten
+// thousand or more. A list that small does not fail loudly: it produces a
+// steady drip of confident false positives, because a popular package
+// absent from the list is not exempt from the rule and so gets reported as
+// a squat of whichever popular neighbour it happens to resemble. micromatch
+// against picomatch, npm-run-all2 against npm-run-all, and tempy against
+// temp all came from exactly that.
 //
-// That imprecision is affordable because of what the rank is used for. The
-// check reads rank in exactly two ways: to decide that a name in the list
-// is not a squat of another name in the list, which only needs membership;
-// and to split severity at a rank threshold, which only needs the list to
-// be roughly monotonic across tiers. Nothing keys off an exact position.
+// So what ships now is scripts/data/top-packages.txt, where every name has
+// been checked against a registry walk and against measured downloads. This
+// list survives as a candidate source, and only as that: a name here is
+// proposed, not listed, and it earns a place by clearing the same two
+// checks as any other candidate. Carrying it forward means replacing a
+// hand-written list cannot silently drop a name somebody once had a reason
+// to add.
 //
-// Real download counts for the whole registry are not obtainable -- there
-// is no bulk endpoint that will hand over four million counts -- but they
-// ARE obtainable for a list this size, 128 names per request, from the
-// public downloads API. `build-corpus.mjs --rank-downloads` does exactly
-// that and reorders this seed by last-week downloads, recording
-// `topOrdering: "downloads-last-week"` in meta.json so the provenance of a
-// given corpus is readable from the corpus itself rather than inferred.
-// Without the flag, meta.json says `topOrdering: "curated"` and this
-// comment is the whole story.
-//
-// Membership matters more than order: a popular package missing from this
-// list is a package the typosquat check will happily report as a squat of
-// something it resembles. Adding a name is cheap; adding it in exactly the
-// right position is not required.
+// The order below is no longer used for anything. Rank in the shipped list
+// is measured downloads.
 
 export const TOP_SEED = Object.freeze([
   // Tier 1 -- names essentially every JavaScript project touches, directly

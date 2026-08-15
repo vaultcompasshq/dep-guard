@@ -398,6 +398,7 @@ function syntheticDelta(name: string): DependencyDelta {
     // no lockfile either, so nothing about this synthetic delta may be
     // read as "this changed".
     hasComparisonBase: false,
+    workspaceLocalNames: new Set(),
     diagnostics: [],
   };
 }

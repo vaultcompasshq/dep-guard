@@ -520,6 +520,57 @@ describe('manifest discovery', () => {
   });
 });
 
+// The real npm/cli shape: a workspace sibling is declared with an ordinary
+// version range (npm gives it no "workspace:" specifier the way pnpm and
+// yarn do), and only the lockfile's "link": true entry says it is local.
+describe('npm workspace-local names reach RepoState', () => {
+  test('a workspace sibling declared with a plain version range is in workspaceLocalNames', async () => {
+    await write(
+      'package.json',
+      manifestJson(
+        { '@npmcli/mock-registry': '^1.0.0' },
+        { name: 'npm', workspaces: ['workspaces/mock-registry'] }
+      )
+    );
+    await write(
+      'workspaces/mock-registry/package.json',
+      JSON.stringify({ name: '@npmcli/mock-registry', version: '1.0.0' })
+    );
+    await write(
+      'package-lock.json',
+      JSON.stringify({
+        lockfileVersion: 3,
+        requires: true,
+        packages: {
+          '': {
+            name: 'npm',
+            dependencies: { '@npmcli/mock-registry': '^1.0.0' },
+            workspaces: ['workspaces/mock-registry'],
+          },
+          'workspaces/mock-registry': { name: '@npmcli/mock-registry', version: '1.0.0' },
+          'node_modules/@npmcli/mock-registry': {
+            resolved: 'workspaces/mock-registry',
+            link: true,
+          },
+        },
+      })
+    );
+
+    const { after } = await loadStates(repo, { kind: 'audit' });
+
+    expect(after.workspaceLocalNames.has('@npmcli/mock-registry')).toBe(true);
+  });
+
+  test('with no lockfile at all, workspaceLocalNames is empty', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['packages/*'] }));
+    await write('packages/a/package.json', JSON.stringify({ name: '@test/a', version: '1.0.0' }));
+
+    const { after } = await loadStates(repo, { kind: 'audit' });
+
+    expect(after.workspaceLocalNames.size).toBe(0);
+  });
+});
+
 describe('onlyBuilt aggregation', () => {
   test('merges pnpm-workspace.yaml with every manifest pnpm block', async () => {
     await write('package.json', manifestJson({}, { pnpm: { onlyBuiltDependencies: ['fsevents'] } }));

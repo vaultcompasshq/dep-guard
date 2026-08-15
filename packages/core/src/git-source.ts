@@ -695,6 +695,7 @@ function manifestOnlyLockfile(format: 'yarn' | 'bun'): LockfileLoader {
         message: `${lockfilePath}: this lockfile format is not parsed; lockfile-backed checks fall back to manifest evidence for this scan`,
       },
     ],
+    workspaceLocalNames: new Set(),
   });
 }
 
@@ -709,6 +710,7 @@ function binaryLockfile(lockfilePath: string): ParsedLockfile {
         message: `${lockfilePath}: binary lockfiles cannot be inspected; lockfile-backed checks fall back to manifest evidence for this scan`,
       },
     ],
+    workspaceLocalNames: new Set(),
   };
 }
 
@@ -817,6 +819,10 @@ async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise
     // check. Skipping it would leave that check permanently empty.
     onlyBuilt: parseOnlyBuilt(workspaceYamlContent, manifests),
     npmrcRegistryPins: parseNpmrcPins(await source.read(NPMRC)),
+    // A straight carry of what the lockfile parser already discovered
+    // (npm's "link": true entries, one per workspace member); no
+    // directory or manifest is re-walked to reconstruct it here.
+    workspaceLocalNames: lockfile?.workspaceLocalNames ?? new Set(),
   };
 }
 

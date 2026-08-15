@@ -98,6 +98,16 @@ list, and a list of confusion pairs. It is not bundled yet. Until it is,
 useful for trying the CLI out and useless for real work -- it knows fifty
 package names.
 
+`scripts/build-corpus.mjs` walks the public registry replica for the names
+and reads the popularity list from `scripts/data/top-packages.txt`, which is
+checked into this repository rather than fetched. That file is a trust
+input: the typosquat rule exempts every name in it, so a name that got onto
+it wrongly would have bought immunity. Every name in it exists in a registry
+walk this project ran, and cleared a measured floor of ten thousand
+downloads in the last week from npm's own downloads API, at the time the
+file was built. Its header records both, and
+`scripts/refresh-top-list.mjs` is what rebuilds it.
+
 ## How it compares
 
 dep-guard is deliberately narrow. It reads manifests and lockfiles at the
