@@ -69,6 +69,17 @@ export interface DependencyDelta {
   // to decide, because the wrong default is a check asserting a change it
   // has no evidence for.
   hasComparisonBase: boolean;
+  // Package names the AFTER side's lockfile records as workspace-local
+  // (RepoState.workspaceLocalNames, itself a carry of
+  // ParsedLockfile.workspaceLocalNames -- see lockfiles/types.ts). A
+  // dependency whose registry name is in this set was never installed from
+  // a registry, so it cannot be an unpublished/hallucinated name and it
+  // cannot be a typosquat of anything either; candidates.ts's
+  // newRegistryNames is what both name-based checks share, and where this
+  // set is actually consulted, so it stays a single fact read once rather
+  // than two checks each deciding for themselves what "workspace-local"
+  // means.
+  workspaceLocalNames: ReadonlySet<string>;
 }
 
 const LOCKFILE_MISSING = 'lockfile-missing';
@@ -637,6 +648,7 @@ export function computeDelta(before: RepoState | null, after: RepoState): Depend
     onlyBuiltAdded: onlyBuiltDifference(before, after),
     lockfileFormat,
     hasComparisonBase: before !== null,
+    workspaceLocalNames: after.workspaceLocalNames,
     lockfilePath: after.lockfile?.path,
     diagnostics: dedupeDiagnostics([
       ...(before?.lockfile?.diagnostics ?? []),

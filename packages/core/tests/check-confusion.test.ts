@@ -66,6 +66,7 @@ function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckC
     onlyBuiltAdded: [],
     lockfileFormat: 'npm',
     hasComparisonBase: true,
+    workspaceLocalNames: new Set(),
     diagnostics: [],
   };
   return {

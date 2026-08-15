@@ -40,7 +40,11 @@ function makeChange(overrides: Partial<DepChange> & { name: string }): DepChange
   };
 }
 
-function makeContext(changes: DepChange[], config: Partial<ResolvedConfig> = {}): CheckContext {
+function makeContext(
+  changes: DepChange[],
+  config: Partial<ResolvedConfig> = {},
+  workspaceLocalNames: Set<string> = new Set()
+): CheckContext {
   return {
     corpus,
     config: { ...BASE_CONFIG, ...config },
@@ -50,6 +54,7 @@ function makeContext(changes: DepChange[], config: Partial<ResolvedConfig> = {})
       onlyBuiltAdded: [],
       lockfileFormat: 'npm',
       hasComparisonBase: true,
+      workspaceLocalNames,
       diagnostics: [],
     },
     npmrcRegistryPins: new Map<string, string>(),
@@ -185,6 +190,45 @@ describe('existenceCheck', () => {
   test('a workspace-protocol dependency is never checked', () => {
     const changes = [makeChange({ name: UNKNOWN, protocol: 'workspace', specifier: 'workspace:*' })];
     expect(existenceCheck(makeContext(changes))).toEqual([]);
+  });
+
+  // npm gives a workspace sibling no distinguishing protocol -- it is an
+  // ordinary "registry" dependency with a plain version range, and the
+  // fact that it is local instead lives in the lockfile's link entries
+  // (see lockfile-npm.test.ts and delta.test.ts). A name absent from the
+  // corpus for this reason is correct, not suspicious.
+  test('a name the delta marks workspace-local is never reported as unknown', () => {
+    const changes = [makeChange({ name: '@npmcli/mock-registry', specifier: '^1.0.0' })];
+    const context = makeContext(changes, {}, new Set(['@npmcli/mock-registry']));
+    expect(existenceCheck(context)).toEqual([]);
+  });
+
+  test('a workspace-local exemption does not cover an unrelated unknown name', () => {
+    const changes = [
+      makeChange({ name: UNKNOWN }),
+      makeChange({ name: '@npmcli/mock-registry', specifier: '^1.0.0' }),
+    ];
+    const context = makeContext(changes, {}, new Set(['@npmcli/mock-registry']));
+    const findings = existenceCheck(context);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].packageName).toBe(UNKNOWN);
+  });
+
+  // The exemption is matched on the resolved registry name, exactly like
+  // the allow list, so retargeting an alias at a workspace-local name
+  // silences it too -- there is nothing for a registry to resolve either
+  // way.
+  test('a workspace-local exemption is matched on the alias target', () => {
+    const changes = [
+      makeChange({
+        name: 'internal-docs',
+        registryName: '@npmcli/mock-registry',
+        protocol: 'alias',
+        specifier: 'npm:@npmcli/mock-registry@1.0.0',
+      }),
+    ];
+    const context = makeContext(changes, {}, new Set(['@npmcli/mock-registry']));
+    expect(existenceCheck(context)).toEqual([]);
   });
 
   test('a git-protocol dependency is never checked', () => {

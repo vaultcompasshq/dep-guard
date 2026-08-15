@@ -3,6 +3,7 @@ import { COMPARISON_TAMPER_SIGNALS } from '../src/tamper-signals.js';
 import { parseNpmrcPins, type RepoState } from '../src/state.js';
 import type { ManifestDep, ParsedManifest } from '../src/manifest.js';
 import type { LockEntry, LockfileFormat, ParsedLockfile } from '../src/lockfiles/types.js';
+import { parseNpmLockfile } from '../src/lockfiles/npm.js';
 import type { Diagnostic } from '../src/types.js';
 
 const ROOT = 'package.json';
@@ -30,6 +31,7 @@ function lockfile(
     format: 'npm' as LockfileFormat,
     path: 'package-lock.json',
     diagnostics: [],
+    workspaceLocalNames: new Set(),
     ...overrides,
     entries: new Map(entries),
   };
@@ -41,6 +43,7 @@ function state(manifests: ParsedManifest[], overrides: Partial<RepoState> = {}):
     lockfile: null,
     onlyBuilt: [],
     npmrcRegistryPins: new Map<string, string>(),
+    workspaceLocalNames: new Set(),
     ...overrides,
   };
 }
@@ -627,6 +630,63 @@ describe('computeDelta onlyBuilt', () => {
       state([manifest(ROOT, [])], { onlyBuilt: ['esbuild'] })
     );
     expect(delta.onlyBuiltAdded).toEqual([]);
+  });
+});
+
+// workspaceLocalNames is a straight carry of the AFTER side's
+// RepoState.workspaceLocalNames (itself a carry of the lockfile parser's
+// own field -- see lockfile-npm.test.ts) into the delta, so both name-based
+// checks read one fact instead of each re-deriving it from raw lockfile
+// entries.
+describe('computeDelta workspace-local names passthrough', () => {
+  test('the after side workspaceLocalNames set reaches the delta unchanged', () => {
+    const delta = computeDelta(
+      state([manifest(ROOT, [])]),
+      state([manifest(ROOT, [])], { workspaceLocalNames: new Set(['@npmcli/mock-registry']) })
+    );
+    expect(delta.workspaceLocalNames).toEqual(new Set(['@npmcli/mock-registry']));
+  });
+
+  test('an empty after side yields an empty set, not the before side\'s', () => {
+    const delta = computeDelta(
+      state([manifest(ROOT, [])], { workspaceLocalNames: new Set(['stale-sibling']) }),
+      state([manifest(ROOT, [])])
+    );
+    expect(delta.workspaceLocalNames).toEqual(new Set());
+  });
+
+  test('an npm workspace sibling declared with a plain version range reaches the delta as a change, and its name is in workspaceLocalNames', () => {
+    // Mirrors the real npm/cli shape: a sibling package is declared like
+    // any registry dependency (no "workspace:" specifier -- npm does not
+    // use one) and the lockfile is the only place that says it is local,
+    // via a "link": true entry.
+    const npmLockfile = parseNpmLockfile('package-lock.json', JSON.stringify({
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        '': {
+          name: 'npm',
+          version: '1.0.0',
+          dependencies: { '@npmcli/mock-registry': '^1.0.0' },
+          workspaces: ['workspaces/mock-registry'],
+        },
+        'workspaces/mock-registry': { name: '@npmcli/mock-registry', version: '1.0.0' },
+        'node_modules/@npmcli/mock-registry': { resolved: 'workspaces/mock-registry', link: true },
+      },
+    }));
+    const delta = computeDelta(
+      null,
+      state(
+        [
+          manifest(ROOT, [
+            dep('@npmcli/mock-registry', '^1.0.0'),
+          ]),
+        ],
+        { lockfile: npmLockfile, workspaceLocalNames: npmLockfile.workspaceLocalNames }
+      )
+    );
+    expect(delta.changes.map((c) => c.registryName)).toContain('@npmcli/mock-registry');
+    expect(delta.workspaceLocalNames.has('@npmcli/mock-registry')).toBe(true);
   });
 });
 

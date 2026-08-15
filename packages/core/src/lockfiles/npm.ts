@@ -55,6 +55,7 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
 
   const diagnostics: Diagnostic[] = [];
   const entries = new Map<string, LockEntry[]>();
+  const workspaceLocalNames = new Set<string>();
 
   const lockfileVersion = parsed.lockfileVersion;
   const versionNumber = typeof lockfileVersion === 'number' ? lockfileVersion : undefined;
@@ -70,7 +71,7 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
       code: 'npm-lockfile-v1',
       message: `${path}: lockfileVersion ${versionNumber ?? '(absent)'} has no "packages" map; upgrade to lockfileVersion 2 or 3 for dep-guard to inspect it`,
     });
-    return { format: 'npm', path, entries, diagnostics };
+    return { format: 'npm', path, entries, diagnostics, workspaceLocalNames: new Set() };
   }
 
   const packages = parsed.packages;
@@ -109,8 +110,14 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
       // node_modules segment) and a node_modules/<name> entry whose
       // "resolved" is the relative workspace path with "link": true.
       // That resolved value is not a registry or tarball URL, so keeping
-      // it would make host-comparison checks false-positive on every
-      // workspace package.
+      // it in `entries` would make host-comparison checks false-positive
+      // on every workspace package. The name is not thrown away, though:
+      // it is exactly the fact that this package is workspace-local
+      // rather than a registry install, and it is recorded in
+      // workspaceLocalNames for the name-based checks to read instead of
+      // treating this dependency's plain version-range specifier as an
+      // ordinary registry name.
+      workspaceLocalNames.add(name);
       continue;
     }
     // Two different packages-map keys can resolve to the same installed
@@ -129,5 +136,5 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
     }
   }
 
-  return { format: 'npm', path, entries, diagnostics };
+  return { format: 'npm', path, entries, diagnostics, workspaceLocalNames };
 }

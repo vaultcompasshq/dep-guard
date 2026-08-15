@@ -40,6 +40,7 @@ function makeChange(overrides: Partial<DepChange> & { name: string }): DepChange
 interface ContextOptions {
   config?: Partial<ResolvedConfig>;
   corpus?: Corpus;
+  workspaceLocalNames?: Set<string>;
 }
 
 function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckContext {
@@ -52,6 +53,7 @@ function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckC
       onlyBuiltAdded: [],
       lockfileFormat: 'npm',
       hasComparisonBase: true,
+      workspaceLocalNames: options.workspaceLocalNames ?? new Set(),
       diagnostics: [],
     },
     npmrcRegistryPins: new Map<string, string>(),
@@ -409,6 +411,19 @@ describe('typosquatCheck: scope of the check', () => {
   test('a workspace-protocol dependency is not checked', () => {
     const findings = typosquatCheck(
       makeContext([makeChange({ name: 'raect', protocol: 'workspace', specifier: 'workspace:*' })])
+    );
+    expect(findings).toEqual([]);
+  });
+
+  // A workspace-local package (an npm sibling, marked in the delta rather
+  // than by protocol -- see candidates.ts) is never installed from a
+  // registry, so it cannot be a typosquat of anything on the popularity
+  // list, however close the two names happen to look.
+  test('a workspace-local name is not checked, even one edit from a top-list name', () => {
+    const findings = typosquatCheck(
+      makeContext([makeChange({ name: 'raect', specifier: '^1.0.0' })], {
+        workspaceLocalNames: new Set(['raect']),
+      })
     );
     expect(findings).toEqual([]);
   });

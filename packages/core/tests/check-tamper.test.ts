@@ -73,6 +73,7 @@ function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckC
     // produces.
     lockfilePath: 'lockfilePath' in options ? options.lockfilePath : 'package-lock.json',
     hasComparisonBase: true,
+    workspaceLocalNames: new Set(),
     diagnostics: [],
   };
   return {

@@ -47,4 +47,16 @@ export interface ParsedLockfile {
   // can't decide.
   entries: Map<string, LockEntry[]>;
   diagnostics: Diagnostic[];
+  // Names this lockfile itself says are workspace-local rather than a
+  // registry install. npm records a "link": true entry for every workspace
+  // member alongside its ordinary entries, and that is the ONLY place this
+  // fact is recorded for npm: an npm workspace sibling is declared with a
+  // plain version range, indistinguishable from a registry dependency by
+  // the manifest alone (unlike pnpm and yarn, which mark it with a
+  // "workspace:" specifier the manifest walk already exempts). Populated
+  // by the npm parser from those link entries; every other format leaves
+  // it empty because its workspace members are already exempt earlier, at
+  // the manifest/specifier level. This is discovered once, here, at parse
+  // time, and carried forward rather than re-derived by a check.
+  workspaceLocalNames: Set<string>;
 }
