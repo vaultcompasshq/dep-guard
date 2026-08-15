@@ -170,7 +170,6 @@ describe('typosquatCheck: transform rules', () => {
   test('a flattened scope matches the scoped top-list name', () => {
     const findings = findingsFor('babel-core');
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
     expect(findings[0].details).toMatchObject({
       matchedBy: 'scope-flattening',
       target: '@babel/core',
@@ -219,7 +218,6 @@ describe('typosquatCheck: transform rules', () => {
   test('an adjacent transposition matches within a short name', () => {
     const findings = findingsFor('lodahs');
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
     expect(findings[0].details).toMatchObject({
       matchedBy: 'character-transposition',
       target: 'lodash',
@@ -229,21 +227,15 @@ describe('typosquatCheck: transform rules', () => {
   test('the react transposition matches as well', () => {
     const findings = findingsFor('raect');
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
     expect(findings[0].details).toMatchObject({
       matchedBy: 'character-transposition',
       target: 'react',
     });
   });
 
-  // A transposition in a long name would be distance 2, and therefore only
-  // high, if the distance rule reached it first. Reporting it as a
-  // transform instead is what makes it critical, so the escalation is
-  // pinned deliberately rather than left to rule ordering.
-  test('a transposition in a long name is critical rather than distance-2 high', () => {
+  test('a transposition in a long name matches as a transform rather than a distance-2 hit', () => {
     const findings = findingsFor('typescirpt');
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
     expect(findings[0].details).toMatchObject({
       matchedBy: 'character-transposition',
       target: 'typescript',
@@ -253,7 +245,6 @@ describe('typosquatCheck: transform rules', () => {
   test('a neighbouring key substitution matches on QWERTY', () => {
     const findings = findingsFor('reqct');
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
     expect(findings[0].details).toMatchObject({
       matchedBy: 'keyboard-adjacency',
       target: 'react',
@@ -271,7 +262,6 @@ describe('typosquatCheck: banded distance', () => {
   test('an omitted character is a distance-1 hit', () => {
     const findings = findingsFor('rect');
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
     expect(findings[0].details).toMatchObject({
       matchedBy: 'edit-distance',
       target: 'react',
@@ -289,14 +279,9 @@ describe('typosquatCheck: banded distance', () => {
     });
   });
 
-  test('a distance-2 hit is high rather than critical', () => {
-    expect(findingsFor('comandr')[0].severity).toBe('high');
-  });
-
-  test('a long name at distance 1 is critical', () => {
+  test('a long name at distance 1 also matches', () => {
     const findings = findingsFor('typescrpt');
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
     expect(findings[0].details).toMatchObject({ target: 'typescript', distance: 1 });
   });
 
@@ -305,45 +290,11 @@ describe('typosquatCheck: banded distance', () => {
   });
 });
 
-// One edit against a three-character target mutates a third of the name,
-// so "hue" resembling "vue" is arithmetic rather than evidence. These stay
-// visible but below the default gate; the precise rules (alias list and
-// the transforms other than keyboard adjacency) are unaffected.
-describe('typosquatCheck: short targets', () => {
-  test('a distance hit on a short target is low', () => {
-    const findings = findingsFor('hue');
-    expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('low');
-    expect(findings[0].details).toMatchObject({ matchedBy: 'edit-distance', target: 'vue' });
-  });
-
-  test('a keyboard-adjacency hit on a short target is low', () => {
-    const findings = findingsFor('due');
-    expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('low');
-    expect(findings[0].details).toMatchObject({ matchedBy: 'keyboard-adjacency', target: 'vue' });
-  });
-
-  test('a precise transform on a short target keeps its severity', () => {
-    const findings = findingsFor('vuee');
-    expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
-    expect(findings[0].details).toMatchObject({
-      matchedBy: 'character-repetition',
-      target: 'vue',
-    });
-  });
-
-  test('a distance hit on a five-character target is still critical', () => {
-    expect(findingsFor('rect')[0].severity).toBe('critical');
-  });
-});
-
 // "@types/co" vs "@types/ms" is really "co" against "ms": an identical
 // scope contributes nothing to how different the names are, so comparing
-// (and sizing the short-target floor against) the full nine-character
-// string scores a two-character tail as though it were a long name, and
-// at distance 2 that means any two-character tail matches any other.
+// the full nine-character string scores a two-character tail as though it
+// were a long name, and at distance 2 that means any two-character tail
+// matches any other.
 describe('typosquatCheck: scoped names compare on the differing tail', () => {
   const scopedCorpus = writeCorpus(['@types/ms', 'react', 'vue']);
 
@@ -358,12 +309,11 @@ describe('typosquatCheck: scoped names compare on the differing tail', () => {
     expect(findings).toEqual([]);
   });
 
-  test('a one-edit tail under the same scope still matches, but at the short-target floor', () => {
+  test('a one-edit tail under the same scope still matches', () => {
     // 'p' and 'm' are not QWERTY neighbours, so this reaches distanceMatch
     // rather than keyboardMatch.
     const findings = findingsFor('@types/ps', { corpus: scopedCorpus });
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('low');
     expect(findings[0].details).toMatchObject({
       matchedBy: 'edit-distance',
       target: '@types/ms',
@@ -372,83 +322,75 @@ describe('typosquatCheck: scoped names compare on the differing tail', () => {
   });
 
   // 'n' and 'm' are QWERTY neighbours, so this is a keyboard-adjacency
-  // match rather than a plain distance-1 one -- the same short-tail floor
-  // has to apply to that rule too, not just edit-distance.
-  test('a keyboard-adjacency tail hit under the same scope is also floored to low', () => {
+  // match rather than a plain distance-1 one -- the tail comparison has to
+  // apply to that rule too, not just edit-distance.
+  test('a keyboard-adjacency tail hit under the same scope also matches', () => {
     const findings = findingsFor('@types/ns', { corpus: scopedCorpus });
     expect(findings).toHaveLength(1);
     expect(findings[0].details).toMatchObject({ matchedBy: 'keyboard-adjacency' });
-    expect(findings[0].severity).toBe('low');
   });
 
-  test('a same-scope precise transform (not edit-distance or keyboard) keeps its severity on a short tail', () => {
-    // "sm" is an adjacent transposition of "ms" -- a precise rule, not the
-    // imprecise pair the short-target floor exists for, so this is
-    // unaffected by the fix and stays critical exactly as an unscoped
-    // transposition would.
+  test('a same-scope transform (not edit-distance or keyboard) matches on a short tail', () => {
+    // "sm" is an adjacent transposition of "ms".
     const findings = findingsFor('@types/sm', { corpus: scopedCorpus });
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
     expect(findings[0].details).toMatchObject({
       matchedBy: 'character-transposition',
       target: '@types/ms',
     });
   });
 
-  test('a different scope with the identical short tail is not tail-compared, and keeps full-string severity', () => {
+  test('a different scope with the identical short tail is not tail-compared', () => {
     // Only the scope differs (an extra "x" in "typesx" vs "types"); the
     // tail "ms" is identical on both sides. Because the scopes are not the
     // same, this must still be judged as the full-length strings, exactly
-    // as before the fix -- not floored to low just because the shared
+    // as before the fix -- not tail-compared just because the shared
     // suffix happens to be short. ("typesx" is not a QWERTY neighbour
     // substitution of "types" at any single position and the lengths
     // differ, so this reaches distanceMatch rather than keyboardMatch.)
     const findings = findingsFor('@typesx/ms', { corpus: scopedCorpus });
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
     expect(findings[0].details).toMatchObject({
       matchedBy: 'edit-distance',
       target: '@types/ms',
       distance: 1,
     });
   });
-
-  test('an unscoped short name is unaffected by the scoped-tail change', () => {
-    // Regression guard: 'hue' one edit from 'vue' must still be the
-    // already-existing unscoped short-target behaviour.
-    const findings = findingsFor('hue');
-    expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('low');
-    expect(findings[0].details).toMatchObject({ matchedBy: 'edit-distance', target: 'vue' });
-  });
 });
 
-describe('typosquatCheck: severity by target rank', () => {
-  test('a distance-1 hit on a top-1000 target is critical', () => {
+// Confidence, not proximity or target rank, decides severity: see
+// severityFor in typosquat.ts. The alias list is 48 curated pairs from
+// documented registry incidents and stays blocking; every other rule here
+// is resemblance, measured against nine well maintained public
+// repositories at three false positives and zero true positives, so it
+// reports low -- visible to an auditor, out of the default gate.
+describe('typosquatCheck: severity by confidence', () => {
+  test('an alias-list match is critical', () => {
+    expect(findingsFor('unused-imports')[0].severity).toBe('critical');
+  });
+
+  test.each([
+    ['separator-swap', 'react_dom'],
+    ['scope-flattening', 'babel-core'],
+    ['character-repetition', 'reeact'],
+    ['character-transposition', 'raect'],
+    ['keyboard-adjacency', 'reqct'],
+    ['edit-distance', 'rect'],
+  ])('a %s match is low, however close the resemblance', (rule, name) => {
+    const findings = findingsFor(name);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].details).toMatchObject({ matchedBy: rule });
+    expect(findings[0].severity).toBe('low');
+  });
+
+  // Target rank still travels in details, unused by severity today, kept
+  // for the popularity-asymmetry work deferred to 0.2.0 (see INVARIANTS.md
+  // and TODO.local.md).
+  test('a match against a top-1000 target still records its rank', () => {
     const findings = findingsFor('pkg-0500x', { corpus: deepCorpus });
     expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
+    expect(findings[0].severity).toBe('low');
     expect(findings[0].details).toMatchObject({ target: 'pkg-0500', targetRank: 500 });
-  });
-
-  test('a distance-1 hit on a target past rank 1000 is high', () => {
-    const findings = findingsFor('pkg-1200x', { corpus: deepCorpus });
-    expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('high');
-    expect(findings[0].details).toMatchObject({ target: 'pkg-1200', targetRank: 1200 });
-  });
-
-  test('a transform hit on a top-1000 target is critical', () => {
-    const findings = findingsFor('pkg_0500', { corpus: deepCorpus });
-    expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('critical');
-    expect(findings[0].details).toMatchObject({ matchedBy: 'separator-swap' });
-  });
-
-  test('a transform hit on a target past rank 1000 is high', () => {
-    const findings = findingsFor('pkg_1200', { corpus: deepCorpus });
-    expect(findings).toHaveLength(1);
-    expect(findings[0].severity).toBe('high');
   });
 });
 
@@ -489,7 +431,7 @@ describe('typosquatCheck: scope of the check', () => {
     );
     expect(findings).toHaveLength(1);
     expect(findings[0].packageName).toBe('raect');
-    expect(findings[0].severity).toBe('critical');
+    expect(findings[0].details).toMatchObject({ matchedBy: 'character-transposition' });
   });
 
   test('a workspace-protocol dependency is not checked', () => {

@@ -28,10 +28,6 @@ import type { Check, CheckContext } from './types.js';
 // package names are attacker-controlled.
 
 const SHORT_NAME_MAX_LENGTH = 6;
-const CRITICAL_RANK_LIMIT = 1000;
-// Below this, a one-character difference stops being evidence: see
-// severityFor.
-const IMPRECISE_TARGET_LENGTH = 5;
 
 type MatchRule =
   | 'alias-list'
@@ -407,48 +403,23 @@ function matchName(name: string, ctx: CheckContext, index: TopIndex): Match | nu
   );
 }
 
-// Curated pairs are certain, and so is a one-edit resemblance to something
-// in the top thousand. A two-edit resemblance, or one to a less popular
-// package, is worth reporting but not worth calling certain.
-function severityFor(name: string, match: Match): Severity {
-  if (match.rule === 'alias-list') {
-    return 'critical';
-  }
-
-  // One edit against a three-character name mutates a third of it, so
-  // 'hue', 'sue', 'due' and 'cue' all sit one step from 'vue' without any
-  // of them being evidence of anything. The two rules that work by
-  // single-character substitution are demoted on short targets: the
-  // finding stays visible, but it does not block at the default gate. The
-  // precise rules (curated pairs, separators, scoping, repetition,
-  // transposition) still say what they always said, because each of those
-  // describes a specific mistake rather than mere proximity.
-  //
-  // When name and target share an identical scope, "short" is measured on
-  // the tail rather than the full string, for the same reason distanceMatch
-  // compares tails: the shared scope cannot be what makes the two names
-  // look alike, so it cannot be what makes a one-character difference
-  // inside a short tail look like evidence either. "@types/co" one edit
-  // from "@types/ms" is "co" from "ms", not a nine-character resemblance,
-  // and without this the floor never fires because it is measuring a
-  // string neither rule actually varied. A different scope is compared as
-  // the full string, same as ever -- the scope itself is then part of what
-  // makes the two names different, not a fixed prefix around the part that
-  // varies.
-  const imprecise = match.rule === 'edit-distance' || match.rule === 'keyboard-adjacency';
-  if (imprecise) {
-    const shared = sameScopeTails(name, match.target);
-    const targetLength = shared === null ? match.target.length : shared.targetTail.length;
-    if (targetLength < IMPRECISE_TARGET_LENGTH) {
-      return 'low';
-    }
-  }
-  const oneEdit = match.distance === undefined || match.distance === 1;
-  const rank = match.targetRank;
-  if (oneEdit && rank !== null && rank <= CRITICAL_RANK_LIMIT) {
-    return 'critical';
-  }
-  return 'high';
+// Confidence, not proximity, decides severity. The alias list is 48 pairs
+// curated from documented registry incidents -- each one a known confusion,
+// not a guess -- so it keeps the blocking severity a squat deserves.
+//
+// Every other rule here, distance and transform alike, is resemblance: it
+// says two names look alike, not that either has ever been confused with
+// the other in practice. The dogfood harness measured what that is worth
+// against nine well maintained public repositories -- three findings, all
+// of them false positives (a fork resembling what it forks, a deliberate
+// sibling pair, a maintained fork of a popular package), zero true
+// positives. That precision is not acceptable at a severity that blocks an
+// install, so every non-alias match reports low: visible to an auditor, out
+// of the default gate. See the README for how this is expected to change
+// once popularity asymmetry data lets a resemblance rule tell "unpopular"
+// from "merely absent from the list" (0.2.0).
+function severityFor(match: Match): Severity {
+  return match.rule === 'alias-list' ? 'critical' : 'low';
 }
 
 function describe(rule: MatchRule): string {
@@ -500,7 +471,7 @@ export const typosquatCheck: Check = (ctx) => {
 
     findings.push({
       ruleId: 'typosquat',
-      severity: severityFor(registryName, match),
+      severity: severityFor(match),
       packageName: registryName,
       message:
         `"${registryName}"${via} ${describe(match.rule)} "${match.target}"${rankNote}. ` +
