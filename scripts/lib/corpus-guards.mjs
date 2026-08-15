@@ -93,6 +93,10 @@ export function buildMeta(values) {
     observedFpRate: values.observedFpRate,
     topCount: values.topCount,
     topOrdering: values.topOrdering,
+    // Which file the popularity list was read from. A corpus that shipped a
+    // one-off list passed on the command line, rather than the reviewed one
+    // in the repository, should be able to say so about itself.
+    topSource: values.topSource,
     aliasCount: values.aliasCount,
     bitCount: values.bitCount,
     hashCount: values.hashCount,

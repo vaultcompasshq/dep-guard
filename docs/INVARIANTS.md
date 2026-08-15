@@ -581,3 +581,49 @@ The codes, and what each one means:
 
 Online checks are the one deliberate exception to failing closed: a network
 problem degrades to the offline result with a diagnostic, and never blocks.
+
+## The popularity list is a trust input, and it is sized for its own rule
+
+`scripts/data/top-packages.txt` is the list typosquat reads, and it is the
+only corpus artifact that grants something rather than describing it. A
+name in it is permanently exempt from being reported as a squat of
+anything, so getting a name onto it buys immunity from the rule. Four
+constraints follow, and none of them are conveniences.
+
+- **Every name is verified twice, independently, before it is listed.** It
+  has to exist in a walk of the registry this project performed itself, and
+  npm's downloads API has to report it above the usage floor, measured at
+  the time the list is built rather than claimed by whatever proposed it.
+  Nothing is listed because a ranking said it was popular.
+- **The floor is ten thousand downloads in the last week.** It is orders of
+  magnitude above what a package with no adopters receives and cannot be
+  reached by publishing alone, so clearing it means real installs. It is a
+  bar and not a proof: counts can be bought, which is why the other three
+  constraints exist.
+- **No third-party fetch at build time.** The list is checked in, reviewed
+  and diffed like source. A public ranking may nominate candidates, but it
+  is vendored into the repository with its version and integrity recorded
+  in the file header, read with a scanner rather than executed, and never
+  pulled from someone's server while a corpus is being built. A
+  supply-chain tool that fetches its own trust data from an unvetted source
+  on every build is arguing against itself.
+- **The list is sized for the rule that reads it.** Ten thousand names
+  minimum. A short list does not fail loudly; it produces confident false
+  positives, because a popular package that is absent is not exempt and so
+  gets reported as a squat of whichever popular neighbour it resembles.
+  This is not hypothetical: a five-hundred-name list reported micromatch as
+  a squat of picomatch, npm-run-all2 of npm-run-all, and `@types/jsesc` of
+  `@types/jest`.
+
+Scoped names are the case that goes wrong quietly. npm's bulk downloads
+endpoint refuses them, so they cost one request each where an unscoped name
+costs a hundred and twenty eighth of one, and a list assembled without
+noticing that ends up with no scoped names in it and no sign that anything
+is missing. They are measured one at a time instead. The residual gap, that
+a scoped package can only be listed if something nominated it, is written
+into the candidates file header rather than left to be discovered.
+
+The alias list is checked before this exemption, and `assertAliasKeysNotPopular`
+is what keeps the two from contradicting each other. That guard now runs
+against twenty thousand names rather than five hundred, so it is enforced in
+the test suite as well as in the corpus build.
