@@ -22,7 +22,25 @@ describe('loadConfig', () => {
       internalPrefixes: [],
       extraAliases: {},
       ignorePaths: [],
+      online: false,
     });
+  });
+
+  test('absent config files default online to false', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'depguard-config-'));
+    expect(loadConfig(dir).online).toBe(false);
+  });
+
+  test('online can be turned on in .dep-guard.json', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'depguard-config-'));
+    writeFileSync(path.join(dir, '.dep-guard.json'), JSON.stringify({ online: true }));
+    expect(loadConfig(dir).online).toBe(true);
+  });
+
+  test('a non-boolean online value throws config-invalid', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'depguard-config-'));
+    writeFileSync(path.join(dir, '.dep-guard.json'), JSON.stringify({ online: 'yes' }));
+    expect(() => loadConfig(dir)).toThrow(/online.*must be a boolean/);
   });
 
   test('reads values from .dep-guard.json', () => {
@@ -43,6 +61,7 @@ describe('loadConfig', () => {
       internalPrefixes: ['acme-'],
       extraAliases: { foo: ['bar'] },
       ignorePaths: ['vendor/'],
+      online: false,
     });
   });
 
@@ -268,6 +287,7 @@ describe('loadConfig', () => {
       internalPrefixes: [],
       extraAliases: {},
       ignorePaths: [],
+      online: false,
     });
   });
 });
