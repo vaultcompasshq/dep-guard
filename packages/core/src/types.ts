@@ -12,7 +12,8 @@ export type RuleId =
   | 'install-script'
   | 'lockfile-tamper'
   | 'version-hygiene'
-  | 'dependency-confusion';
+  | 'dependency-confusion'
+  | 'registered-squat';
 
 export interface Finding {
   ruleId: RuleId;
