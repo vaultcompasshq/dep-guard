@@ -164,4 +164,14 @@ describe('fetchPackument', () => {
       fetchPackument('some-pkg', { fetchImpl, sleepImpl: noSleep, attempts: 1 })
     ).rejects.toThrow(/socket hang up/);
   });
+
+  test('a package name containing "404" with a server error is not misclassified as absent', async () => {
+    // Regression test for 404 detection via message.includes() rather than
+    // status code. A package literally named "some-404-package" that gets a
+    // genuine 500 error should throw, not return null.
+    const fetchImpl = scriptedFetch([jsonResponse(null, { status: 500 })]);
+    await expect(
+      fetchPackument('some-404-package', { fetchImpl, sleepImpl: noSleep, attempts: 1 })
+    ).rejects.toThrow(/request failed: 500/);
+  });
 });
