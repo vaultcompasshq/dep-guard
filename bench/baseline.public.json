@@ -14,9 +14,9 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 276,
+          "total": 249,
           "byRule": {
-            "unknown-package": 258,
+            "unknown-package": 231,
             "typosquat": 0,
             "install-script": 18,
             "lockfile-tamper": 0,
@@ -26,7 +26,7 @@
           },
           "bySeverity": {
             "critical": 0,
-            "high": 258,
+            "high": 231,
             "medium": 0,
             "low": 18,
             "other": 0
@@ -208,10 +208,10 @@
             "other": 0
           },
           "bySeverity": {
-            "critical": 1,
+            "critical": 0,
             "high": 53,
             "medium": 0,
-            "low": 0,
+            "low": 1,
             "other": 0
           }
         },
@@ -269,10 +269,10 @@
             "other": 0
           },
           "bySeverity": {
-            "critical": 1,
+            "critical": 0,
             "high": 142,
             "medium": 0,
-            "low": 0,
+            "low": 1,
             "other": 0
           }
         },
@@ -332,8 +332,8 @@
           "bySeverity": {
             "critical": 0,
             "high": 332,
-            "medium": 19,
-            "low": 6,
+            "medium": 0,
+            "low": 25,
             "other": 0
           }
         },
@@ -453,9 +453,9 @@
           },
           "bySeverity": {
             "critical": 0,
-            "high": 85,
+            "high": 83,
             "medium": 0,
-            "low": 0,
+            "low": 2,
             "other": 0
           }
         },
