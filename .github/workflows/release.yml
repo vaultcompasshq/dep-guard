@@ -13,12 +13,23 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Serializes every release attempt across the whole repository, tag
+# triggered or workflow_dispatch, so a manual re-run overlapping a
+# tag-triggered run cannot both pass the "already published" check before
+# either publishes and race each other into a rejected duplicate-version
+# publish. Never cancel a run mid-publish; queue the next one instead.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
 
     steps:
     - name: Checkout code
@@ -112,14 +123,15 @@ jobs:
 
       - name: Install published package and assert it scans correctly
         shell: bash
+        env:
+          # Read from the release job's own output rather than recomputing
+          # the tag/version resolution a second time - two copies of that
+          # branching logic could drift and have the two jobs disagree on
+          # which version was just released.
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            TAG="${GITHUB_REF_NAME}"
-            VERSION="${TAG#v}"
-          else
-            VERSION="$(node -p "require('./packages/cli/package.json').version")"
-          fi
+          VERSION="${RELEASE_TAG#v}"
           echo "Smoke testing @vaultcompass/dep-guard@${VERSION}"
 
           FOUND=0
@@ -148,6 +160,15 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm install "@vaultcompass/dep-guard@${VERSION}"
 
+          # "totally-made-up-hallucinated-xyz123" is checked against the
+          # fixture's bloom filter, which has a nonzero false-positive rate
+          # by construction. That is a deterministic property of this exact
+          # string against this exact committed fixture, not a per-run coin
+          # flip - verified by hand not to collide as of the fixture in
+          # this checkout. If the fixture corpus is ever rebuilt and this
+          # starts colliding, this step fails every run, loudly, until the
+          # placeholder name below is swapped for one that doesn't; it does
+          # not fail silently or intermittently.
           set +e
           ./node_modules/.bin/dep-guard check react --corpus-dir "${CORPUS}" --format json > known-out.json
           KNOWN_EC=$?
