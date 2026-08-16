@@ -15,6 +15,7 @@ export interface ResolvedConfig {
   internalPrefixes: string[]; // 'acme-'
   extraAliases: Record<string, string[]>;
   ignorePaths: string[];
+  online: boolean; // turns on the registry-backed checks in packages/core/src/online/
 }
 
 // Everything a check may read, plus one thing it may write.
