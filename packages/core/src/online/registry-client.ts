@@ -79,9 +79,12 @@ export async function fetchJson(url: string, options: FetchOptions = {}): Promis
         return await response.json();
       }
       if (!isRetryableStatus(response.status)) {
-        throw new Error(`request failed: ${response.status} ${response.statusText} for ${url}`);
+        const err = new Error(`request failed: ${response.status} ${response.statusText} for ${url}`);
+        Object.assign(err, { status: response.status });
+        throw err;
       }
       lastError = new Error(`request failed: ${response.status} ${response.statusText}`);
+      Object.assign(lastError, { status: response.status });
     }
 
     if (attempt === attempts) {
@@ -191,7 +194,7 @@ export async function fetchPackument(name: string, options: FetchOptions = {}): 
     const payload = await fetchJson(`${registry}/${encodeURIComponent(name)}`, options);
     return readPackument(payload);
   } catch (err) {
-    if ((err as Error).message.includes('404')) {
+    if ((err as Error & { status?: number }).status === 404) {
       return null;
     }
     throw err;
