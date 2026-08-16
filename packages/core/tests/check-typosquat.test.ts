@@ -288,6 +288,24 @@ describe('typosquatCheck: banded distance', () => {
   test('a short name at distance 2 is out of band and silent', () => {
     expect(findingsFor('chulks')).toEqual([]);
   });
+
+  // Matching coverage for a target under IMPRECISE_TARGET_LENGTH's old
+  // floor (now retired from severity, but the matching itself still has
+  // to fire): a three-character target is the tightest case
+  // sameScopeTails and the short-name band have to handle correctly for
+  // an UNSCOPED name, where nameScope is null and the comparison runs on
+  // the full string rather than a tail.
+  test('a distance hit on a short unscoped target still matches', () => {
+    const findings = findingsFor('hue');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].details).toMatchObject({ matchedBy: 'edit-distance', target: 'vue' });
+  });
+
+  test('a keyboard-adjacency hit on a short unscoped target still matches', () => {
+    const findings = findingsFor('due');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].details).toMatchObject({ matchedBy: 'keyboard-adjacency', target: 'vue' });
+  });
 });
 
 // "@types/co" vs "@types/ms" is really "co" against "ms": an identical
@@ -391,6 +409,25 @@ describe('typosquatCheck: severity by confidence', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].severity).toBe('low');
     expect(findings[0].details).toMatchObject({ target: 'pkg-0500', targetRank: 500 });
+  });
+
+  // Matching coverage against a popularity list past the 50-name fixture:
+  // buildTopIndex's separatorForms/flattenedScopes maps are populated once
+  // per check run, first-writer-wins in rank order, and every other test
+  // in this file runs against the tiny fixture, which cannot exercise a
+  // regression that only shows up once the list is large. A transform
+  // match at a rank past the fixture's own size (deepCorpus goes to 1300)
+  // exercises that the maps are actually built correctly at scale, not
+  // just for the first few entries.
+  test('a transform match still fires against a target deep in a large popularity list', () => {
+    const findings = findingsFor('pkg_1200', { corpus: deepCorpus });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('low');
+    expect(findings[0].details).toMatchObject({
+      matchedBy: 'separator-swap',
+      target: 'pkg-1200',
+      targetRank: 1200,
+    });
   });
 });
 
