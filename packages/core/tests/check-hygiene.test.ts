@@ -327,4 +327,44 @@ describe('hygieneCheck: type-only packages are demoted', () => {
     const context = makeContext(changes, { allow: ['@types/node'] });
     expect(hygieneCheck(context)).toEqual([]);
   });
+
+  // The literal name '@types/' cannot exist on the registry, but the
+  // boundary guard is worth pinning anyway: it mirrors allow.ts's
+  // isAllowed scope-pattern check, and a bare startsWith without it would
+  // treat the prefix as matching itself.
+  test('the bare scope "@types/" is not treated as a type-only match', () => {
+    const changes = [makeChange({ name: '@types/', specifier: '*', depType: 'dependencies' })];
+    expect(hygieneCheck(makeContext(changes))[0].severity).toBe('medium');
+  });
+
+  // Regression: the merge tie-break used to compare each candidate's
+  // REPORTED severity, which a type-only package always collapses to
+  // 'low' regardless of section, so the choice of which depType survives
+  // into details silently became whichever DepChange arrived first. It
+  // has to compare the UNDEMOTED per-section severity instead, so
+  // dependencies (medium before demotion) is recorded as the surviving
+  // section over devDependencies (low before and after) regardless of
+  // arrival order -- an auditor reading details.depType should see the
+  // section that actually carries the runtime risk.
+  test('an @types wildcard in both dependencies and devDependencies keeps dependencies in details, dependencies first', () => {
+    const changes = [
+      makeChange({ name: '@types/node', specifier: '*', depType: 'dependencies' }),
+      makeChange({ name: '@types/node', specifier: '*', depType: 'devDependencies' }),
+    ];
+    const findings = hygieneCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('low');
+    expect(findings[0].details).toMatchObject({ depType: 'dependencies' });
+  });
+
+  test('an @types wildcard in both dependencies and devDependencies keeps dependencies in details, devDependencies first', () => {
+    const changes = [
+      makeChange({ name: '@types/node', specifier: '*', depType: 'devDependencies' }),
+      makeChange({ name: '@types/node', specifier: '*', depType: 'dependencies' }),
+    ];
+    const findings = hygieneCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('low');
+    expect(findings[0].details).toMatchObject({ depType: 'dependencies' });
+  });
 });
