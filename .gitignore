@@ -12,6 +12,7 @@ docs/superpowers/
 docs/sessions/
 docs/plans/
 .claude/
+.worktrees/
 
 # The resumable name store the corpus builder walks the registry into: one
 # line per package name, around ninety megabytes at full size. It is an
