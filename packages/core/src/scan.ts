@@ -22,7 +22,7 @@ import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
 import { applyTyposquatAsymmetry } from './online/asymmetry.js';
 import { findRegisteredSquats } from './online/registered-squat.js';
 import { defaultCachePath, loadCache } from './online/cache.js';
-import * as registryClient from './online/registry-client.js';
+import { fetchPackument, fetchWeeklyDownloads } from './online/registry-client.js';
 
 // Every check runs against one shared corpus + config + delta, in a fixed
 // order (RuleId's own declaration order in types.ts) so a scan's finding
@@ -218,7 +218,7 @@ async function cachedFetchWeeklyDownloads(names: string[]): Promise<Map<string, 
     }
   }
   if (misses.length > 0) {
-    const fetched = await registryClient.fetchWeeklyDownloads(misses);
+    const fetched = await fetchWeeklyDownloads(misses);
     for (const [name, count] of fetched) {
       result.set(name, count);
       store.set(`downloads:${name}`, count, DOWNLOADS_TTL_MS);
@@ -234,9 +234,21 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
   if (hit !== undefined) {
     return { createdAt: hit as string | null };
   }
-  const packument = await registryClient.fetchPackument(name);
-  store.set(`created:${name}`, packument?.createdAt ?? null, CREATED_TTL_MS);
-  store.save();
+  const packument = await fetchPackument(name);
+  // A real creation date never changes, so it is safe -- and worth doing
+  // -- to cache one forever (CREATED_TTL_MS). A MISSING one (a 404, or a
+  // malformed packument with no time.created) is exactly the
+  // registered-squat check's target scenario: a name that does not exist
+  // today can be attacker-registered tomorrow and absorbed by a corpus
+  // refresh. Caching that miss at all would pin "created: null" for the
+  // life of the cache file, making the check permanently blind to that
+  // name on any machine that happened to query it while it was still
+  // unregistered -- so a miss is never cached, and every scan re-checks
+  // it live instead.
+  if (packument?.createdAt != null) {
+    store.set(`created:${name}`, packument.createdAt, CREATED_TTL_MS);
+    store.save();
+  }
   return packument;
 }
 
