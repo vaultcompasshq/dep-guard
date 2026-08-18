@@ -59,6 +59,42 @@ const SEVERITY_BY_DEP_TYPE: Readonly<Record<DepType, Severity | null>> = {
   peerDependencies: null,
 };
 
+// An unpinned range is flagged because you do not know what code you will
+// get from it. That reasoning is about type-only packages, not about the
+// @types scope specifically: a package whose declarations are erased at
+// compile time ships no runtime code, so an unpinned range on one cannot
+// hand an attacker code that executes. @types is the only scope this rule
+// can currently recognize as type-only without registry metadata this
+// check does not have -- every DefinitelyTyped package lives there, and
+// nothing else does -- so it is what the check keys on, but the exemption
+// is conceptually about the property, not the scope. A future rule
+// widening detection to other type-only packages should read as extending
+// this same reasoning, not as a second, unrelated rule. It does NOT
+// already cover them: a type-only package published outside @types
+// (type-fest, csstype, ts-toolbelt, utility-types) still reports at full
+// severity today, exactly like any other runtime dependency, until
+// something can tell "type-only" apart from "ordinary" for a name that
+// carries no scope signal for it.
+//
+// Demoted rather than exempted: an auditor scanning the manifest should
+// still see that the range is unpinned, and install-script still covers
+// whatever residual risk a compromised @types package's install scripts
+// would carry. Only dependencies and optionalDependencies move -- both
+// scored medium, which blocks at the default gate -- because
+// devDependencies is already low and peerDependencies is already exempt.
+//
+// The boundary check mirrors allow.ts's isAllowed scope-pattern guard: the
+// prefix must be a strict prefix, not the whole name, so the literal
+// (unregistrable, but not worth trusting to never appear) name '@types/'
+// is not treated as matching itself.
+const TYPE_ONLY_SCOPE_PREFIX = '@types/';
+function isTypeOnlyPackage(registryName: string): boolean {
+  return (
+    registryName.length > TYPE_ONLY_SCOPE_PREFIX.length &&
+    registryName.startsWith(TYPE_ONLY_SCOPE_PREFIX)
+  );
+}
+
 const SEVERITY_RANK: Readonly<Record<Severity, number>> = {
   critical: 4,
   high: 3,
@@ -95,26 +131,31 @@ export const hygieneCheck: Check = (ctx) => {
     if (range === null || !FLAGGED_SPECIFIERS.has(range)) {
       continue;
     }
-    const severity = SEVERITY_BY_DEP_TYPE[change.depType];
-    if (severity === null) {
+    const declaredSeverity = SEVERITY_BY_DEP_TYPE[change.depType];
+    if (declaredSeverity === null) {
       continue;
     }
     if (isAllowed(change.registryName, config.allow)) {
       continue;
     }
+    const severity = isTypeOnlyPackage(change.registryName) ? 'low' : declaredSeverity;
 
     const key = JSON.stringify([change.manifestPath, change.registryName]);
     const existing = seen.get(key);
     if (existing !== undefined) {
       // One name declared in two sections collapses to one finding, because
-      // both would hash to the same fingerprint. Which severity survives is
-      // therefore decided by comparing them rather than by whichever the
-      // delta happened to produce first: a name that is a wildcard in both
-      // dependencies and devDependencies carries the runtime risk, and
-      // taking the first arrival would silently report it as low the day
-      // that ordering changed.
+      // both would hash to the same fingerprint. Which section survives into
+      // details.depType is decided by comparing the section's UNDEMOTED
+      // declared severity, not the possibly-demoted reported one: a
+      // type-only package collapses both dependencies and devDependencies to
+      // the same reported 'low', and comparing the reported severity would
+      // then leave the choice to whichever DepChange the delta happened to
+      // enumerate first -- silently misreporting which section actually
+      // carries the wildcard when it is in more than one.
       const kept = findings[existing];
-      if (SEVERITY_RANK[severity] > SEVERITY_RANK[kept.severity]) {
+      const keptDepType = (kept.details as Record<string, unknown>).depType as DepType;
+      const keptDeclaredSeverity = SEVERITY_BY_DEP_TYPE[keptDepType] as Severity;
+      if (SEVERITY_RANK[declaredSeverity] > SEVERITY_RANK[keptDeclaredSeverity]) {
         kept.severity = severity;
         (kept.details as Record<string, unknown>).depType = change.depType;
       }

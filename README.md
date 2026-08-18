@@ -40,13 +40,34 @@ Six rules, all offline and deterministic:
   hashes removed, forged, or downgraded to a weaker algorithm, and tarballs
   repointed within the same host.
 - **Version hygiene** -- wildcard and `latest` specifiers on new
-  dependencies.
+  dependencies. Demoted rather than exempted on `@types/*` packages: a
+  DefinitelyTyped package ships no runtime code, so an unpinned range on one
+  cannot hand an attacker code that executes, but it stays visible and
+  `install-script` still covers the residual risk of its own install
+  scripts.
 - **Dependency confusion** -- a scope pinned to a private registry that
   resolves from the public one, and internal names arriving from outside.
 
 Findings carry a severity and a stable fingerprint. A fingerprint survives
 version bumps and corpus refreshes, so a baseline you accept today keeps
 working tomorrow.
+
+**A known limitation in this release:** typosquat's curated confusion pairs
+(the 48 documented registry incidents, plus anything you add via
+`extraAliases`) block at the default threshold, as they always have.
+Everything else the check reports -- separator swaps, scope flattening,
+repeated or transposed characters, keyboard adjacency, and edit distance --
+is resemblance rather than a known confusion, and measuring it against nine
+well maintained public repositories found three findings, all of them false
+positives, and zero true positives. So for now those matches report at
+`low`: visible if you scan at `--fail-on low`, but out of the default gate.
+Lowering your own threshold to `low` or below re-enables them as blocking.
+This is expected to change once popularity data for the *candidate* side of
+a match, not just the target, lets the check tell "genuinely less popular"
+from "merely absent from the list" -- today's list can only say a name is
+unrecognized, not that it is unpopular, which is why a maintained fork of a
+popular package (which is legitimately less popular than what it forks) is
+indistinguishable from a squat by name resemblance alone.
 
 ## Usage
 
