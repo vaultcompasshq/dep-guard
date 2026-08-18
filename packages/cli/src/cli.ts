@@ -82,12 +82,14 @@ interface ScanCliOptions {
   format: string;
   failOn?: string;
   corpusDir?: string;
+  online?: boolean;
 }
 
 interface CheckCliOptions {
   format: string;
   failOn?: string;
   corpusDir?: string;
+  online?: boolean;
 }
 
 function resolveMode(options: ScanCliOptions): ScanMode {
@@ -183,6 +185,10 @@ function buildProgram(): Command {
       'severity threshold that fails the run: critical, high, medium, low, or none'
     )
     .option('--corpus-dir <dir>', 'override the corpus directory')
+    .option(
+      '--online',
+      'enable registry-backed checks: popularity asymmetry and registered-squat detection (network required)'
+    )
     .exitOverride()
     .action(async (targetPath: string, options: ScanCliOptions) => {
       try {
@@ -194,6 +200,7 @@ function buildProgram(): Command {
           mode,
           corpusDir: options.corpusDir,
           failOn,
+          online: options.online,
         });
         emit(result, format);
         process.exitCode = result.exitCode;
@@ -212,6 +219,10 @@ function buildProgram(): Command {
       'severity threshold that fails the run: critical, high, medium, low, or none'
     )
     .option('--corpus-dir <dir>', 'override the corpus directory')
+    .option(
+      '--online',
+      'enable registry-backed checks: popularity asymmetry and registered-squat detection (network required)'
+    )
     .exitOverride()
     .action(async (name: string, options: CheckCliOptions) => {
       try {
@@ -222,6 +233,7 @@ function buildProgram(): Command {
           name,
           corpusDir: options.corpusDir,
           failOn,
+          online: options.online,
         });
         emit(result, format);
         process.exitCode = result.exitCode;

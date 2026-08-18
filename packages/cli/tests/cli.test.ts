@@ -488,6 +488,39 @@ describe('bidi and zero-width characters are sanitized', () => {
   }, CLI_TIMEOUT_MS);
 });
 
+describe('--online flag', () => {
+  test('is accepted as a valid flag, not rejected as unknown', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const run = await runCli(
+      ['scan', '--online', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    // exitCode 0 (clean) or 1 (findings) are both fine here; 2 means the
+    // CLI itself rejected something, which --online must never do once it
+    // is a recognized flag. This test must not depend on real network
+    // access -- it only asserts the flag parses and reaches scan(), not
+    // any particular online-check outcome.
+    expect(run.exitCode).not.toBe(2);
+    expect(run.stderr).not.toContain('unknown option');
+  }, CLI_TIMEOUT_MS);
+
+  test('is accepted on check as well', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const run = await runCli(
+      ['check', 'react', '--online', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    expect(run.exitCode).not.toBe(2);
+    expect(run.stderr).not.toContain('unknown option');
+  }, CLI_TIMEOUT_MS);
+});
+
 describe('a first run with no corpus built yet', () => {
   test('omitting --corpus-dir produces an actionable message, not a bare internal path', async () => {
     await write('package.json', manifestJson({}));
