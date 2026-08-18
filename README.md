@@ -74,7 +74,10 @@ Off by default, permanently -- this tool reads manifests and lockfiles
 offline by design, and network calls do not belong in a hook or an MCP
 propose-time check that has to answer fast. Turn `--online` on for CI or a
 scheduled audit, where the latency cost is irrelevant, either via the flag
-or `.dep-guard.json`'s `"online": true`.
+or `.dep-guard.json`'s `"online": true`. Note that `.dep-guard.json`'s
+`"online": true` applies to every invocation, including pre-commit hooks,
+so a latency-sensitive setup may prefer passing `--online` only in CI
+rather than turning it on for every commit.
 
 Two checks, both backed by npm's public downloads and registry metadata
 APIs, both degrading to the offline result with a diagnostic on any network
