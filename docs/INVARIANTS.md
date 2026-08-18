@@ -533,7 +533,8 @@ Current diagnostic codes: `audit-anchor-differs`,
 `ignore-path-unmatched`, `lockfile-binary-skipped`,
 `lockfile-format-manifest-only`, `lockfile-missing`,
 `manifest-alias-empty`, `npm-lockfile-invalid-entry`, `npm-lockfile-v1`,
-`npmrc-pin-unparseable`, `pnpm-lockfile-invalid-entry`,
+`npmrc-pin-unparseable`, `online-check-unreachable`,
+`pnpm-lockfile-invalid-entry`,
 `pnpm-no-install-script-flag`, `tamper-resolution-unreadable`,
 `workspace-duplicate-directory`, `workspace-glob-unsupported`.
 
