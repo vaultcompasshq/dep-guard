@@ -31,6 +31,13 @@ export interface FetchOptions {
   registry?: string;
   userAgent?: string;
   onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
+  // Overrides BACKOFF_CAP_MS for both the exponential ladder and a
+  // server-supplied Retry-After. The corpus builder's patient batch jobs
+  // want the full 60s (and pass nothing, keeping the default); a live scan
+  // (a pre-commit hook, a CI step, an MCP propose-time call) reaches
+  // latency-sensitive callers and needs a much tighter ceiling so a single
+  // slow or rate-limited name cannot stall it for minutes.
+  backoffCapMs?: number;
 }
 
 // Retried: a transport failure, a rate limit, a request timeout, and
@@ -59,11 +66,16 @@ function parseRetryAfter(headerValue: string | null): number | null {
 // client is willing to wait.
 const BACKOFF_CAP_MS = 60_000;
 
-function backoffDelayMs(attempt: number, retryAfterSeconds: number | null, random: () => number): number {
+function backoffDelayMs(
+  attempt: number,
+  retryAfterSeconds: number | null,
+  random: () => number,
+  capMs: number = BACKOFF_CAP_MS
+): number {
   if (retryAfterSeconds !== null) {
-    return Math.min(BACKOFF_CAP_MS, Math.ceil(retryAfterSeconds * 1000));
+    return Math.min(capMs, Math.ceil(retryAfterSeconds * 1000));
   }
-  const base = Math.min(BACKOFF_CAP_MS, 1000 * 2 ** (attempt - 1));
+  const base = Math.min(capMs, 1000 * 2 ** (attempt - 1));
   return base + Math.floor(random() * 250);
 }
 
@@ -78,6 +90,7 @@ export async function fetchJson(url: string, options: FetchOptions = {}): Promis
     random = Math.random,
     userAgent = USER_AGENT,
     onRetry,
+    backoffCapMs = BACKOFF_CAP_MS,
   } = options;
 
   let lastError: Error | null = null;
@@ -110,7 +123,7 @@ export async function fetchJson(url: string, options: FetchOptions = {}): Promis
     }
     const retryAfter =
       response === null ? null : parseRetryAfter(response.headers.get('retry-after'));
-    const delayMs = backoffDelayMs(attempt, retryAfter, random);
+    const delayMs = backoffDelayMs(attempt, retryAfter, random, backoffCapMs);
     onRetry?.({ attempt, delayMs, reason: lastError?.message ?? 'unknown' });
     await sleepImpl(delayMs);
   }
@@ -153,6 +166,30 @@ function readDownloadCounts(payload: unknown, requested: string[]): Map<string, 
   return counts;
 }
 
+// A 404 from a single-name lookup means npm has no data for that exact
+// name -- unknown, unpublished, or (for a batch of exactly one unscoped
+// name, which the point endpoint also answers) simply never downloaded --
+// and that is precisely the bulk endpoint's own semantics for a name it has
+// no data for: a null entry, which readDownloadCounts already omits rather
+// than reports as zero. Treating a 404 as "omit this name" rather than "the
+// whole lookup failed" keeps that semantics uniform across both request
+// shapes, and keeps one hallucinated name from discarding every other
+// name's already-fetched results, bulk batches included. Any other failure
+// (a timeout, a 5xx after retries, a malformed response) still propagates,
+// so the caller's degrade-on-failure wrapper can tell "some names could not
+// be checked" from "nothing could be checked".
+async function fetchDownloadCounts(url: string, requested: string[], options: FetchOptions): Promise<Map<string, number>> {
+  try {
+    const payload = await fetchJson(url, options);
+    return readDownloadCounts(payload, requested);
+  } catch (err) {
+    if ((err as Error & { status?: number }).status === 404) {
+      return new Map();
+    }
+    throw err;
+  }
+}
+
 export async function fetchWeeklyDownloads(
   names: string[],
   options: FetchOptions = {}
@@ -162,16 +199,14 @@ export async function fetchWeeklyDownloads(
 
   for (const batch of splitDownloadBatches(names)) {
     const url = `${downloadsApi}/downloads/point/last-week/${batch.join(',')}`;
-    const payload = await fetchJson(url, options);
-    for (const [name, count] of readDownloadCounts(payload, batch)) {
+    for (const [name, count] of await fetchDownloadCounts(url, batch, options)) {
       counts.set(name, count);
     }
   }
 
   for (const name of names.filter((n) => n.startsWith('@'))) {
     const url = `${downloadsApi}/downloads/point/last-week/${encodeURIComponent(name)}`;
-    const payload = await fetchJson(url, options);
-    for (const [key, count] of readDownloadCounts(payload, [name])) {
+    for (const [key, count] of await fetchDownloadCounts(url, [name], options)) {
       counts.set(key, count);
     }
   }

@@ -145,6 +145,21 @@ describe('fetchJson', () => {
     expect(delays).toEqual([60_000]);
   });
 
+  test('honours a tighter backoffCapMs than the 60s default, for a latency-sensitive caller', async () => {
+    const { impl: sleepImpl, delays } = recordingSleep();
+    const fetchImpl = scriptedFetch([
+      jsonResponse(null, { status: 429, headers: { 'retry-after': '3600' } }),
+      jsonResponse({ ok: true }),
+    ]);
+    await fetchJson('https://example.invalid/x', {
+      fetchImpl,
+      sleepImpl,
+      attempts: 2,
+      backoffCapMs: 8_000,
+    });
+    expect(delays).toEqual([8_000]);
+  });
+
   test('rejects a blank or zero Retry-After and falls back to exponential backoff', async () => {
     const { impl: sleepImpl, delays } = recordingSleep();
     const fetchImpl = scriptedFetch([
@@ -236,6 +251,41 @@ describe('fetchWeeklyDownloads', () => {
     const fetchImpl = scriptedFetch([jsonResponse({ 'unknown-pkg': null })]);
     const counts = await fetchWeeklyDownloads(['unknown-pkg'], { fetchImpl, sleepImpl: noSleep });
     expect(counts.has('unknown-pkg')).toBe(false);
+  });
+
+  test('a scoped-name 404 leaves other names counts intact and omits only that name', async () => {
+    // The bulk batch (an unscoped name) answers first; the scoped name's
+    // individual point request 404s second. Regression test: a 404 on any
+    // single-name lookup used to throw out of the whole function,
+    // discarding the bulk batch's already-fetched results too.
+    const fetchImpl = scriptedFetch([
+      jsonResponse({ 'left-pad': { downloads: 10 } }),
+      jsonResponse(null, { status: 404 }),
+    ]);
+    const counts = await fetchWeeklyDownloads(['left-pad', '@scope/pkg'], {
+      fetchImpl,
+      sleepImpl: noSleep,
+    });
+    expect(counts.get('left-pad')).toBe(10);
+    expect(counts.has('@scope/pkg')).toBe(false);
+  });
+
+  test('a single-unscoped-name batch 404 returns an empty map rather than throwing', async () => {
+    // A batch of exactly one unscoped name answers in the same point form
+    // as a scoped name, so it can 404 for an unknown name the same way.
+    const fetchImpl = scriptedFetch([jsonResponse(null, { status: 404 })]);
+    const counts = await fetchWeeklyDownloads(['hallucinated-pkg'], {
+      fetchImpl,
+      sleepImpl: noSleep,
+    });
+    expect(counts.size).toBe(0);
+  });
+
+  test('a non-404 failure still propagates', async () => {
+    const fetchImpl = scriptedFetch([jsonResponse(null, { status: 500 })]);
+    await expect(
+      fetchWeeklyDownloads(['some-pkg'], { fetchImpl, sleepImpl: noSleep, attempts: 1 })
+    ).rejects.toThrow(/500/);
   });
 });
 

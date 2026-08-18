@@ -127,6 +127,13 @@ function parseArgs(argv) {
       throw new Error(`unknown option ${arg}`);
     }
   }
+  if (options.online && options.writeBaseline) {
+    throw new Error(
+      '--online and --write-baseline cannot be combined: the baseline records offline counts ' +
+        'only, and a network-dependent run would silently rebase it onto counts nobody else can ' +
+        'reproduce'
+    );
+  }
   return options;
 }
 
