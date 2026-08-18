@@ -25,7 +25,8 @@ scores it before anything is fetched.
 
 ## What it checks
 
-Six rules, all offline and deterministic:
+Six rules, all offline and deterministic (plus two optional online checks --
+see below):
 
 - **Unknown package** -- a new name absent from a corpus of real npm package
   names. The hallucination signal.
@@ -81,18 +82,19 @@ failure rather than blocking:
 
 - **Typosquat popularity asymmetry.** Escalates a non-alias-list typosquat
   match from `low` to `high` when the candidate's own weekly downloads sit
-  below a measured floor -- confirming the match is not just a name that
-  resembles something popular, but a package genuinely nobody uses.
+  below a measured floor of two thousand downloads in the last week --
+  confirming the match is not just a name that resembles something popular,
+  but a package genuinely nobody uses.
 - **Registered squat.** A new, `medium`-severity finding for a dependency
-  published very recently with next to no adoption. This exists because the
-  offline existence check reads a corpus snapshot: a name registered by an
-  attacker, then absorbed by a later corpus refresh, reads as "known"
-  forever afterward. This check has no resemblance filter to narrow its
-  candidates the way typosquat's does, so it is deliberately conservative
-  (both signals required, not either alone) and reports below `high` --
-  it carries the same false-positive risk as the existence check's own
-  known limitation below: a legitimately brand-new package looks identical
-  to a squat by age and downloads alone.
+  published within the last thirty days with fewer than fifty downloads in
+  the last week. This exists because the offline existence check reads a
+  corpus snapshot: a name registered by an attacker, then absorbed by a
+  later corpus refresh, reads as "known" forever afterward. This check has
+  no resemblance filter to narrow its candidates the way typosquat's does,
+  so it is deliberately conservative (both signals required, not either
+  alone) and reports below `high` -- it carries the same false-positive
+  risk the offline existence check has: a legitimately brand-new package
+  looks identical to a squat by age and downloads alone.
 
 ## Usage
 
@@ -121,6 +123,7 @@ Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
 ```json
 {
   "failOn": "medium",
+  "online": false,
   "allow": ["some-package", "@acme/*"],
   "internalScopes": ["@acme"],
   "internalPrefixes": ["acme-"],
