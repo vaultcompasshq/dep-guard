@@ -166,24 +166,32 @@ function readDownloadCounts(payload: unknown, requested: string[]): Map<string, 
   return counts;
 }
 
-// A 404 from a single-name lookup means npm has no data for that exact
-// name -- unknown, unpublished, or (for a batch of exactly one unscoped
-// name, which the point endpoint also answers) simply never downloaded --
-// and that is precisely the bulk endpoint's own semantics for a name it has
-// no data for: a null entry, which readDownloadCounts already omits rather
-// than reports as zero. Treating a 404 as "omit this name" rather than "the
-// whole lookup failed" keeps that semantics uniform across both request
-// shapes, and keeps one hallucinated name from discarding every other
-// name's already-fetched results, bulk batches included. Any other failure
-// (a timeout, a 5xx after retries, a malformed response) still propagates,
-// so the caller's degrade-on-failure wrapper can tell "some names could not
-// be checked" from "nothing could be checked".
+// A 404 from a single-name (point-form) lookup means npm has no data for
+// that exact name -- unknown, unpublished, or (for a batch of exactly one
+// unscoped name, which the point endpoint also answers) simply never
+// downloaded -- and that is precisely the bulk endpoint's own semantics for
+// a name it has no data for: a null entry, which readDownloadCounts already
+// omits rather than reports as zero. Treating a 404 as "omit this name"
+// rather than "the whole lookup failed" keeps that semantics uniform across
+// both request shapes, and keeps one hallucinated name from discarding
+// every other name's already-fetched results.
+//
+// This is gated on requested.length === 1 on purpose: a real bulk request
+// (more than one unscoped name) never answers 404 for an unknown name --
+// the bulk endpoint returns those as null entries inside a 200 -- so a 404
+// on a multi-name request means something else entirely (a misconfigured
+// downloadsApi, an endpoint path change, a URL-unsafe name reaching the
+// unencoded batch join) and has to propagate rather than be swallowed as
+// "omit every name in the batch". Silently returning an empty map for a
+// whole bulk batch would trade a loud failure for a silent one and rob the
+// caller's degrade-on-failure wrapper of the online-check-unreachable
+// diagnostic it exists to raise.
 async function fetchDownloadCounts(url: string, requested: string[], options: FetchOptions): Promise<Map<string, number>> {
   try {
     const payload = await fetchJson(url, options);
     return readDownloadCounts(payload, requested);
   } catch (err) {
-    if ((err as Error & { status?: number }).status === 404) {
+    if (requested.length === 1 && (err as Error & { status?: number }).status === 404) {
       return new Map();
     }
     throw err;

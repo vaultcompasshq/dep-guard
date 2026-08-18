@@ -287,6 +287,21 @@ describe('fetchWeeklyDownloads', () => {
       fetchWeeklyDownloads(['some-pkg'], { fetchImpl, sleepImpl: noSleep, attempts: 1 })
     ).rejects.toThrow(/500/);
   });
+
+  test('a multi-name bulk 404 propagates rather than resolving to an empty map', async () => {
+    // A real bulk request (more than one unscoped name) never 404s for an
+    // unknown name -- the bulk endpoint answers those as null entries
+    // inside a 200. A 404 here means something else (a misconfigured
+    // downloadsApi, an endpoint path change, a URL-unsafe name reaching the
+    // unencoded batch join), and swallowing it as "omit every name in the
+    // batch" would silently discard the whole batch with no diagnostic
+    // downstream. Only a single-name (point-form) request may treat a 404
+    // as "name not found".
+    const fetchImpl = scriptedFetch([jsonResponse(null, { status: 404 })]);
+    await expect(
+      fetchWeeklyDownloads(['pkg-a', 'pkg-b'], { fetchImpl, sleepImpl: noSleep, attempts: 1 })
+    ).rejects.toThrow(/404/);
+  });
 });
 
 describe('fetchPackument', () => {
