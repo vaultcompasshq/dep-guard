@@ -31,6 +31,7 @@ export const RULE_IDS = Object.freeze([
   'lockfile-tamper',
   'version-hygiene',
   'dependency-confusion',
+  'registered-squat',
 ]);
 
 export const LOCKFILE_FORMATS = Object.freeze(['npm', 'pnpm', 'yarn', 'bun', 'none']);
@@ -52,6 +53,7 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   'npm-lockfile-invalid-entry',
   'npm-lockfile-v1',
   'npmrc-pin-unparseable',
+  'online-check-unreachable',
   'pnpm-lockfile-invalid-entry',
   'pnpm-no-install-script-flag',
   'tamper-resolution-unreadable',

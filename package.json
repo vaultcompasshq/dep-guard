@@ -21,6 +21,7 @@
     "bench:local": "node bench/dogfood.mjs --tier local"
   },
   "devDependencies": {
+    "@jest/globals": "^30.4.1",
     "@types/jest": "^30.0.0",
     "@types/node": "^22.19.0",
     "jest": "^30.4.2",

@@ -64,11 +64,16 @@ interface CliRun {
   exitCode: number;
 }
 
-async function runCli(args: string[], cwd: string): Promise<CliRun> {
+async function runCli(
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv = {}
+): Promise<CliRun> {
   try {
     const { stdout, stderr } = await execFileAsync('node', [CLI_ENTRY, ...args], {
       cwd,
       encoding: 'utf8',
+      env: { ...process.env, ...env },
     });
     return { stdout, stderr, exitCode: 0 };
   } catch (err) {
@@ -485,6 +490,56 @@ describe('bidi and zero-width characters are sanitized', () => {
     // controls are stripped -- so the name still reads left-to-right in
     // the order it was actually written.
     expect(run.stdout).toContain('evil-gpj.ekcap');
+  }, CLI_TIMEOUT_MS);
+});
+
+describe('--online flag', () => {
+  test('is accepted as a valid flag, not rejected as unknown', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['scan', '--online', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    // exitCode 0 (clean) or 1 (findings) are both fine here; 2 means the
+    // CLI itself rejected something, which --online must never do once it
+    // is a recognized flag. An empty-dependencies manifest produces zero
+    // registered-squat/asymmetry candidates, so this run makes no network
+    // request at all -- genuinely network-free, not just tolerant of a
+    // failed one. XDG_CACHE_HOME is redirected to a throwaway temp dir
+    // regardless, so no future drift in this test can touch the real
+    // developer cache.
+    expect(run.exitCode).not.toBe(2);
+    expect(run.stderr).not.toContain('unknown option');
+  }, CLI_TIMEOUT_MS);
+
+  test('is accepted on check as well', async () => {
+    await write('package.json', manifestJson({}));
+    // Without this, "react" itself becomes a registered-squat candidate --
+    // the check runs over every added registry name, react included, with
+    // no built-in exemption for well-known packages -- and reaching that
+    // candidate makes checkSingle call fetchWeeklyDownloads, a real HTTPS
+    // request to api.npmjs.org. Allow-listing "react" empties the
+    // candidate set before any fetch happens, so this test proves --online
+    // parses on check and reaches checkSingle without ever making a live
+    // request (the degrade-on-failure path would otherwise make this test
+    // pass offline too, concealing the leak on a networked machine).
+    await write('.dep-guard.json', JSON.stringify({ allow: ['react'] }));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['check', 'react', '--online', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    expect(run.exitCode).not.toBe(2);
+    expect(run.stderr).not.toContain('unknown option');
   }, CLI_TIMEOUT_MS);
 });
 

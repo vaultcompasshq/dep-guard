@@ -21,6 +21,7 @@ const BASE_CONFIG: ResolvedConfig = {
   internalPrefixes: [],
   extraAliases: {},
   ignorePaths: [],
+  online: false,
 };
 
 function makeChange(overrides: Partial<DepChange> & { name: string }): DepChange {

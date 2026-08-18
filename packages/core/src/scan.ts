@@ -19,6 +19,10 @@ import { assertScannablePath, loadStates, matchGlobPath, resolveScanRoot } from 
 import type { ScanMode } from './git-source.js';
 import { DepGuardError } from './types.js';
 import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
+import { applyTyposquatAsymmetry } from './online/asymmetry.js';
+import { findRegisteredSquats } from './online/registered-squat.js';
+import { defaultCachePath, loadCache } from './online/cache.js';
+import { fetchPackument, fetchWeeklyDownloads } from './online/registry-client.js';
 
 // Every check runs against one shared corpus + config + delta, in a fixed
 // order (RuleId's own declaration order in types.ts) so a scan's finding
@@ -158,13 +162,13 @@ function runChecks(
   config: ResolvedConfig,
   delta: DependencyDelta,
   npmrcRegistryPins: Map<string, string>
-): { findings: Omit<Finding, 'fingerprint'>[]; diagnostics: Diagnostic[] } {
+): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
   const ctx: CheckContext = { corpus, config, delta, npmrcRegistryPins, diagnostics: [] };
   const findings: Omit<Finding, 'fingerprint'>[] = [];
   for (const check of CHECKS) {
     findings.push(...check(ctx));
   }
-  return { findings, diagnostics: ctx.diagnostics };
+  return { findings, ctx };
 }
 
 // Lets a caller (the CLI's --fail-on) override config.failOn for one
@@ -174,6 +178,103 @@ function runChecks(
 // config value instead.
 function applyFailOnOverride(config: ResolvedConfig, failOn: FailOn | undefined): ResolvedConfig {
   return failOn === undefined ? config : { ...config, failOn };
+}
+
+// Same shape as applyFailOnOverride: a caller's explicit online option wins
+// over config.online when given; when the caller passes nothing, config
+// decides. This is what lets the CLI's --online (or its absence) override
+// .dep-guard.json's "online" key rather than only ever adding to it.
+function resolveOnline(config: ResolvedConfig, online: boolean | undefined): boolean {
+  return online ?? config.online;
+}
+
+// Runs strictly after runChecks(): the six offline checks stay synchronous
+// and untouched by this. Uses one process-lifetime cache instance so a
+// single CLI invocation that calls scan() more than once (it does not
+// today, but checkSingle() and scan() could both run in one process via
+// the MCP server later) reuses one cache load rather than reading the
+// cache file from disk on every call.
+let cache: ReturnType<typeof loadCache> | null = null;
+function sharedCache(): ReturnType<typeof loadCache> {
+  if (cache === null) {
+    cache = loadCache(defaultCachePath());
+  }
+  return cache;
+}
+
+const DOWNLOADS_TTL_MS = 24 * 60 * 60 * 1000; // one day: the API answers a rolling weekly window
+const CREATED_TTL_MS: number | null = null; // a package's creation date never changes
+
+// The registry client's own default backoff cap (60s) is right for the
+// patient corpus builder, which pays this cost once per rebuild, but wrong
+// here: config's "online": true reaches a pre-commit hook, and a modest
+// delta with several rate-limited or slow names could otherwise stall a
+// commit for minutes in aggregate. A live scan gets a much tighter cap,
+// roughly matching the per-request budget SCAN_TIMEOUT_MS already sets.
+const SCAN_BACKOFF_CAP_MS = 8_000;
+
+async function cachedFetchWeeklyDownloads(names: string[]): Promise<Map<string, number>> {
+  const store = sharedCache();
+  const result = new Map<string, number>();
+  const misses: string[] = [];
+  for (const name of names) {
+    const hit = store.get(`downloads:${name}`);
+    if (typeof hit === 'number') {
+      result.set(name, hit);
+    } else {
+      misses.push(name);
+    }
+  }
+  if (misses.length > 0) {
+    const fetched = await fetchWeeklyDownloads(misses, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
+    for (const [name, count] of fetched) {
+      result.set(name, count);
+      store.set(`downloads:${name}`, count, DOWNLOADS_TTL_MS);
+    }
+  }
+  store.save();
+  return result;
+}
+
+async function cachedFetchPackument(name: string): Promise<{ createdAt: string | null } | null> {
+  const store = sharedCache();
+  const hit = store.get(`created:${name}`);
+  if (hit !== undefined) {
+    return { createdAt: hit as string | null };
+  }
+  const packument = await fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
+  // A real creation date never changes, so it is safe -- and worth doing
+  // -- to cache one forever (CREATED_TTL_MS). A MISSING one (a 404, or a
+  // malformed packument with no time.created) is exactly the
+  // registered-squat check's target scenario: a name that does not exist
+  // today can be attacker-registered tomorrow and absorbed by a corpus
+  // refresh. Caching that miss at all would pin "created: null" for the
+  // life of the cache file, making the check permanently blind to that
+  // name on any machine that happened to query it while it was still
+  // unregistered -- so a miss is never cached, and every scan re-checks
+  // it live instead.
+  if (packument?.createdAt != null) {
+    store.set(`created:${name}`, packument.createdAt, CREATED_TTL_MS);
+    store.save();
+  }
+  return packument;
+}
+
+async function enrichOnline(
+  rawFindings: Omit<Finding, 'fingerprint'>[],
+  ctx: CheckContext
+): Promise<Omit<Finding, 'fingerprint'>[]> {
+  await applyTyposquatAsymmetry(
+    rawFindings,
+    { fetchWeeklyDownloads: cachedFetchWeeklyDownloads },
+    ctx.diagnostics
+  );
+  const registeredSquats = await findRegisteredSquats(
+    ctx,
+    { fetchWeeklyDownloads: cachedFetchWeeklyDownloads, fetchPackument: cachedFetchPackument },
+    ctx.diagnostics
+  );
+  return [...rawFindings, ...registeredSquats];
 }
 
 interface RunInfo {
@@ -299,6 +400,7 @@ export async function scan(opts: {
   mode: ScanMode;
   corpusDir?: string;
   failOn?: FailOn;
+  online?: boolean;
 }): Promise<ScanResult> {
   const startedAt = Date.now();
   // Checked before anything else touches opts.repoRoot -- resolveScanRoot
@@ -327,14 +429,17 @@ export async function scan(opts: {
   const delta = computeDelta(statePair.before, statePair.after);
   const baseline = loadBaseline(root);
 
-  const { findings: rawFindings, diagnostics: checkDiagnostics } = runChecks(
+  const { findings: checkedFindings, ctx } = runChecks(
     corpus,
     config,
     delta,
     statePair.after.npmrcRegistryPins
   );
+  const rawFindings = resolveOnline(config, opts.online)
+    ? await enrichOnline(checkedFindings, ctx)
+    : checkedFindings;
 
-  const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...checkDiagnostics];
+  const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
   const { findings, suppressed, ignored } = applyPathFilters(rawFindings, config, baseline, diagnostics);
 
   return buildResult(findings, suppressed, ignored, config, {
@@ -419,6 +524,7 @@ export async function checkSingle(opts: {
   name: string;
   corpusDir?: string;
   failOn?: FailOn;
+  online?: boolean;
 }): Promise<ScanResult> {
   // An empty (or whitespace-only) name has no meaningful answer. Reporting
   // "safe" for it -- which an empty name would otherwise do, via a
@@ -448,12 +554,10 @@ export async function checkSingle(opts: {
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const delta = syntheticDelta(opts.name);
 
-  const { findings: rawFindings, diagnostics: checkDiagnostics } = runChecks(
-    corpus,
-    config,
-    delta,
-    new Map()
-  );
+  const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map());
+  const rawFindings = resolveOnline(config, opts.online)
+    ? await enrichOnline(checkedFindings, ctx)
+    : checkedFindings;
 
   const findings = skipPathFilters(rawFindings);
 
@@ -461,7 +565,7 @@ export async function checkSingle(opts: {
     mode: 'audit',
     lockfileFormat: delta.lockfileFormat,
     corpusBuiltAt: corpus.builtAt,
-    diagnostics: [...checkDiagnostics, NAME_ONLY_DIAGNOSTIC],
+    diagnostics: [...ctx.diagnostics, NAME_ONLY_DIAGNOSTIC],
     startedAt,
   });
 }

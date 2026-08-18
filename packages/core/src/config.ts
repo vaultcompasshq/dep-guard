@@ -20,6 +20,7 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'internalPrefixes',
   'extraAliases',
   'ignorePaths',
+  'online',
 ]);
 
 // Exported so the CLI can validate --fail-on against the exact same set
@@ -88,6 +89,7 @@ function defaultConfig(): ResolvedConfig {
     internalPrefixes: [],
     extraAliases: {},
     ignorePaths: [],
+    online: false,
   };
 }
 
@@ -173,6 +175,13 @@ function validateSection(raw: Record<string, unknown>, label: string): Partial<R
       );
     }
     result.failOn = raw.failOn as FailOn;
+  }
+
+  if (raw.online !== undefined) {
+    if (typeof raw.online !== 'boolean') {
+      throw new DepGuardError(`${label}: "online" must be a boolean`, 'config-invalid');
+    }
+    result.online = raw.online;
   }
 
   for (const key of STRING_ARRAY_KEYS) {

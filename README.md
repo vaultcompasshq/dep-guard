@@ -25,7 +25,8 @@ scores it before anything is fetched.
 
 ## What it checks
 
-Six rules, all offline and deterministic:
+Six rules, all offline and deterministic (plus two optional online checks --
+see below):
 
 - **Unknown package** -- a new name absent from a corpus of real npm package
   names. The hallucination signal.
@@ -62,12 +63,41 @@ well maintained public repositories found three findings, all of them false
 positives, and zero true positives. So for now those matches report at
 `low`: visible if you scan at `--fail-on low`, but out of the default gate.
 Lowering your own threshold to `low` or below re-enables them as blocking.
-This is expected to change once popularity data for the *candidate* side of
-a match, not just the target, lets the check tell "genuinely less popular"
-from "merely absent from the list" -- today's list can only say a name is
-unrecognized, not that it is unpopular, which is why a maintained fork of a
-popular package (which is legitimately less popular than what it forks) is
-indistinguishable from a squat by name resemblance alone.
+This is exactly what `--online` now addresses: turned on, a non-alias-list
+match escalates from `low` to `high` once the candidate's own weekly
+downloads confirm it is genuinely unpopular, not merely smaller than an
+extremely popular target -- see below.
+
+## Online checks (`--online`)
+
+Off by default, permanently -- this tool reads manifests and lockfiles
+offline by design, and network calls do not belong in a hook or an MCP
+propose-time check that has to answer fast. Turn `--online` on for CI or a
+scheduled audit, where the latency cost is irrelevant, either via the flag
+or `.dep-guard.json`'s `"online": true`. Note that `.dep-guard.json`'s
+`"online": true` applies to every invocation, including pre-commit hooks,
+so a latency-sensitive setup may prefer passing `--online` only in CI
+rather than turning it on for every commit.
+
+Two checks, both backed by npm's public downloads and registry metadata
+APIs, both degrading to the offline result with a diagnostic on any network
+failure rather than blocking:
+
+- **Typosquat popularity asymmetry.** Escalates a non-alias-list typosquat
+  match from `low` to `high` when the candidate's own weekly downloads sit
+  below a measured floor of two thousand downloads in the last week --
+  confirming the match is not just a name that resembles something popular,
+  but a package genuinely nobody uses.
+- **Registered squat.** A new, `medium`-severity finding for a dependency
+  published within the last thirty days with fewer than fifty downloads in
+  the last week. This exists because the offline existence check reads a
+  corpus snapshot: a name registered by an attacker, then absorbed by a
+  later corpus refresh, reads as "known" forever afterward. This check has
+  no resemblance filter to narrow its candidates the way typosquat's does,
+  so it is deliberately conservative (both signals required, not either
+  alone) and reports below `high` -- it carries the same false-positive
+  risk the offline existence check has: a legitimately brand-new package
+  looks identical to a squat by age and downloads alone.
 
 ## Usage
 
@@ -96,6 +126,7 @@ Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
 ```json
 {
   "failOn": "medium",
+  "online": false,
   "allow": ["some-package", "@acme/*"],
   "internalScopes": ["@acme"],
   "internalPrefixes": ["acme-"],
