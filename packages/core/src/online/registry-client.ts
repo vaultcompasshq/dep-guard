@@ -29,25 +29,41 @@ export interface FetchOptions {
   random?: () => number;
   downloadsApi?: string;
   registry?: string;
+  userAgent?: string;
+  onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
 }
 
+// Retried: a transport failure, a rate limit, a request timeout, and
+// anything the server calls its own fault. A 408 is retried because it is
+// transient by definition -- the server is telling us it gave up waiting,
+// not that the request itself is wrong.
 function isRetryableStatus(status: number): boolean {
-  return status === 429 || status >= 500;
+  return status === 429 || status === 408 || status >= 500;
 }
 
+// Requires a positive, non-empty numeric value: an empty string coerces to
+// 0 under Number(''), and a bare "0" is a value a server could genuinely
+// send, but honouring either as a zero-delay retry turns a rate limit into
+// a tight retry loop against the thing that just asked us to back off.
 function parseRetryAfter(headerValue: string | null): number | null {
-  if (headerValue === null) {
+  if (headerValue === null || headerValue.trim().length === 0) {
     return null;
   }
   const seconds = Number(headerValue);
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
+
+// Capped at 60s, including a server-supplied Retry-After: a server can ask
+// for an arbitrarily long wait, and honouring that without a cap parks a
+// batch job for as long as the server says rather than as long as this
+// client is willing to wait.
+const BACKOFF_CAP_MS = 60_000;
 
 function backoffDelayMs(attempt: number, retryAfterSeconds: number | null, random: () => number): number {
   if (retryAfterSeconds !== null) {
-    return retryAfterSeconds * 1000;
+    return Math.min(BACKOFF_CAP_MS, Math.ceil(retryAfterSeconds * 1000));
   }
-  const base = Math.min(1000 * 2 ** (attempt - 1), 8000);
+  const base = Math.min(BACKOFF_CAP_MS, 1000 * 2 ** (attempt - 1));
   return base + Math.floor(random() * 250);
 }
 
@@ -60,6 +76,8 @@ export async function fetchJson(url: string, options: FetchOptions = {}): Promis
     fetchImpl = globalThis.fetch,
     sleepImpl = sleep,
     random = Math.random,
+    userAgent = USER_AGENT,
+    onRetry,
   } = options;
 
   let lastError: Error | null = null;
@@ -67,7 +85,7 @@ export async function fetchJson(url: string, options: FetchOptions = {}): Promis
     let response: Response | null = null;
     try {
       response = (await fetchImpl(url, {
-        headers: { 'user-agent': USER_AGENT, accept: 'application/json' },
+        headers: { 'user-agent': userAgent, accept: 'application/json' },
         signal: AbortSignal.timeout(timeoutMs),
       })) as Response;
     } catch (err) {
@@ -92,7 +110,9 @@ export async function fetchJson(url: string, options: FetchOptions = {}): Promis
     }
     const retryAfter =
       response === null ? null : parseRetryAfter(response.headers.get('retry-after'));
-    await sleepImpl(backoffDelayMs(attempt, retryAfter, random));
+    const delayMs = backoffDelayMs(attempt, retryAfter, random);
+    onRetry?.({ attempt, delayMs, reason: lastError?.message ?? 'unknown' });
+    await sleepImpl(delayMs);
   }
 
   throw new Error(`giving up on ${url} after ${attempts} attempt(s): ${lastError?.message ?? 'unknown error'}`);

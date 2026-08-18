@@ -34,6 +34,20 @@ function scriptedFetch(script: Array<ReturnType<typeof jsonResponse> | Error>) {
 
 const noSleep = async () => {};
 
+// Records every delay fetchJson asks it to wait, without actually waiting,
+// so backoff/Retry-After behavior can be asserted on the recorded values.
+function recordingSleep() {
+  const delays: number[] = [];
+  const impl = async (ms: number) => {
+    delays.push(ms);
+  };
+  return { impl, delays };
+}
+
+// Removes the +/- jitter from backoffDelayMs's exponential branch so the
+// recorded delays are exact, not a range.
+const noJitter = () => 0;
+
 describe('fetchJson', () => {
   test('returns the parsed body on a 200', async () => {
     const fetchImpl = scriptedFetch([jsonResponse({ ok: true })]);
@@ -82,6 +96,109 @@ describe('fetchJson', () => {
       fetchJson('https://example.invalid/x', { fetchImpl, sleepImpl: noSleep })
     ).rejects.toThrow(/giving up/);
     expect(fetchImpl.calls.length).toBeLessThanOrEqual(2);
+  });
+
+  test('retries a 429 (rate limit)', async () => {
+    const fetchImpl = scriptedFetch([jsonResponse(null, { status: 429 }), jsonResponse({ ok: true })]);
+    const result = await fetchJson('https://example.invalid/x', {
+      fetchImpl,
+      sleepImpl: noSleep,
+      attempts: 2,
+    });
+    expect(result).toEqual({ ok: true });
+    expect(fetchImpl.calls).toHaveLength(2);
+  });
+
+  test('retries a 408 (request timeout)', async () => {
+    const fetchImpl = scriptedFetch([jsonResponse(null, { status: 408 }), jsonResponse({ ok: true })]);
+    const result = await fetchJson('https://example.invalid/x', {
+      fetchImpl,
+      sleepImpl: noSleep,
+      attempts: 2,
+    });
+    expect(result).toEqual({ ok: true });
+    expect(fetchImpl.calls).toHaveLength(2);
+  });
+
+  test('honours a Retry-After value as the delay', async () => {
+    const { impl: sleepImpl, delays } = recordingSleep();
+    const fetchImpl = scriptedFetch([
+      jsonResponse(null, { status: 429, headers: { 'retry-after': '7' } }),
+      jsonResponse({ ok: true }),
+    ]);
+    const result = await fetchJson('https://example.invalid/x', {
+      fetchImpl,
+      sleepImpl,
+      attempts: 2,
+    });
+    expect(result).toEqual({ ok: true });
+    expect(delays).toEqual([7000]);
+  });
+
+  test('caps a Retry-After value at 60 seconds, so a long outage does not park a run for an hour', async () => {
+    const { impl: sleepImpl, delays } = recordingSleep();
+    const fetchImpl = scriptedFetch([
+      jsonResponse(null, { status: 429, headers: { 'retry-after': '3600' } }),
+      jsonResponse({ ok: true }),
+    ]);
+    await fetchJson('https://example.invalid/x', { fetchImpl, sleepImpl, attempts: 2 });
+    expect(delays).toEqual([60_000]);
+  });
+
+  test('rejects a blank or zero Retry-After and falls back to exponential backoff', async () => {
+    const { impl: sleepImpl, delays } = recordingSleep();
+    const fetchImpl = scriptedFetch([
+      jsonResponse(null, { status: 429, headers: { 'retry-after': '' } }),
+      jsonResponse(null, { status: 429, headers: { 'retry-after': '0' } }),
+      jsonResponse({ ok: true }),
+    ]);
+    await fetchJson('https://example.invalid/x', {
+      fetchImpl,
+      sleepImpl,
+      attempts: 3,
+      random: noJitter,
+    });
+    // Exponential (1000ms, then 2000ms), not the 0ms a blank or zero header
+    // would produce if it were honoured as a real Retry-After delay.
+    expect(delays).toEqual([1000, 2000]);
+  });
+
+  test('grows exponentially across attempts, capped at 60 seconds', async () => {
+    const { impl: sleepImpl, delays } = recordingSleep();
+    const fetchImpl = scriptedFetch([
+      jsonResponse(null, { status: 503 }),
+      jsonResponse(null, { status: 503 }),
+      jsonResponse(null, { status: 503 }),
+      jsonResponse(null, { status: 503 }),
+      jsonResponse(null, { status: 503 }),
+      jsonResponse(null, { status: 503 }),
+      jsonResponse(null, { status: 503 }),
+      jsonResponse({ ok: true }),
+    ]);
+    await fetchJson('https://example.invalid/x', {
+      fetchImpl,
+      sleepImpl,
+      attempts: 8,
+      random: noJitter,
+    });
+    expect(delays).toEqual([1000, 2000, 4000, 8000, 16000, 32000, 60_000]);
+  });
+
+  test('fires onRetry with the attempt, delay and reason before waiting', async () => {
+    const retries: Array<{ attempt: number; delayMs: number; reason: string }> = [];
+    const fetchImpl = scriptedFetch([jsonResponse(null, { status: 503 }), jsonResponse({ ok: true })]);
+    const result = await fetchJson('https://example.invalid/x', {
+      fetchImpl,
+      sleepImpl: noSleep,
+      attempts: 2,
+      random: noJitter,
+      onRetry: (info) => retries.push(info),
+    });
+    expect(result).toEqual({ ok: true });
+    expect(retries).toHaveLength(1);
+    expect(retries[0].attempt).toBe(1);
+    expect(retries[0].delayMs).toBe(1000);
+    expect(retries[0].reason).toContain('503');
   });
 });
 
