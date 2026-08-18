@@ -1,16 +1,20 @@
 import { describe, expect, it } from '@jest/globals';
 
 import {
-  backoffDelayMs,
   fetchAllDocsPage,
   fetchChangesPage,
   fetchJson,
-  isRetryableStatus,
-  parseRetryAfter,
   readDownloadCounts,
   splitDownloadBatches,
-  USER_AGENT,
 } from '../lib/registry.mjs';
+// isRetryableStatus, backoffDelayMs, parseRetryAfter and USER_AGENT no
+// longer live in registry.mjs -- fetchJson is re-exported from the built
+// core (packages/core/src/online/registry-client.ts), where those helpers
+// are private implementation details covered by core's own
+// online-registry-client.test.ts rather than duplicated here. USER_AGENT
+// is still a public export of core, so it is imported directly from the
+// built output for the one test below that needs it.
+import { USER_AGENT } from '../../packages/core/dist/online/registry-client.js';
 
 function jsonResponse(body, { status = 200, headers = {} } = {}) {
   return {
@@ -43,58 +47,12 @@ function scriptedFetch(steps) {
 
 const noSleep = async () => {};
 
-describe('isRetryableStatus', () => {
-  it('retries rate limits, timeouts and server faults', () => {
-    expect(isRetryableStatus(429)).toBe(true);
-    expect(isRetryableStatus(408)).toBe(true);
-    expect(isRetryableStatus(500)).toBe(true);
-    expect(isRetryableStatus(503)).toBe(true);
-  });
-
-  it('does not retry a request the server has told us is wrong', () => {
-    expect(isRetryableStatus(400)).toBe(false);
-    expect(isRetryableStatus(404)).toBe(false);
-  });
-});
-
-describe('backoffDelayMs', () => {
-  it('grows exponentially between attempts', () => {
-    const noJitter = () => 1;
-    expect(backoffDelayMs(1, null, noJitter)).toBe(1000);
-    expect(backoffDelayMs(2, null, noJitter)).toBe(2000);
-    expect(backoffDelayMs(3, null, noJitter)).toBe(4000);
-  });
-
-  it('jitters downward rather than upward, so a retry never waits longer than the schedule', () => {
-    expect(backoffDelayMs(3, null, () => 0)).toBe(2000);
-    expect(backoffDelayMs(3, null, () => 1)).toBe(4000);
-  });
-
-  it('caps the wait so a long outage does not park the build for an hour', () => {
-    expect(backoffDelayMs(20, null, () => 1)).toBe(60_000);
-  });
-
-  it('believes a server that says how long to wait', () => {
-    expect(backoffDelayMs(1, 30, () => 1)).toBe(30_000);
-  });
-});
-
-describe('parseRetryAfter', () => {
-  it('reads a delay in seconds', () => {
-    expect(parseRetryAfter('12')).toBe(12);
-  });
-
-  it('reads an HTTP date', () => {
-    const soon = new Date(Date.now() + 20_000).toUTCString();
-    expect(parseRetryAfter(soon)).toBeGreaterThan(15);
-  });
-
-  it('returns null for an absent or unreadable header', () => {
-    expect(parseRetryAfter(null)).toBe(null);
-    expect(parseRetryAfter('')).toBe(null);
-    expect(parseRetryAfter('soonish')).toBe(null);
-  });
-});
+// isRetryableStatus, backoffDelayMs and parseRetryAfter used to be tested
+// directly here as this file's own private helpers. They are now private
+// helpers of core's fetchJson (packages/core/src/online/registry-client.ts)
+// instead, unexported and covered by core's own
+// online-registry-client.test.ts; the retry/backoff/give-up behavior they
+// implement is still exercised black-box through the fetchJson tests below.
 
 describe('fetchJson', () => {
   it('identifies itself so the replica operator can see who is walking it', async () => {
