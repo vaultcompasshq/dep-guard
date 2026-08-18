@@ -82,6 +82,7 @@ import {
 import {
   DEFAULT_DOWNLOADS_API,
   DEFAULT_REPLICA,
+  USER_AGENT,
   fetchAllDocsPage,
   fetchChangesPage,
   fetchReplicaInfo,
@@ -502,13 +503,15 @@ async function main() {
     writeState(statePath, state);
   }
 
-  // attempts and timeoutMs are passed explicitly: fetchJson now comes from
-  // the built core, whose own defaults are tuned tight for a live scan (2
-  // attempts, 5s), not this batch job's patient old defaults (5 attempts,
-  // 120s), which this script still needs and now has to ask for by name.
+  // attempts, timeoutMs and userAgent are passed explicitly: fetchJson now
+  // comes from the built core, whose own defaults are tuned tight for a
+  // live scan (2 attempts, 5s, a generic user agent), not this batch job's
+  // patient old defaults (5 attempts, 120s, a walk-specific user agent),
+  // which this script still needs and now has to ask for by name.
   const fetchOptions = {
     attempts: options.attempts,
     timeoutMs: 120_000,
+    userAgent: USER_AGENT,
     onRetry: ({ attempt, delayMs, reason }) => {
       log(`  retry ${attempt} in ${delayMs}ms: ${reason}`);
     },

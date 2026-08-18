@@ -50,9 +50,13 @@ const noSleep = async () => {};
 // isRetryableStatus, backoffDelayMs and parseRetryAfter used to be tested
 // directly here as this file's own private helpers. They are now private
 // helpers of core's fetchJson (packages/core/src/online/registry-client.ts)
-// instead, unexported and covered by core's own
-// online-registry-client.test.ts; the retry/backoff/give-up behavior they
-// implement is still exercised black-box through the fetchJson tests below.
+// instead, unexported here, so they cannot be unit tested from this file
+// any more. Their behavior (which statuses retry, the Retry-After cap and
+// rejection of blank/zero values, exponential growth, the onRetry callback)
+// is covered by core's own packages/core/tests/online-registry-client.test.ts,
+// not by the fetchJson tests below -- those only confirm this script's own
+// call sites still get a working fetchJson, not the retry/backoff policy
+// itself.
 
 describe('fetchJson', () => {
   it('identifies itself so the replica operator can see who is walking it', async () => {

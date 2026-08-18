@@ -13,7 +13,14 @@ export const DEFAULT_REPLICA = 'https://replicate.npmjs.com';
 export const DEFAULT_DOWNLOADS_API = 'https://api.npmjs.org';
 export const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
 
-// fetchJson, DOWNLOADS_BATCH_SIZE, and splitDownloadBatches now live in
+// Passed as fetchJson's userAgent option (core's FetchOptions.userAgent,
+// which defaults to core's own generic USER_AGENT otherwise) so a walk
+// still identifies itself as this specific tool rather than as core's
+// generic online-check client.
+export const USER_AGENT =
+  'dep-guard-corpus-builder/0.1 (+https://github.com/vaultcompasshq/dep-guard)';
+
+// fetchJson and DOWNLOADS_BATCH_SIZE now live in
 // packages/core/src/online/registry-client.ts, imported from the built
 // output here rather than duplicated -- the same shape as the corpus
 // builder already imports BloomFilter from the built core instead of
@@ -32,8 +39,17 @@ import {
 
 export { fetchJson, DOWNLOADS_BATCH_SIZE };
 
-export function splitDownloadBatches(names, batchSize = 128) {
+// splitDownloadBatches stays a local duplicate rather than an import: core
+// keeps its own copy private (an internal helper of fetchWeeklyDownloads,
+// not exported from registry-client.ts), and duplicating six lines of pure
+// list-splitting here is cheaper than widening core's public surface for
+// this one caller. Unlike fetchJson's retry and backoff policy, there is
+// no decision logic here that can drift silently.
+export function splitDownloadBatches(names, batchSize = DOWNLOADS_BATCH_SIZE) {
   const batches = [];
+  // The bulk downloads endpoint refuses a slash, so a scoped name has no
+  // bulk form at all -- it is filtered out here and measured one at a time
+  // by the caller, rather than silently returning zero for each.
   const bulkable = names.filter((name) => !name.startsWith('@'));
   for (let index = 0; index < bulkable.length; index += batchSize) {
     batches.push(bulkable.slice(index, index + batchSize));
