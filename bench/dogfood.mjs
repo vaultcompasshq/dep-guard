@@ -70,6 +70,7 @@ const USAGE = `Usage: node bench/dogfood.mjs [options]
   --compare             compare the run against the recorded baseline, exit 1 on drift
   --write-baseline      record this run as the baseline for its tier
   --json                write the run to stdout as JSON
+  --online              turn on the registry-backed checks (network required)
   -h, --help            print this
 `;
 
@@ -85,6 +86,7 @@ function parseArgs(argv) {
     compare: false,
     writeBaseline: false,
     json: false,
+    online: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -101,6 +103,10 @@ function parseArgs(argv) {
     }
     if (arg === '--json') {
       options.json = true;
+      continue;
+    }
+    if (arg === '--online') {
+      options.online = true;
       continue;
     }
     const value = argv[index + 1];
@@ -222,25 +228,25 @@ async function cloneWithRetries(url, sha, into, attempts = 3) {
   }
 }
 
-async function scan(targetPath, corpusDir) {
-  const result = await run(
-    process.execPath,
-    [
-      CLI_PATH,
-      'scan',
-      targetPath,
-      '--format',
-      'json',
-      '--corpus-dir',
-      corpusDir,
-      // The harness measures what the engine finds, not whether a
-      // threshold was crossed, so the gate is taken out of the picture and
-      // a non-zero exit means the scan itself failed.
-      '--fail-on',
-      'none',
-    ],
-    { cwd: REPO_ROOT, timeoutMs: SCAN_TIMEOUT_MS }
-  );
+async function scan(targetPath, corpusDir, online) {
+  const args = [
+    CLI_PATH,
+    'scan',
+    targetPath,
+    '--format',
+    'json',
+    '--corpus-dir',
+    corpusDir,
+    // The harness measures what the engine finds, not whether a
+    // threshold was crossed, so the gate is taken out of the picture and
+    // a non-zero exit means the scan itself failed.
+    '--fail-on',
+    'none',
+  ];
+  if (online) {
+    args.push('--online');
+  }
+  const result = await run(process.execPath, args, { cwd: REPO_ROOT, timeoutMs: SCAN_TIMEOUT_MS });
   if (result.code !== 0) {
     throw new Error(`scan exited ${result.code}: ${result.stderr.trim().split('\n').slice(-2).join(' ')}`);
   }
@@ -279,7 +285,7 @@ async function runPublicTier(options) {
     try {
       log(`${target.repo} at ${target.sha.slice(0, 12)}`);
       await cloneWithRetries(target.url, target.sha, clonePath);
-      const result = await scan(clonePath, options.corpusDir);
+      const result = await scan(clonePath, options.corpusDir, options.online);
       const counts = assertCountsOnly(summarize(result));
       entries.push({ repo: target.repo, sha: target.sha, counts });
 
@@ -328,7 +334,7 @@ async function runLocalTier(options) {
     const targetPath = path.resolve(String(target.path ?? target));
     const position = index + 1;
     log(`repository ${position} of ${config.repos.length}`);
-    const result = await scan(targetPath, options.corpusDir);
+    const result = await scan(targetPath, options.corpusDir, options.online);
     const counts = summarize(result);
     const entry = assertPrivateEntry({ repo: `local-${position}`, sha: null, counts });
     entries.push(entry);
