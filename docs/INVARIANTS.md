@@ -583,6 +583,50 @@ The codes, and what each one means:
 Online checks are the one deliberate exception to failing closed: a network
 problem degrades to the offline result with a diagnostic, and never blocks.
 
+## Online checks degrade, and degrading has a precise meaning
+
+The rule above is a sentence; this is what it obligates, now that it governs
+a whole subsystem rather than one code path.
+
+Degrading means the affected check contributes nothing it could not
+establish offline, and nothing it did establish is taken away. The
+typosquat popularity-asymmetry check either escalates a low-severity
+resemblance match to high, when the network confirmed the candidate is
+genuinely unpopular, or leaves it at the severity typosquatCheck already
+gave it offline; a network failure means it leaves every candidate exactly
+as it found them. The registered-squat check either adds a medium finding
+for a recently-published, near-zero-download name, or adds nothing; a
+network failure means it adds nothing, the same outcome as a scan that
+turned up no candidates for it at all. Neither check downgrades a finding,
+removes one, or turns a network problem into a reason to trust a name more
+than the offline checks already do. Whatever a check could not establish is
+named, not implied: a diagnostic with code `online-check-unreachable` says
+which check was asking, how many findings or candidates were affected, and
+why the request failed, so a consumer can tell "the network was down" apart
+from "nothing was there to find" instead of reading silence as either.
+
+`enrichOnline` -- the function `scan()` and `checkSingle()` both call to run
+the online checks -- must never itself throw. Each check it calls
+(`applyTyposquatAsymmetry`, `findRegisteredSquats`) owns its own
+try/catch around every network call it makes and turns a failure into a
+diagnostic before returning, precisely so that `enrichOnline` never has
+to. A network problem is routine, not exceptional, for this subsystem; if
+it ever reached `scan()` as a thrown error, `--online` would turn a
+pre-commit hook into something a flaky connection can block, which is the
+one failure mode this whole feature exists to avoid.
+
+The online cache (`online/cache.ts`) is deliberately not a trust input, and
+that is a different property from failing closed rather than a relaxation
+of it. `config.ts` and `baseline.ts` fail closed on a broken file because
+trusting a corrupt one would accept whatever it happened to contain. The
+online cache holds nothing an attacker benefits from forging -- a stale or
+fabricated download count or creation date can only make a check less
+likely to fire, never a name look more dangerous than it is, so the worst
+a corrupt cache file can cost is an extra fetch, never a false "safe" the
+way a corrupt config or baseline could. It is loaded permissively on
+purpose: a cache file that fails to parse is discarded and rebuilt from an
+empty state, not a `DepGuardError`.
+
 ## The popularity list is a trust input, and it is sized for its own rule
 
 `scripts/data/top-packages.txt` is the list typosquat reads, and it is the
