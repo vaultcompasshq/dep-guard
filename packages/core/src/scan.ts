@@ -205,6 +205,14 @@ function sharedCache(): ReturnType<typeof loadCache> {
 const DOWNLOADS_TTL_MS = 24 * 60 * 60 * 1000; // one day: the API answers a rolling weekly window
 const CREATED_TTL_MS: number | null = null; // a package's creation date never changes
 
+// The registry client's own default backoff cap (60s) is right for the
+// patient corpus builder, which pays this cost once per rebuild, but wrong
+// here: config's "online": true reaches a pre-commit hook, and a modest
+// delta with several rate-limited or slow names could otherwise stall a
+// commit for minutes in aggregate. A live scan gets a much tighter cap,
+// roughly matching the per-request budget SCAN_TIMEOUT_MS already sets.
+const SCAN_BACKOFF_CAP_MS = 8_000;
+
 async function cachedFetchWeeklyDownloads(names: string[]): Promise<Map<string, number>> {
   const store = sharedCache();
   const result = new Map<string, number>();
@@ -218,7 +226,7 @@ async function cachedFetchWeeklyDownloads(names: string[]): Promise<Map<string, 
     }
   }
   if (misses.length > 0) {
-    const fetched = await fetchWeeklyDownloads(misses);
+    const fetched = await fetchWeeklyDownloads(misses, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
     for (const [name, count] of fetched) {
       result.set(name, count);
       store.set(`downloads:${name}`, count, DOWNLOADS_TTL_MS);
@@ -234,7 +242,7 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
   if (hit !== undefined) {
     return { createdAt: hit as string | null };
   }
-  const packument = await fetchPackument(name);
+  const packument = await fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
   // A real creation date never changes, so it is safe -- and worth doing
   // -- to cache one forever (CREATED_TTL_MS). A MISSING one (a 404, or a
   // malformed packument with no time.created) is exactly the
