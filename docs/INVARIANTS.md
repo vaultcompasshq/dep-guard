@@ -774,19 +774,80 @@ it produces now, and this suite's own tests build metas that carry it too
 -- the tolerance is for what a pre-versioning builder could have already
 produced, not a claim that nothing ever carries the field.
 
-**This tolerance is provisional, not permanent, and the obligation is
-recorded here so it survives past whichever comment first stated it.** The
-release pipeline is INTENDED to independently require `formatVersion` and
-`walkComplete: true` to be present and correct on any corpus that
-actually ships, before the reader's tolerance-of-absence can be trusted to
-only ever fire on a genuine pre-versioning local artifact. That gate does
-not exist yet as of this entry (2026-08-18): release.yml has no
-corpus-meta check, and its smoke job runs against the fixture corpus,
-which carries neither field. Until it lands, a hand-built or otherwise
-malformed corpus with genuinely missing fields would load exactly as if it
-were a legitimate pre-versioning artifact. Building that gate is the next
-change; when it lands, this paragraph should be updated to say so, and the
-"provisional" framing above should be removed.
+The reader's tolerance-of-absence is now safe to rely on, and the gate that
+makes it safe is described in the next section. Before that gate existed, a
+hand-built or otherwise malformed corpus with genuinely missing fields
+would have loaded exactly as if it were a legitimate pre-versioning
+artifact; the gate is what makes that scenario unreachable for anything
+this project actually publishes.
+
+## A published corpus is built in the release job, never committed, and a release gate demands what the reader tolerates
+
+`packages/core/data/` (the path `DEFAULT_CORPUS_DIR` in scan.ts resolves
+to when nothing overrides it) is gitignored on purpose: a built corpus is
+around 8MB of generated data whose provenance is a dated registry walk, and
+it belongs to a release, not a commit. Nothing is ever checked in there.
+Instead, `.github/workflows/release.yml`'s `release` job runs `node
+scripts/build-corpus.mjs --out packages/core/data/corpus` as one of its own
+steps, so every release builds its own corpus fresh from
+`replicate.npmjs.com` and ships it inside the published tarball --
+`packages/core/package.json`'s `files` array lists `data` alongside `dist`
+for exactly this reason, and `scripts/tests/core-package-files.test.mjs`
+guards against that entry ever being dropped again, since nothing else in
+the suite would catch its removal.
+
+That step has to run after `pnpm test`, never before, in the same job.
+`packages/cli/tests/cli.test.ts`'s "a first run with no corpus built yet"
+case asserts that a scan with no `--corpus-dir` and nothing at the default
+corpus path fails with an actionable `corpus-missing` message -- the whole
+test depends on that default path being empty when it runs. Building the
+corpus first, at that same default path, would make the test's premise
+false in CI the same way a local `corpus:build --out
+packages/core/data/corpus` makes it false on a developer's machine. The
+test now diagnoses that precondition itself (an explicit failure naming the
+path, rather than the opaque `Expected: 2, Received: 0` it used to produce)
+and release.yml's corpus-build step carries a comment pointing at this same
+constraint, so reordering the steps for tidiness has to go through that
+explanation first.
+
+A corpus that is about to be published cannot lean on the same
+pre-versioning-artifact excuse `assertMetaShape` extends to `formatVersion`
+and `walkComplete` above -- nothing has shipped before this gate existed,
+so there is no legitimate "written by an older builder" case for a corpus
+this build is about to publish. `scripts/lib/shippable-corpus.mjs`
+(`assertCorpusShippable`, run by `scripts/check-shippable-corpus.mjs` and
+wired into release.yml right after the corpus-build step) is the release
+gate that closes that gap: it refuses to publish unless all four corpus
+files exist, `meta.formatVersion` is PRESENT and is one of
+`SUPPORTED_CORPUS_FORMAT_VERSIONS` (imported from the built core, not
+restated -- see "derive, do not describe" at the top of this file),
+`meta.walkComplete` is PRESENT and is exactly the boolean `true`,
+`meta.nameCount` clears a floor high enough that a `--max-names` slice
+could never pass it by accident (`DEFAULT_MIN_NAME_COUNT`, one million,
+against a real walk's several million names), and the directory loads
+through the real `loadCorpus` with a known-popular name (`react`)
+resolving as present in the bloom filter. That last check makes the gate
+additive to the reader's own checks rather than a replacement for them: a
+corpus this gate accepts still has to load the way a real scan would load
+it. `scripts/tests/shippable-corpus.test.mjs` exercises both directions of
+every rule, including the two cases the reader tolerates and this gate does
+not (formatVersion absent, walkComplete absent) -- verified adversarially
+by weakening the gate to match the reader's tolerance and confirming those
+specific tests, and no others, go red.
+
+The release smoke job (`smoke-published`) passes no `--corpus-dir` to
+either of its `dep-guard check` invocations, on purpose: the point of that
+job is to prove the corpus that actually shipped inside the published
+package resolves correctly at its default path, not to re-prove something
+about the repository's own fixture corpus (which the job no longer checks
+out at all). It asserts `react` resolves as known and that at least one of
+three distinct hallucinated names resolves as an `unknown-package` finding
+-- three rather than one, because the corpus is rebuilt on every release
+now, so a single name's non-collision against the bloom filter's 0.001
+false-positive rate is a fresh draw each time instead of a fact fixed
+against a committed fixture; three names bring the chance all three
+collide down to roughly 1e-9 while still proving the same thing a single
+name proved before.
 
 ## A partial corpus refuses itself, and the builder has to verify around that refusal
 
