@@ -566,8 +566,17 @@ The codes, and what each one means:
   back would leave the entries map empty and every lockfile-backed check
   silently satisfied.
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
-  corpus is absent or damaged. A corpus that reads as empty would bless
-  every hallucinated name.
+  corpus is absent, damaged, or -- for `corpus-corrupt` specifically --
+  valid but written in a shape this build refuses to trust: a
+  `formatVersion` this build does not understand, or a
+  `walkComplete: false` (or anything other than the literal boolean
+  `true`) from a walk that was stopped early or never finished. Neither of
+  those is damage -- the file parses and the fields are the right types --
+  but this build cannot tell what it does not know, or must not serve a
+  partial result as if it were a complete one, so both are refused the
+  same way a corrupt file would be. A corpus that reads as empty would
+  bless every hallucinated name. See "The corpus format is versioned" and
+  "A partial corpus refuses itself" below for the two checks this covers.
 - `path-missing` -- the path to scan does not exist, or is not a directory.
   A path nobody looked at must not report a clean result.
 - `read-error` -- a path exists but cannot be read.
@@ -672,3 +681,87 @@ The alias list is checked before this exemption, and `assertAliasKeysNotPopular`
 is what keeps the two from contradicting each other. That guard now runs
 against twenty thousand names rather than five hundred, so it is enforced in
 the test suite as well as in the corpus build.
+
+## The corpus format is versioned, and absence of the version is not the same as a wrong one
+
+meta.json carries an optional `formatVersion` field, emitted as `1` by
+`buildMeta` (scripts/lib/corpus-guards.mjs) from the first published corpus
+onward and never before -- a format version cannot be assigned
+retroactively once corpora exist in the wild, so nothing shipped before
+this field existed can be given one after the fact. `assertMetaShape` in
+packages/core/src/corpus.ts refuses to load a corpus whose `formatVersion`
+is present and not one of `SUPPORTED_CORPUS_FORMAT_VERSIONS` (today, only
+`1`), throwing `corpus-corrupt`: the corpus is not damaged, but its
+declared format is not one this build knows how to read, and that is
+exactly what `corpus-corrupt` covers (see "Failing closed" above).
+docs/release/stability-policy.md promises a release reads its bundled
+format and at least the immediately previous format version, so the day a
+version 2 exists, `SUPPORTED_CORPUS_FORMAT_VERSIONS` has to grow to admit
+both, not just move the comparison -- that promise is why the constant is
+a list and not a single literal. The refusal message names the supported
+versions by reading this same list (`.join(', ')`), rather than restating
+them as a literal in the message text, so the two cannot drift apart the
+day a second version is added.
+
+`formatVersion` is ABSENT-tolerant on purpose: a corpus missing the field
+entirely is accepted, not refused. That is the same "refuse only what is
+explicitly wrong, tolerate absence" rule `walkComplete` follows (next
+section) and for the same reason -- nothing has ever shipped, so a
+meta.json written by a builder that predates this field (the committed
+fixture corpus, and any corpus already built with a pre-versioning
+dep-guard) is a legitimate local artifact missing the field, not a corpus
+in the wild claiming an unsupported version. That is narrower than "every
+meta.json anywhere": the current builder writes the field on every corpus
+it produces now, and this suite's own tests build metas that carry it too
+-- the tolerance is for what a pre-versioning builder could have already
+produced, not a claim that nothing ever carries the field.
+
+**This tolerance is provisional, not permanent, and the obligation is
+recorded here so it survives past whichever comment first stated it.** The
+release pipeline is INTENDED to independently require `formatVersion` and
+`walkComplete: true` to be present and correct on any corpus that
+actually ships, before the reader's tolerance-of-absence can be trusted to
+only ever fire on a genuine pre-versioning local artifact. That gate does
+not exist yet as of this entry (2026-08-18): release.yml has no
+corpus-meta check, and its smoke job runs against the fixture corpus,
+which carries neither field. Until it lands, a hand-built or otherwise
+malformed corpus with genuinely missing fields would load exactly as if it
+were a legitimate pre-versioning artifact. Building that gate is the next
+change; when it lands, this paragraph should be updated to say so, and the
+"provisional" framing above should be removed.
+
+## A partial corpus refuses itself, and the builder has to verify around that refusal
+
+`buildMeta` writes `walkComplete: false` when a build is stopped early
+(`--max-names`, which `pnpm corpus:slice` uses) -- see
+scripts/build-corpus.mjs. `assertMetaShape` refuses to load any corpus
+whose `walkComplete` is present and not exactly the boolean `true`,
+fail-closed on any other value (a stray string, number, or `null`, not
+only an explicit `false`), throwing `corpus-corrupt`: a partial corpus
+reports every name the walk never reached as unknown, which is dangerous
+in production and useful only for testing the build pipeline itself, so
+it must never serve a real scan. `buildMeta` itself now requires
+`walkComplete` to be a real boolean before it will write one, for the same
+reason -- the value entering a load-bearing field has to already be the
+type the reader trusts, not something that merely compares loosely equal
+to it.
+
+That refusal is deliberately in the reader every scan goes through, which
+means the builder's own post-write verification cannot route a partial
+build through that same path -- `loadCorpus` would refuse the exact
+artifact the builder just wrote on purpose, on every `--max-names` run,
+including `corpus:slice`, and the artifacts would already be on disk with
+the build's own resume hint unreachable. (This was exactly the shape of
+the bug this section exists to prevent a repeat of: the first version of
+these checks routed every build's own verification through the newly
+strict loader with no exception, so `corpus:slice` broke itself the day
+the loader got stricter.) The builder verifies a partial build's artifacts
+directly instead (bloom membership and top-rank order, read straight off
+the files just written), and only routes a complete build through
+`loadCorpus` itself, which is the stronger check -- it proves the artifact
+is what the scanner will actually accept, not just that the raw files are
+well-formed. See `verifyBuiltCorpus` in scripts/lib/corpus-guards.mjs, and
+its tests in scripts/tests/corpus-guards.test.mjs, which exercise both
+branches against real on-disk artifacts and assert that `loadCorpus`
+genuinely does refuse the partial one `verifyBuiltCorpus` accepts -- proof
+the two paths are different, not just that neither happens to throw.

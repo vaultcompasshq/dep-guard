@@ -205,6 +205,105 @@ describe('loadCorpus', () => {
   // names.bloom is loaded lazily (only hasName touches it), so a
   // truncated bloom file does not throw at loadCorpus() itself -- it
   // throws the first time hasName() actually needs the filter.
+  test('meta.json with formatVersion 1 loads fine', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, formatVersion: 1 },
+    });
+    const corpus = loadCorpus(dir);
+    expect(corpus.builtAt).toBe('2026-08-01');
+  });
+
+  test('meta.json with formatVersion 2 throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, formatVersion: 2 },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
+  test('meta.json with formatVersion 0 throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, formatVersion: 0 },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
+  // The message names the versions this build actually supports, derived
+  // from SUPPORTED_CORPUS_FORMAT_VERSIONS rather than a hardcoded literal
+  // -- locks in that the two stay in sync, since a hardcoded copy would
+  // pass every other test here while quietly lying once a second version
+  // is ever added.
+  test('meta.json with an unsupported formatVersion names the supported version(s) in the message', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, formatVersion: 2 },
+    });
+    try {
+      loadCorpus(dir);
+      throw new Error('expected loadCorpus to throw');
+    } catch (err) {
+      expect((err as DepGuardError).message).toContain('format version(s) 1');
+    }
+  });
+
+  test('meta.json with no formatVersion loads fine (a pre-versioning local corpus)', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01 },
+    });
+    const corpus = loadCorpus(dir);
+    expect(corpus.builtAt).toBe('2026-08-01');
+  });
+
+  test('meta.json with walkComplete false throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, walkComplete: false },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
+  test('meta.json with walkComplete true loads fine', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, walkComplete: true },
+    });
+    const corpus = loadCorpus(dir);
+    expect(corpus.builtAt).toBe('2026-08-01');
+  });
+
+  // Distinct from the two "no formatVersion" / "no walkComplete" cases
+  // above: this is the shape a real published corpus meta actually has --
+  // both fields present and both correct -- exercised together so a future
+  // change to either check in isolation cannot silently break their
+  // combination.
+  test('meta.json with formatVersion 1 and walkComplete true together loads fine', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, formatVersion: 1, walkComplete: true },
+    });
+    const corpus = loadCorpus(dir);
+    expect(corpus.builtAt).toBe('2026-08-01');
+  });
+
+  // Fail-closed, not merely false-closed: a malformed walkComplete that is
+  // not the literal boolean true must be refused the same way an explicit
+  // false is, even though no real build has ever written one of these.
+  test('meta.json with walkComplete as the string "false" throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, walkComplete: 'false' },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
+  test('meta.json with walkComplete 0 throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, walkComplete: 0 },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
+  test('meta.json with walkComplete null throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, walkComplete: null },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
   test('truncated names.bloom throws corpus-corrupt when a name check first needs it', () => {
     const full = validBloomBytes();
     const truncated = full.slice(0, full.length - 1);
