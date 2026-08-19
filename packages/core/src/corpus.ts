@@ -8,10 +8,13 @@ interface CorpusMeta {
   nameCount: number;
   fpRate: number;
   // Both optional: a corpus built before these fields existed is a local
-  // development artifact (nothing has ever been published), and the
-  // release pipeline independently requires both to be present and correct
-  // in any corpus that actually ships. See assertMetaShape below for the
-  // tolerance rule this reflects.
+  // development artifact (nothing has ever been published). The release
+  // pipeline is INTENDED to independently require both to be present and
+  // correct in any corpus that actually ships -- that gate does not exist
+  // yet (tracked in docs/INVARIANTS.md) -- and once it does, tolerating
+  // absence here will only ever fire on a genuine pre-versioning local
+  // artifact. See assertMetaShape below for the tolerance rule this
+  // reflects.
   formatVersion?: number;
   walkComplete?: boolean;
 }
@@ -92,6 +95,14 @@ function assertAliasesShape(
   }
 }
 
+// The corpus format versions this build understands. docs/release/
+// stability-policy.md promises a release reads its bundled format "and at
+// least the immediately previous format version" -- so the day a format
+// version 2 exists, whoever adds it has to grow this set to admit both 1
+// and 2, not just move the comparison to "=== 2", or that promise breaks
+// for anyone still holding a version-1 corpus.
+const SUPPORTED_CORPUS_FORMAT_VERSIONS: readonly number[] = [1];
+
 function assertMetaShape(filePath: string, value: unknown): asserts value is CorpusMeta {
   if (!isPlainObject(value) || typeof value.builtAt !== 'string') {
     throw new DepGuardError(
@@ -102,14 +113,16 @@ function assertMetaShape(filePath: string, value: unknown): asserts value is Cor
 
   // formatVersion and walkComplete are both ABSENT-tolerant: a corpus built
   // before these fields existed is a local development artifact (nothing
-  // has ever been published), and the release pipeline independently
-  // requires both fields to be present and correct in any corpus that
-  // actually ships. So tolerating their absence here costs nothing, and it
-  // keeps the committed fixture corpus and the rest of the test suite --
-  // which construct minimal metas without either field -- working. Each
-  // check below only refuses a value that is present and explicitly wrong.
+  // has ever been published). The release pipeline is INTENDED to
+  // independently require both fields to be present and correct in any
+  // corpus that actually ships -- that gate is not built yet (tracked in
+  // docs/INVARIANTS.md) -- so for now tolerating their absence here costs
+  // nothing, and it keeps the committed fixture corpus and the rest of the
+  // test suite -- which construct minimal metas without either field --
+  // working. Each check below only refuses a value that is present and
+  // explicitly wrong; it never demands the field be there.
 
-  if ('formatVersion' in value && value.formatVersion !== 1) {
+  if ('formatVersion' in value && !SUPPORTED_CORPUS_FORMAT_VERSIONS.includes(value.formatVersion as number)) {
     throw new DepGuardError(
       `corpus meta.formatVersion is ${JSON.stringify(value.formatVersion)}, which this ` +
         `dep-guard does not understand (it understands format version 1): ${filePath}. ` +
@@ -118,10 +131,17 @@ function assertMetaShape(filePath: string, value: unknown): asserts value is Cor
     );
   }
 
-  if ('walkComplete' in value && value.walkComplete === false) {
+  // Fail-closed, not just false-closed: anything other than the literal
+  // boolean true is refused, including a stray string, number, or null,
+  // not only an explicit false. A reader that only checked "=== false"
+  // would load happily on a malformed value it has never seen a real
+  // build produce, which is exactly the gap a corpus format is supposed to
+  // close, not reopen.
+  if ('walkComplete' in value && value.walkComplete !== true) {
     throw new DepGuardError(
-      `corpus meta.walkComplete is false: ${filePath}. This corpus was built from a walk ` +
-        'that was stopped early, so it would report every name it never reached as unknown. ' +
+      `corpus meta.walkComplete is ${JSON.stringify(value.walkComplete)}, not true: ${filePath}. ` +
+        'A corpus only earns trust for a real scan when the walk that built it ran to ' +
+        'completion, so it would report every name it never reached as unknown otherwise. ' +
         'It must not be used for a real scan -- rebuild the corpus without --max-names.',
       'corpus-corrupt'
     );

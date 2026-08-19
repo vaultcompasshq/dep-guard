@@ -250,12 +250,41 @@ describe('loadCorpus', () => {
     expect(corpus.builtAt).toBe('2026-08-01');
   });
 
-  test('meta.json with no walkComplete loads fine (a pre-versioning local corpus)', () => {
+  // Distinct from the two "no formatVersion" / "no walkComplete" cases
+  // above: this is the shape a real published corpus meta actually has --
+  // both fields present and both correct -- exercised together so a future
+  // change to either check in isolation cannot silently break their
+  // combination.
+  test('meta.json with formatVersion 1 and walkComplete true together loads fine', () => {
     const dir = writeFixtureDir({
-      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01 },
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, formatVersion: 1, walkComplete: true },
     });
     const corpus = loadCorpus(dir);
     expect(corpus.builtAt).toBe('2026-08-01');
+  });
+
+  // Fail-closed, not merely false-closed: a malformed walkComplete that is
+  // not the literal boolean true must be refused the same way an explicit
+  // false is, even though no real build has ever written one of these.
+  test('meta.json with walkComplete as the string "false" throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, walkComplete: 'false' },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
+  test('meta.json with walkComplete 0 throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, walkComplete: 0 },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
+  test('meta.json with walkComplete null throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, walkComplete: null },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
   });
 
   test('truncated names.bloom throws corpus-corrupt when a name check first needs it', () => {

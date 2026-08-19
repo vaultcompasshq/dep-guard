@@ -61,7 +61,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { BloomFilter } from '../packages/core/dist/bloom.js';
-import { loadCorpus } from '../packages/core/dist/corpus.js';
 
 import { ALIAS_SEED } from './lib/aliases.mjs';
 import { assertBloomParity } from './lib/bloom-vector.mjs';
@@ -69,6 +68,7 @@ import {
   assertAliasKeysNotPopular,
   assertTopListWellFormed,
   buildMeta,
+  verifyBuiltCorpus,
 } from './lib/corpus-guards.mjs';
 import {
   appendNames,
@@ -438,24 +438,6 @@ function writeArtifacts({ outDir, filter, top, aliases, meta }) {
   writeFileSync(path.join(outDir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`);
 }
 
-// The last thing the build does is read its own output back through the
-// loader the scanner uses. A corpus that this cannot load is a corpus that
-// fails closed on every scan, and finding that out here costs a second.
-function verifyThroughLoader(outDir, top) {
-  const corpus = loadCorpus(outDir);
-  if (corpus.topRank(top[0]) !== 1) {
-    throw new Error(`corpus verification failed: ${top[0]} did not load as rank 1`);
-  }
-  const missing = top.filter((name) => !corpus.hasName(name));
-  if (missing.length > 0) {
-    throw new Error(
-      `corpus verification failed: ${missing.length} top-list name(s) are absent from the ` +
-        `bloom filter, starting with ${missing.slice(0, 5).join(', ')}`
-    );
-  }
-  return corpus;
-}
-
 async function main() {
   let options;
   try {
@@ -594,7 +576,13 @@ async function main() {
   });
 
   writeArtifacts({ outDir, filter, top, aliases, meta });
-  const corpus = verifyThroughLoader(outDir, top);
+  // A complete build is verified through loadCorpus itself -- the same
+  // path the scanner uses. A partial (--max-names) build writes
+  // walkComplete: false on purpose, and loadCorpus refuses that meta by
+  // design (a partial corpus must never serve a real scan), so
+  // verifyBuiltCorpus checks a partial build's artifacts directly instead
+  // of routing it through that same refusal. See corpus-guards.mjs.
+  verifyBuiltCorpus(outDir, top, meta);
 
   log('');
   log(`Wrote ${outDir}`);
@@ -604,7 +592,7 @@ async function main() {
   log(`  filter           ${formatBytes(bloomBytes)}, ${bitCount} bits, ${hashCount} hashes`);
   log(`  target fp rate   ${options.fpRate}`);
   log(`  observed fp rate ${observedFpRate.toExponential(2)} over 200000 probes`);
-  log(`  built at         ${corpus.builtAt}`);
+  log(`  built at         ${meta.builtAt}`);
   log(`  elapsed          ${formatDuration(Date.now() - startedAt)}`);
   log(`  name store       ${formatBytes(statSync(namesPath).size)} at ${namesPath}`);
   if (!meta.walkComplete && !options.skipFetch && !options.refresh) {
