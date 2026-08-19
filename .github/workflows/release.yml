@@ -61,6 +61,35 @@ jobs:
     - name: Run tests
       run: pnpm test
 
+    # MUST run after "Run tests", never before. packages/cli/tests/cli.test.ts
+    # has a case ("a first run with no corpus built yet") that asserts a
+    # scan with no --corpus-dir and nothing at core's default corpus path
+    # (packages/core/data/corpus) fails with an actionable corpus-missing
+    # message. That default path is gitignored and empty in every checkout
+    # unless something writes there first -- if this step ran before the
+    # test suite, that test would fail (or worse, silently stop testing
+    # what it claims to, if it were ever weakened to tolerate a populated
+    # default path). See that test's own self-diagnosing precondition
+    # check for the same explanation from the test's side.
+    #
+    # This step makes every release depend on replicate.npmjs.com, the
+    # public registry replica -- roughly 430 requests and 10 to 15 minutes
+    # (see scripts/build-corpus.mjs). A failure here fails the release
+    # closed, before anything is published, which is the correct direction:
+    # a release with no corpus, or a corpus this build could not verify, is
+    # worse than a delayed release.
+    - name: Build the shipped corpus
+      run: node scripts/build-corpus.mjs --out packages/core/data/corpus
+
+    # Refuses to publish a corpus that is not actually fit to ship -- see
+    # scripts/lib/shippable-corpus.mjs for the full set of checks (all four
+    # files present, formatVersion and walkComplete both present and
+    # correct, a name-count floor, and a real load through loadCorpus with
+    # a known-popular name resolving as present). This is stricter than
+    # what loadCorpus itself tolerates at read time, by design.
+    - name: Check the corpus is fit to publish
+      run: node scripts/check-shippable-corpus.mjs packages/core/data/corpus
+
     # npm Trusted Publishing (OIDC): no NPM_TOKEN, auth via id-token: write
     # plus a trusted publisher configured per @vaultcompass/* package.
     # Requires npm CLI >= 11.5.1 (Node >= 22.14.0). Pin major 11 - npm@12
@@ -113,9 +142,11 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (fixture corpus only)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
+      # No checkout step: this job's whole point is to exercise ONLY what a
+      # real installer gets from npm, and every command below reads solely
+      # from the installed @vaultcompass/dep-guard package (no --corpus-dir,
+      # no repo files of any kind). Re-add a checkout only if a future
+      # change here needs something from this repository directly.
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -150,51 +181,71 @@ jobs:
             exit 1
           fi
 
-          # The fixture corpus ships in this checkout, not in the published
-          # package (packages/core's "files" is dist-only), so it is read
-          # from the repo the same way vault-guard reads its release-smoke
-          # fixture: checked out for data, not for code.
-          CORPUS="${GITHUB_WORKSPACE}/packages/core/fixtures/corpus"
-
           TMP=$(mktemp -d)
           cd "${TMP}"
           npm init -y >/dev/null 2>&1
           npm install "@vaultcompass/dep-guard@${VERSION}"
 
-          # "totally-made-up-hallucinated-xyz123" is checked against the
-          # fixture's bloom filter, which has a nonzero false-positive rate
-          # by construction. That is a deterministic property of this exact
-          # string against this exact committed fixture, not a per-run coin
-          # flip - verified by hand not to collide as of the fixture in
-          # this checkout. If the fixture corpus is ever rebuilt and this
-          # starts colliding, this step fails every run, loudly, until the
-          # placeholder name below is swapped for one that doesn't; it does
-          # not fail silently or intermittently.
+          # No --corpus-dir anywhere below. That is the whole point of this
+          # job: it has to exercise the corpus that actually shipped INSIDE
+          # the published package (packages/core's "files" now lists
+          # "data" alongside "dist" - see packages/core/package.json) at
+          # the default path scan.ts resolves when nothing overrides it.
+          # Pointing this job at the repository's fixture corpus, the way
+          # it used to, would smoke-test a corpus that never left this
+          # checkout and prove nothing about what got published.
           set +e
-          ./node_modules/.bin/dep-guard check react --corpus-dir "${CORPUS}" --format json > known-out.json
+          ./node_modules/.bin/dep-guard check react --format json > known-out.json
           KNOWN_EC=$?
-          ./node_modules/.bin/dep-guard check totally-made-up-hallucinated-xyz123 --corpus-dir "${CORPUS}" --format json > unknown-out.json
-          UNKNOWN_EC=$?
           set -e
 
           if [[ "${KNOWN_EC}" -ne 0 ]]; then
-            echo "::error::Expected 'dep-guard check react' to exit 0 (react is in the fixture corpus)."
+            echo "::error::Expected 'dep-guard check react' to exit 0 (react should be present in any real, complete corpus)."
             cat known-out.json || true
             exit 1
           fi
 
-          if [[ "${UNKNOWN_EC}" -eq 0 ]]; then
-            echo "::error::Expected 'dep-guard check totally-made-up-hallucinated-xyz123' to exit non-zero (unknown-package finding)."
-            cat unknown-out.json || true
-            exit 1
-          fi
+          # A single hallucinated name used to be enough here, on the
+          # reasoning that its non-collision against the bloom filter was a
+          # deterministic property of one exact string checked against one
+          # exact COMMITTED fixture corpus, verified by hand once. That
+          # reasoning does not survive this job dropping --corpus-dir: the
+          # corpus is now rebuilt from a live registry walk on every
+          # release (see the "Build the shipped corpus" step in this
+          # workflow), so a single name's non-collision is effectively a
+          # fresh draw against the target false-positive rate (0.001) on
+          # every release, which means a spurious, deeply confusing release
+          # failure roughly once every thousand releases. Three distinct
+          # hallucinated names bring the probability that ALL THREE collide
+          # down to roughly 1e-9, while still proving exactly what matters:
+          # the shipped corpus plus the shipped CLI agree that a name which
+          # is not real is not real.
+          set +e
+          ./node_modules/.bin/dep-guard check totally-made-up-hallucinated-xyz123 --format json > unknown-1.json
+          UNKNOWN_EC_1=$?
+          ./node_modules/.bin/dep-guard check zzq-nonexistent-fictional-pkg-482716 --format json > unknown-2.json
+          UNKNOWN_EC_2=$?
+          ./node_modules/.bin/dep-guard check qwzx-imaginary-not-a-real-package-9284 --format json > unknown-3.json
+          UNKNOWN_EC_3=$?
+          set -e
 
           node -e "
             const fs = require('fs');
-            const j = JSON.parse(fs.readFileSync('unknown-out.json', 'utf8'));
-            const hit = (j.findings || []).some((f) => f.ruleId === 'unknown-package');
+            const cases = [
+              ['unknown-1.json', ${UNKNOWN_EC_1}],
+              ['unknown-2.json', ${UNKNOWN_EC_2}],
+              ['unknown-3.json', ${UNKNOWN_EC_3}],
+            ];
+            const hit = cases.some(([file, exitCode]) => {
+              if (exitCode === 0) return false;
+              const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+              return (j.findings || []).some((f) => f.ruleId === 'unknown-package');
+            });
             if (!hit) {
-              console.error('Expected an unknown-package finding', j);
+              console.error('Expected at least one of three hallucinated names to exit non-zero with an unknown-package finding.');
+              for (const [file] of cases) {
+                console.error(file, fs.readFileSync(file, 'utf8'));
+              }
               process.exit(1);
             }
           "
