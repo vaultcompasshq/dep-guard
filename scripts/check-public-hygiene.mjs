@@ -18,9 +18,17 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // SHA-256(lowercase token) -- no plaintext codenames in the repository.
-// Copied verbatim from vault-guard's scripts/check-private-names.cjs: same
-// organisation, same blocklist, so the hashes travel without either repo
-// ever writing down the plaintext they stand for.
+// The hashes travel between repositories without any of them ever writing
+// down the plaintext they stand for.
+//
+// This is the UNION across the family (dep-guard, vault-guard, conductor),
+// reconciled 2026-08-18. Before that the three lists had silently diverged:
+// dep-guard and vault-guard shared eleven hashes, conductor had a different
+// eleven, and the symmetric difference was four codenames -- each of them
+// guarded in one public repository and unguarded in another, which is the
+// same as unguarded. A blocklist that differs per repository protects the
+// intersection and advertises the difference, so all three carry the union
+// and a new entry is added to all three in the same change.
 const BANNED_HASHES = new Set([
   'bcbff8a223bdb66059e43ae951a28ed12598c9e782fb65c58dabcd347f65cabe',
   'ec4e8dbcdbe500197bb27e769cee7864c0a4b4876a604998a23c80bbcc979d4c',
@@ -33,6 +41,8 @@ const BANNED_HASHES = new Set([
   '59f5eae64585bb2483b57c4618b144e92011ba0656565003a42db23f029f8bd5',
   'c227174107761c30f27338905527dc53032ac5daf6d225ce9561ba4110344d7d',
   'd792a2b651ecea40434f60efb0435efcef8eb60aaefaa85f0660e718d074de76',
+  '7f5f6e890b491a749b2a764e033c6b8d19fc0a0022697d391438dd11af101b95',
+  'c3b53b09f7f132caa42bd4ddb8acd99972439acb571e9322fe9607135197154b',
 ]);
 
 const ALLOWLIST = new Set(['CONTRIBUTING.md', 'scripts/check-public-hygiene.mjs']);
