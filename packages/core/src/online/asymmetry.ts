@@ -47,8 +47,14 @@ export async function applyTyposquatAsymmetry(
   }
 
   for (const finding of candidates) {
-    const downloads = counts.get(finding.packageName);
-    if (downloads === undefined || downloads >= ASYMMETRY_DOWNLOAD_FLOOR) {
+    // A key missing from counts here means the API answered for this batch
+    // (a whole-batch failure would have thrown above and been caught as
+    // online-check-unreachable) but has no download record for this exact
+    // name. That is a stronger unpopularity signal than a low recorded
+    // count, not a reason to skip escalation -- treat it as zero downloads
+    // rather than leaving the candidate at its offline severity.
+    const downloads = counts.get(finding.packageName) ?? 0;
+    if (downloads >= ASYMMETRY_DOWNLOAD_FLOOR) {
       continue;
     }
     finding.severity = 'high';

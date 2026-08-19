@@ -63,8 +63,17 @@ export async function findRegisteredSquats(
   const findings: Omit<Finding, 'fingerprint'>[] = [];
 
   for (const { change, registryName } of candidates) {
-    const downloads = counts.get(registryName);
-    if (downloads === undefined || downloads >= REGISTERED_SQUAT_DOWNLOAD_FLOOR) {
+    // A key missing from counts here means the API answered for this batch
+    // (a whole-batch failure would have thrown above and been caught as
+    // online-check-unreachable) but has no download record for this exact
+    // name -- npm's actual behaviour for a name it has never seen. That is
+    // the archetypal registered-squat case, not a reason to skip: a
+    // freshly-registered attacker name is precisely the name with no
+    // download history yet. Treat the missing entry as zero downloads
+    // rather than bailing, so this check can fire on its own defining
+    // example instead of going structurally silent on it.
+    const downloads = counts.get(registryName) ?? 0;
+    if (downloads >= REGISTERED_SQUAT_DOWNLOAD_FLOOR) {
       continue;
     }
 

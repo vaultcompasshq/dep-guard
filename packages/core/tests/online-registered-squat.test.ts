@@ -125,6 +125,27 @@ describe('findRegisteredSquats', () => {
     expect(findings).toEqual([]);
   });
 
+  test('flags a recently-created name the downloads API has no record for at all', async () => {
+    // A name missing from the counts Map means the API answered but has no
+    // download record for this exact name -- precisely the archetypal
+    // registered-squat case (a freshly-registered attacker name), and a
+    // stronger signal than a low recorded count, not a reason to skip it.
+    const ctx = makeContext([makeChange({ name: 'totally-made-up-hallucinated-xyz123' })]);
+    const findings = await findRegisteredSquats(
+      ctx,
+      fakeDeps({}, { 'totally-made-up-hallucinated-xyz123': '2026-08-10T00:00:00.000Z' }),
+      ctx.diagnostics,
+      nowFn
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      ruleId: 'registered-squat',
+      severity: 'medium',
+      packageName: 'totally-made-up-hallucinated-xyz123',
+      details: { signal: 'registered-squat', weeklyDownloads: 0 },
+    });
+  });
+
   test('does not flag a name with no packument data', async () => {
     const ctx = makeContext([makeChange({ name: 'ghost-pkg' })]);
     const findings = await findRegisteredSquats(

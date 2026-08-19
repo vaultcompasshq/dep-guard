@@ -606,9 +606,14 @@ gave it offline; a network failure means it leaves every candidate exactly
 as it found them. The registered-squat check either adds a medium finding
 for a recently-published, near-zero-download name, or adds nothing; a
 network failure means it adds nothing, the same outcome as a scan that
-turned up no candidates for it at all. Neither check downgrades a finding,
-removes one, or turns a network problem into a reason to trust a name more
-than the offline checks already do. Whatever a check could not establish is
+turned up no candidates for it at all. "Near-zero-download" includes a
+name the downloads API has no record for at all: both checks treat a name
+missing from the fetched counts as zero downloads, not as a reason to skip
+it, because a freshly-registered name -- the case both checks exist to
+catch -- is exactly the one npm has no download history for yet. Neither
+check downgrades a finding, removes one, or turns a network problem into a
+reason to trust a name more than the offline checks already do. Whatever a
+check could not establish is
 named, not implied: a diagnostic with code `online-check-unreachable` says
 which check was asking, how many findings or candidates were affected, and
 why the request failed, so a consumer can tell "the network was down" apart

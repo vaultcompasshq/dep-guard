@@ -47,11 +47,19 @@ describe('applyTyposquatAsymmetry', () => {
     expect(findings[0].severity).toBe('low');
   });
 
-  test('leaves a finding alone when the API has no data for it', async () => {
+  test('escalates a finding when the API has no download record for it at all', async () => {
+    // A name missing from the counts Map means the API answered but has no
+    // download record for this exact name -- the archetypal case for a
+    // freshly-registered squat, and a stronger signal than a low count, not
+    // a reason to skip it. This replaces a prior version of this test that
+    // asserted the opposite (leaving the finding alone), which encoded the
+    // zero-download-blindness bug: a name with no record at all was the one
+    // case the check could never fire on.
     const findings = [typosquatFinding({ packageName: 'no-data-pkg' })];
     const diagnostics: Diagnostic[] = [];
     await applyTyposquatAsymmetry(findings, fakeDeps({}), diagnostics);
-    expect(findings[0].severity).toBe('low');
+    expect(findings[0].severity).toBe('high');
+    expect(findings[0].details).toMatchObject({ onlineWeeklyDownloads: 0 });
   });
 
   test('never touches a critical alias-list finding', async () => {
