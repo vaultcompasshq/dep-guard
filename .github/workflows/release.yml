@@ -1,11 +1,12 @@
 name: Release
 
-# Tag triggered only. No push- or PR-triggered CI here on purpose: the org's
-# hosted Actions budget is tight for private repos, and even though
-# dep-guard is public (so its standard-runner minutes are free regardless),
-# there is no continuous CI gate yet - gates run locally
-# (pnpm typecheck / pnpm lint / pnpm test) and this workflow verifies them
-# again right before anything is published.
+# Tag triggered only. Push- and PR-triggered CI now lives in ci.yml (added
+# once dep-guard is public, so its standard-runner minutes are free
+# regardless of the org's billing state for private repos) and gates every
+# merge to main. This workflow does not replace that gate - it re-verifies
+# the same checks (pnpm build / pnpm typecheck / pnpm lint / pnpm test)
+# right before anything is published, in case main moved between the
+# merge and the tag.
 
 on:
   push:

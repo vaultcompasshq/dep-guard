@@ -25,6 +25,14 @@ afterEach(() => {
 const MADE_UP_TOKEN = 'zzz-fixture-codename-not-real';
 const MADE_UP_TOKEN_HASH = hashToken(MADE_UP_TOKEN);
 
+// A second made-up, single-word token (no hyphens) for the snake_case /
+// SCREAMING_SNAKE / camelCase splitting tests -- those exercise extraction
+// of one embedded word out of a compound identifier, which needs a banned
+// token that is itself a single word rather than an already-hyphenated
+// compound.
+const SINGLE_WORD_TOKEN = 'zzzcodenamefixturenotreal';
+const SINGLE_WORD_TOKEN_HASH = hashToken(SINGLE_WORD_TOKEN);
+
 // Built from parts (never a contiguous literal in this source file) so the
 // guard does not flag this very test file when it scans the repository.
 const FIXTURE_INTERNAL_PATH = ['/Users/someone', 'Projects/some-app/notes'].join('/');
@@ -168,5 +176,76 @@ describe('scanFile (unit)', () => {
     const text = `line one\nline two\nline three has an ${emDash} dash\n`;
     const findings = scanFile('fixture.md', text, { allowlisted: false, bannedHashes: new Set() });
     expect(findings).toEqual(['fixture.md:3: em/en dash (non-ASCII) in tracked file']);
+  });
+
+  it('flags a banned token that appears only in the file path, not the contents', () => {
+    // "fixtures/<codename>/notes.md" -- the token sits between two path
+    // separators, so it is isolated exactly the way it would be as a
+    // hyphenated token in file content.
+    const rel = `fixtures/${MADE_UP_TOKEN}/notes.md`;
+    const findings = scanFile(rel, 'Nothing sensitive in the body.\n', {
+      allowlisted: false,
+      bannedHashes: new Set([MADE_UP_TOKEN_HASH]),
+    });
+    expect(findings).toEqual([`${rel}: blocked token in file path (hash match)`]);
+  });
+
+  it('flags a banned token embedded in a hyphenated path segment', () => {
+    // "docs/<codename>-migration.md" -- the token is a hyphenated part of
+    // a longer segment, matching the spec's own worked example.
+    const rel = `docs/${SINGLE_WORD_TOKEN}-migration.md`;
+    const findings = scanFile(rel, 'Nothing sensitive in the body.\n', {
+      allowlisted: false,
+      bannedHashes: new Set([SINGLE_WORD_TOKEN_HASH]),
+    });
+    expect(findings).toEqual([`${rel}: blocked token in file path (hash match)`]);
+  });
+
+  it('still scans the path of an allowlisted file, even though its contents are skipped', () => {
+    const rel = `docs/${SINGLE_WORD_TOKEN}-migration.md`;
+    const findings = scanFile(rel, `Body mentions ${MADE_UP_TOKEN} too, but that is content.\n`, {
+      allowlisted: true,
+      bannedHashes: new Set([SINGLE_WORD_TOKEN_HASH, MADE_UP_TOKEN_HASH]),
+    });
+    // The path finding fires; the content mention of MADE_UP_TOKEN does not,
+    // because allowlisting exempts contents (proving the two checks are
+    // independent).
+    expect(findings).toEqual([`${rel}: blocked token in file path (hash match)`]);
+  });
+
+  it('catches a banned token embedded in a snake_case identifier', () => {
+    const findings = scanFile('fixture.js', `const value = "my_${SINGLE_WORD_TOKEN}_thing";\n`, {
+      allowlisted: false,
+      bannedHashes: new Set([SINGLE_WORD_TOKEN_HASH]),
+    });
+    expect(findings).toEqual(['fixture.js:1: blocked token (hash match)']);
+  });
+
+  it('catches a banned token embedded in a SCREAMING_SNAKE_CASE env var', () => {
+    const envVar = `${SINGLE_WORD_TOKEN.toUpperCase()}_API_KEY`;
+    const findings = scanFile('fixture.env', `${envVar}=secret\n`, {
+      allowlisted: false,
+      bannedHashes: new Set([SINGLE_WORD_TOKEN_HASH]),
+    });
+    expect(findings).toEqual(['fixture.env:1: blocked token (hash match)']);
+  });
+
+  it('catches a banned token embedded in a camelCase identifier', () => {
+    const capitalized = SINGLE_WORD_TOKEN[0].toUpperCase() + SINGLE_WORD_TOKEN.slice(1);
+    const findings = scanFile('fixture.js', `const the${capitalized}App = init();\n`, {
+      allowlisted: false,
+      bannedHashes: new Set([SINGLE_WORD_TOKEN_HASH]),
+    });
+    expect(findings).toEqual(['fixture.js:1: blocked token (hash match)']);
+  });
+
+  it('still yields the whole hyphenated compound alongside its individual words', () => {
+    const compound = `some-${SINGLE_WORD_TOKEN}-thing`;
+    const compoundHash = hashToken(compound);
+    const findings = scanFile('fixture.md', `${compound}\n`, {
+      allowlisted: false,
+      bannedHashes: new Set([compoundHash]),
+    });
+    expect(findings).toEqual(['fixture.md:1: blocked token (hash match)']);
   });
 });
