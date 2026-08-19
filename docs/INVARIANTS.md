@@ -625,14 +625,14 @@ successful bulk response, or (a scoped name always, or an unscoped name
 whenever it is alone in its 128-name batch of unscoped names) a
 single-name 404 that a sentinel probe confirmed was genuine rather than
 a symptom of a broken downloads API, by asking the same downloads
-endpoint about a name
-certain to exist and certain to have downloads (`react`, verified
-against the corpus's own popularity list) before trusting the original
-404 -- both checks treat this, and only this, as a confirmed zero; and a
-name that is unresolved, which in practice a single-name 404 no longer
-produces (it resolves via the sentinel probe, or the whole fetch call
-throws and is diagnosed instead), so reaching this state now means the
-fetch returned a malformed or unrecognized response shape -- both checks
+endpoint about a name certain to exist and certain to have downloads
+(`react`, verified against the corpus's own popularity list) before
+trusting the original 404 -- both checks treat this, and only this, as a
+confirmed zero; and a name that is unresolved, which in practice a
+single-name 404 no longer produces (it resolves via the sentinel probe,
+or the whole fetch call throws and is diagnosed instead), so reaching
+this state now means the fetch returned a malformed or unrecognized
+response shape -- both checks
 leave this one exactly as they would have before the distinction
 existed, at the candidate's offline severity, never promoted to a
 signal. Deliberately probing the downloads API rather than the registry

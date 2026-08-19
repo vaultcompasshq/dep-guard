@@ -345,9 +345,10 @@ describe('findRegisteredSquats, against the real fetchWeeklyDownloads', () => {
   test('an unscoped name with no download record produces the same finding whether fetched alone or alongside others', async () => {
     // Non-determinism was the bug this round of the fix closed: whether a
     // freshly-registered unscoped name was even checkable used to depend
-    // on how many OTHER cache misses happened to land in the same scan
-    // (a batch of exactly one hits the ambiguous single-name path; a
-    // batch of two or more reaches the bulk endpoint directly). Both
+    // on how many OTHER unscoped cache misses happened to share its
+    // 128-name batch (a batch of exactly one hits the ambiguous
+    // single-name path; a batch of two or more reaches the bulk endpoint
+    // directly, and scoped names never share a batch at all). Both
     // shapes must now resolve identically -- same severity, same
     // weeklyDownloads -- regardless of unrelated batch membership.
     const soloFetchImpl = scriptedFetch([

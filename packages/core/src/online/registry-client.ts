@@ -161,13 +161,17 @@ function splitDownloadBatches(names: string[], batchSize = DOWNLOADS_BATCH_SIZE)
 //    reads this set, not merely a missing key in `counts`.
 //  - absent from both: a defensive case, not the common path -- a bulk
 //    response entry in some shape neither a real count nor an explicit
-//    null. A single-name 404 no longer lands here: it either resolves to
-//    `noRecord` (the sentinel probe confirmed the endpoint is healthy) or
-//    makes the whole fetchWeeklyDownloads call throw (the sentinel probe
-//    itself failed, see probeDownloadsApiHealth), never a silent gap. A
-//    consumer must still treat an absence from both sets the same as if
-//    the name had never been asked about at all -- never as a confirmed
-//    zero.
+//    null, or a point-shaped body whose `downloads` field is null rather
+//    than a number. Note also that both sets are intersected with
+//    `requested`: this function never reports a name the caller did not
+//    ask about, whatever keys the response body carried, and a caller may
+//    rely on that. A single-name 404 no longer lands here: it either
+//    resolves to `noRecord` (the sentinel probe confirmed the endpoint is
+//    healthy) or makes the whole fetchWeeklyDownloads call throw (the
+//    sentinel probe itself failed, see probeDownloadsApiHealth), never a
+//    silent gap. A consumer must still treat an absence from both sets
+//    the same as if the name had never been asked about at all -- never
+//    as a confirmed zero.
 export interface DownloadCountsResult {
   counts: Map<string, number>;
   noRecord: Set<string>;
@@ -190,17 +194,17 @@ function readDownloadCounts(payload: unknown, requested: string[]): DownloadCoun
   // requestedSet gates every entry read from the response body, not just
   // the numeric ones: a bulk response is keyed by whatever the SERVER
   // chose to put in it, and this loop must not trust that blindly. A
-  // point-shaped body ({"downloads": null, ...}) read by this branch
-  // (never actually reached today, since the requested.length === 1
-  // check above already handles the real point shape, but readDownloadCounts
-  // has no way to know a future caller will not exercise it some other
-  // way) would otherwise inject the literal string "downloads" into
+  // point-shaped body carrying a null count ({"downloads": null, ...})
+  // does reach this loop today: the branch above requires a NUMERIC
+  // downloads field, so a single-name request answered that way falls
+  // through to here, and without the gate the literal object key
+  // "downloads" would be read as a package name and injected into
   // noRecord; a bulk body carrying a null entry for a name that was never
   // requested would inject that name too. Now that noRecord is a signal
   // strong enough to mint a finding, an injected name is a false positive
   // manufactured from a response shape npm never actually sends, not a
   // theoretical concern -- the fetch layer has to be as suspicious of the
-  // server's OWN keys as it already is of a swallowed 404.
+  // server's OWN keys as it is of any other unverified answer.
   const requestedSet = new Set(requested);
   for (const [name, entry] of Object.entries(record)) {
     if (!requestedSet.has(name)) {
