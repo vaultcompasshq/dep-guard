@@ -18,13 +18,14 @@
 
 import type { CheckContext } from '../checks/types.js';
 import { newRegistryNames } from '../checks/candidates.js';
+import type { DownloadCountsResult } from './registry-client.js';
 import type { Diagnostic, Finding } from '../types.js';
 
 export const REGISTERED_SQUAT_DOWNLOAD_FLOOR = 50;
 export const REGISTERED_SQUAT_MAX_AGE_DAYS = 30;
 
 export interface RegisteredSquatDeps {
-  fetchWeeklyDownloads(names: string[]): Promise<Map<string, number>>;
+  fetchWeeklyDownloads(names: string[]): Promise<DownloadCountsResult>;
   fetchPackument(name: string): Promise<{ createdAt: string | null } | null>;
 }
 
@@ -47,9 +48,9 @@ export async function findRegisteredSquats(
     return [];
   }
 
-  let counts: Map<string, number>;
+  let downloadsResult: DownloadCountsResult;
   try {
-    counts = await deps.fetchWeeklyDownloads(candidates.map((c) => c.registryName));
+    downloadsResult = await deps.fetchWeeklyDownloads(candidates.map((c) => c.registryName));
   } catch (err) {
     diagnostics.push({
       code: 'online-check-unreachable',
@@ -63,8 +64,41 @@ export async function findRegisteredSquats(
   const findings: Omit<Finding, 'fingerprint'>[] = [];
 
   for (const { change, registryName } of candidates) {
-    const downloads = counts.get(registryName);
-    if (downloads === undefined || downloads >= REGISTERED_SQUAT_DOWNLOAD_FLOOR) {
+    // Three states, not two -- see DownloadCountsResult in
+    // registry-client.ts. A real count is used as-is. A name in
+    // `noRecord` means the downloads fetch confirmed it has no download
+    // history for this exact name -- either a null entry in a bulk
+    // response, or (a scoped name always, or an unscoped name whenever it
+    // is alone in its 128-name batch of unscoped names) a single-name 404
+    // that registry-client.ts's own sentinel probe confirmed was genuine
+    // rather than a symptom of a broken downloadsApi. Either way this is
+    // the archetypal registered-squat case (a freshly-registered attacker
+    // name is precisely the name with no download history yet), so it is
+    // treated as zero rather than skipped, letting this check fire on its
+    // own defining example instead of going structurally silent on it. A
+    // name in neither is unresolved -- as a matter of what this function
+    // could establish it reaches here only if the upstream fetch had a
+    // defensive, malformed-response-shaped gap, since a single-name 404
+    // is resolved (into `noRecord`) or turned into a thrown, diagnosed
+    // failure before it would ever otherwise land here -- and is skipped
+    // exactly as it would have been before this fix -- an unresolved
+    // absence is not evidence of anything, and must not mint a finding
+    // regardless of which upstream implementation produced it. In the
+    // actual production wiring (scan.ts's cachedFetchWeeklyDownloads),
+    // `noRecord` always arrives here empty: the cache wrapper has already
+    // folded any confirmed no-record answer into `counts` as a literal 0
+    // before this function ever sees it, so this branch is exercised by
+    // this file's own tests, not by a real scan.
+    const fromCounts = downloadsResult.counts.get(registryName);
+    let downloads: number;
+    if (fromCounts !== undefined) {
+      downloads = fromCounts;
+    } else if (downloadsResult.noRecord.has(registryName)) {
+      downloads = 0;
+    } else {
+      continue;
+    }
+    if (downloads >= REGISTERED_SQUAT_DOWNLOAD_FLOOR) {
       continue;
     }
 

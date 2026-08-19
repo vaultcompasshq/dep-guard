@@ -606,13 +606,60 @@ gave it offline; a network failure means it leaves every candidate exactly
 as it found them. The registered-squat check either adds a medium finding
 for a recently-published, near-zero-download name, or adds nothing; a
 network failure means it adds nothing, the same outcome as a scan that
-turned up no candidates for it at all. Neither check downgrades a finding,
-removes one, or turns a network problem into a reason to trust a name more
-than the offline checks already do. Whatever a check could not establish is
-named, not implied: a diagnostic with code `online-check-unreachable` says
-which check was asking, how many findings or candidates were affected, and
-why the request failed, so a consumer can tell "the network was down" apart
-from "nothing was there to find" instead of reading silence as either.
+turned up no candidates for it at all.
+
+"Near-zero-download" includes a name the downloads API has no record for
+at all, and that case is not an edge case for registered-squat: a
+freshly-registered attacker name is exactly the name npm has no download
+history for yet, so treating an absent count as "skip" made the check
+structurally unable to fire on its own defining example. For
+typosquat-asymmetry, the same absent-count case is a stronger version of
+the low-download signal it already escalates on -- it is not specific to
+a freshly-registered name the way registered-squat's purpose is; it
+applies to any resemblance match the offline pass could not price.
+`registry-client.ts`'s `fetchWeeklyDownloads` answers this with three
+states, not two, and both checks read the distinction rather than
+collapsing it: a name npm reports a real count for; a name npm's
+response confirms it has no record for -- either a null entry in a
+successful bulk response, or (a scoped name always, or an unscoped name
+whenever it is alone in its 128-name batch of unscoped names) a
+single-name 404 that a sentinel probe confirmed was genuine rather than
+a symptom of a broken downloads API, by asking the same downloads
+endpoint about a name certain to exist and certain to have downloads
+(`react`, verified against the corpus's own popularity list) before
+trusting the original 404 -- both checks treat this, and only this, as a
+confirmed zero; and a name that is unresolved, which in practice a
+single-name 404 no longer produces (it resolves via the sentinel probe,
+or the whole fetch call throws and is diagnosed instead), so reaching
+this state now means the fetch returned a malformed or unrecognized
+response shape -- both checks
+leave this one exactly as they would have before the distinction
+existed, at the candidate's offline severity, never promoted to a
+signal. Deliberately probing the downloads API rather than the registry
+(fetchPackument) to confirm a single-name 404: those are two different
+services with independent failure modes, and a downloads API that 404s
+on everything while the registry is perfectly healthy would make every
+existing scoped package read as a confirmed zero if the registry were
+asked instead -- the same fabricated-block failure this whole
+distinction exists to prevent, just moved to a different service.
+Collapsing "confirmed no record" and "unresolved" into one absent-key
+case, the way both checks did before this distinction was added, would
+have let a broken downloadsApi silently mint a finding for every
+single-name lookup instead of surfacing as online-check-unreachable --
+the same failure mode a real network outage is supposed to produce, not
+a wave of new findings.
+
+Neither check downgrades a finding, removes one, or turns a network
+problem into a reason to trust a name more than the offline checks
+already do. Whatever a check could not establish is named, not implied:
+a diagnostic with code `online-check-unreachable` says which check was
+asking, how many findings or candidates were affected, and why the
+request failed, so a consumer can tell three things apart, not two --
+"the network was down" (a diagnostic fired), "the API answered and
+confirmed nothing was on record" (now a signal, per above), and "the API
+answered but this one name's status is unresolved" (silence, the same as
+if the name had never been asked about) -- instead of reading any
+silence as interchangeable with any other.
 
 `enrichOnline` -- the function `scan()` and `checkSingle()` both call to run
 the online checks -- must never itself throw. Each check it calls
@@ -627,14 +674,25 @@ one failure mode this whole feature exists to avoid.
 The online cache (`online/cache.ts`) is deliberately not a trust input, and
 that is a different property from failing closed rather than a relaxation
 of it. `config.ts` and `baseline.ts` fail closed on a broken file because
-trusting a corrupt one would accept whatever it happened to contain. The
-online cache holds nothing an attacker benefits from forging -- a stale or
-fabricated download count or creation date can only make a check less
-likely to fire, never a name look more dangerous than it is, so the worst
-a corrupt cache file can cost is an extra fetch, never a false "safe" the
-way a corrupt config or baseline could. It is loaded permissively on
-purpose: a cache file that fails to parse is discarded and rebuilt from an
-empty state, not a `DepGuardError`.
+trusting a corrupt one would accept whatever it happened to contain. A
+stale or fabricated download count can swing a check in either direction
+-- a forged high count can suppress an escalation the online checks would
+otherwise have added, and (since the zero-download-blindness fix) a
+forged low count, or a machine-global cache entry poisoned to a literal
+0, can cause a check to fire, or escalate, for a package that is
+genuinely fine; the cached 0 this fix writes for a confirmed no-record
+answer persists for the same 24 hours as any other cached count and is
+exactly as forgeable. What the online cache can never do, either
+direction, is remove or downgrade a finding the six OFFLINE checks
+already established: `applyTyposquatAsymmetry` only ever escalates a
+low to high or leaves it alone, `findRegisteredSquats` only ever adds a
+new finding or adds nothing, and neither touches an existing offline
+finding's severity or presence. So a corrupt or forged online cache can
+cost an extra fetch, a missed online-only escalation, or a spurious
+online-only finding -- never a name that the offline checks flagged
+reading as clean. It is loaded permissively on purpose: a cache file
+that fails to parse is discarded and rebuilt from an empty state, not a
+`DepGuardError`.
 
 ## The popularity list is a trust input, and it is sized for its own rule
 
