@@ -80,6 +80,23 @@ describe('buildMeta', () => {
     expect(meta.fpRate).toBe(0.0001);
   });
 
+  it('emits formatVersion 1, the on-disk corpus format version', () => {
+    const meta = buildMeta({
+      builtAt: '2026-08-09T00:00:00.000Z',
+      nameCount: 4274469,
+      fpRate: 0.0001,
+      topCount: 400,
+      topOrdering: 'curated',
+      aliasCount: 40,
+      bitCount: 81_940_000,
+      hashCount: 13,
+      bloomBytes: 10_242_510,
+      source: 'https://replicate.npmjs.com',
+      updateSeq: 124098695,
+    });
+    expect(meta.formatVersion).toBe(1);
+  });
+
   it('records the measured filter geometry rather than the design target alone', () => {
     const meta = buildMeta({
       builtAt: '2026-08-09T00:00:00.000Z',

@@ -205,6 +205,59 @@ describe('loadCorpus', () => {
   // names.bloom is loaded lazily (only hasName touches it), so a
   // truncated bloom file does not throw at loadCorpus() itself -- it
   // throws the first time hasName() actually needs the filter.
+  test('meta.json with formatVersion 1 loads fine', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, formatVersion: 1 },
+    });
+    const corpus = loadCorpus(dir);
+    expect(corpus.builtAt).toBe('2026-08-01');
+  });
+
+  test('meta.json with formatVersion 2 throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, formatVersion: 2 },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
+  test('meta.json with formatVersion 0 throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, formatVersion: 0 },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
+  test('meta.json with no formatVersion loads fine (a pre-versioning local corpus)', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01 },
+    });
+    const corpus = loadCorpus(dir);
+    expect(corpus.builtAt).toBe('2026-08-01');
+  });
+
+  test('meta.json with walkComplete false throws corpus-corrupt', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, walkComplete: false },
+    });
+    expectCorpusCorrupt(() => loadCorpus(dir));
+  });
+
+  test('meta.json with walkComplete true loads fine', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, walkComplete: true },
+    });
+    const corpus = loadCorpus(dir);
+    expect(corpus.builtAt).toBe('2026-08-01');
+  });
+
+  test('meta.json with no walkComplete loads fine (a pre-versioning local corpus)', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01 },
+    });
+    const corpus = loadCorpus(dir);
+    expect(corpus.builtAt).toBe('2026-08-01');
+  });
+
   test('truncated names.bloom throws corpus-corrupt when a name check first needs it', () => {
     const full = validBloomBytes();
     const truncated = full.slice(0, full.length - 1);

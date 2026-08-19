@@ -7,6 +7,13 @@ interface CorpusMeta {
   builtAt: string;
   nameCount: number;
   fpRate: number;
+  // Both optional: a corpus built before these fields existed is a local
+  // development artifact (nothing has ever been published), and the
+  // release pipeline independently requires both to be present and correct
+  // in any corpus that actually ships. See assertMetaShape below for the
+  // tolerance rule this reflects.
+  formatVersion?: number;
+  walkComplete?: boolean;
 }
 
 export interface Corpus {
@@ -89,6 +96,33 @@ function assertMetaShape(filePath: string, value: unknown): asserts value is Cor
   if (!isPlainObject(value) || typeof value.builtAt !== 'string') {
     throw new DepGuardError(
       `corpus meta is not an object with a string builtAt: ${filePath}`,
+      'corpus-corrupt'
+    );
+  }
+
+  // formatVersion and walkComplete are both ABSENT-tolerant: a corpus built
+  // before these fields existed is a local development artifact (nothing
+  // has ever been published), and the release pipeline independently
+  // requires both fields to be present and correct in any corpus that
+  // actually ships. So tolerating their absence here costs nothing, and it
+  // keeps the committed fixture corpus and the rest of the test suite --
+  // which construct minimal metas without either field -- working. Each
+  // check below only refuses a value that is present and explicitly wrong.
+
+  if ('formatVersion' in value && value.formatVersion !== 1) {
+    throw new DepGuardError(
+      `corpus meta.formatVersion is ${JSON.stringify(value.formatVersion)}, which this ` +
+        `dep-guard does not understand (it understands format version 1): ${filePath}. ` +
+        'Upgrade dep-guard, or rebuild the corpus in a format version this dep-guard supports.',
+      'corpus-corrupt'
+    );
+  }
+
+  if ('walkComplete' in value && value.walkComplete === false) {
+    throw new DepGuardError(
+      `corpus meta.walkComplete is false: ${filePath}. This corpus was built from a walk ` +
+        'that was stopped early, so it would report every name it never reached as unknown. ' +
+        'It must not be used for a real scan -- rebuild the corpus without --max-names.',
       'corpus-corrupt'
     );
   }

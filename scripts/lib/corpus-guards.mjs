@@ -85,6 +85,13 @@ export function buildMeta(values) {
   }
 
   return {
+    // The on-disk corpus format version. A reader uses this to tell a
+    // corpus it understands from one written by a newer dep-guard. It is
+    // emitted from the first published corpus onward -- and not before --
+    // precisely because a format version cannot be assigned retroactively
+    // once corpora exist in the wild: every corpus already shipped without
+    // this field would need a version invented for it after the fact.
+    formatVersion: 1,
     builtAt,
     nameCount,
     fpRate,
