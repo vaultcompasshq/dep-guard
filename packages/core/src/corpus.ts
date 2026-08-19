@@ -101,7 +101,7 @@ function assertAliasesShape(
 // version 2 exists, whoever adds it has to grow this set to admit both 1
 // and 2, not just move the comparison to "=== 2", or that promise breaks
 // for anyone still holding a version-1 corpus.
-const SUPPORTED_CORPUS_FORMAT_VERSIONS: readonly number[] = [1];
+export const SUPPORTED_CORPUS_FORMAT_VERSIONS: readonly number[] = [1];
 
 function assertMetaShape(filePath: string, value: unknown): asserts value is CorpusMeta {
   if (!isPlainObject(value) || typeof value.builtAt !== 'string') {
