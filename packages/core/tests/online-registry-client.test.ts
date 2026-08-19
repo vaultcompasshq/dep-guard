@@ -253,9 +253,9 @@ describe('fetchWeeklyDownloads', () => {
   test('a name the API confirms it has no data for lands in noRecord, not counts', async () => {
     // A bulk-shaped 200 response (a name-keyed body, even for a single
     // requested name) with an explicit null is npm's confirmed "no
-    // download record" answer -- distinct from a swallowed single-name
-    // 404 (see the two tests below), and the only case a caller may treat
-    // as zero downloads rather than merely "unknown".
+    // download record" answer, reaching noRecord directly rather than via
+    // the sentinel probe (see the tests below, which reach the same
+    // noRecord outcome starting from a single-name 404 instead).
     const fetchImpl = scriptedFetch([jsonResponse({ 'unknown-pkg': null })]);
     const result = await fetchWeeklyDownloads(['unknown-pkg'], { fetchImpl, sleepImpl: noSleep });
     expect(result.counts.has('unknown-pkg')).toBe(false);
@@ -274,7 +274,13 @@ describe('fetchWeeklyDownloads', () => {
     // 404 is trusted as a confirmed no-record answer. Regression
     // coverage: a 404 on any single-name lookup used to throw out of the
     // whole function, discarding the bulk batch's already-fetched
-    // results too.
+    // results too. That preservation holds here because the sentinel
+    // probe succeeds -- if it did not (see the propagation tests below),
+    // the whole call still throws and the bulk batch's results are
+    // discarded along with it. That is the safe direction (an unhealthy
+    // downloads API degrades the whole call rather than trusting a
+    // partial answer), not a guarantee that a later failure can never
+    // undo earlier work within the same call.
     const fetchImpl = scriptedFetch([
       jsonResponse({ 'left-pad': { downloads: 10 } }),
       jsonResponse(null, { status: 404 }),
@@ -358,6 +364,62 @@ describe('fetchWeeklyDownloads', () => {
     await expect(
       fetchWeeklyDownloads(['hallucinated-pkg'], { fetchImpl, sleepImpl: noSleep, attempts: 1 })
     ).rejects.toThrow(/500/);
+  });
+
+  test('a single-name 404 whose sentinel probe returns 200 with an unexpected body propagates rather than resolving to a confirmed no-record', async () => {
+    // A downloads API can be reachable (a 200) and still not be answering
+    // correctly -- an error object, an empty object, anything that is
+    // not a real numeric count for the sentinel. Trusting a bare 2xx here
+    // would let exactly that shape convert every single-name 404 in this
+    // call into a confirmed zero, which for typosquat-asymmetry is a
+    // blocking high at the default gate. The probe reuses
+    // readDownloadCounts (the same parser every other response goes
+    // through) to judge the body, not a second hand-rolled check.
+    const fetchImpl = scriptedFetch([
+      jsonResponse(null, { status: 404 }),
+      jsonResponse({ error: 'internal server error' }),
+    ]);
+    await expect(
+      fetchWeeklyDownloads(['hallucinated-pkg'], { fetchImpl, sleepImpl: noSleep, attempts: 1 })
+    ).rejects.toThrow(/unexpected response shape/);
+  });
+
+  test('a candidate list that includes the sentinel itself still degrades safely on a dead downloads API', async () => {
+    // If react itself somehow 404s (a fully dead downloads API), the
+    // probe -- also asking about react -- 404s too, and the whole call
+    // throws rather than reading react's own 404 as a confirmed
+    // no-record answer for react.
+    const fetchImpl = scriptedFetch([jsonResponse(null, { status: 404 })]);
+    await expect(
+      fetchWeeklyDownloads(['react'], { fetchImpl, sleepImpl: noSleep, attempts: 1 })
+    ).rejects.toThrow(/404/);
+  });
+
+  test('noRecord is intersected with what was requested: a null entry for a name outside the batch is not injected', async () => {
+    // A malformed or unexpected bulk response could carry a null entry
+    // for a name that was never part of this request. Now that noRecord
+    // is a signal strong enough to mint a finding, that must not inject
+    // an unrelated name into it.
+    const fetchImpl = scriptedFetch([
+      jsonResponse({ 'left-pad': { downloads: 10 }, 'not-requested-at-all': null }),
+    ]);
+    const result = await fetchWeeklyDownloads(['left-pad'], { fetchImpl, sleepImpl: noSleep });
+    expect(result.counts.get('left-pad')).toBe(10);
+    expect(result.noRecord.has('not-requested-at-all')).toBe(false);
+  });
+
+  test('noRecord is intersected with what was requested: a bulk-shaped null for the literal key "downloads" is not injected', async () => {
+    // readDownloadCounts's point-response branch is gated on
+    // requested.length === 1, so a single-name request with a
+    // bulk-shaped body ({"downloads": null, ...}, rather than a real
+    // point body) falls through to the general bulk-parsing loop. That
+    // loop must not read the literal object key "downloads" as a
+    // package name just because it appears in the response.
+    const fetchImpl = scriptedFetch([jsonResponse({ downloads: null })]);
+    const result = await fetchWeeklyDownloads(['some-pkg'], { fetchImpl, sleepImpl: noSleep });
+    expect(result.noRecord.has('downloads')).toBe(false);
+    expect(result.noRecord.has('some-pkg')).toBe(false);
+    expect(result.counts.size).toBe(0);
   });
 
   test('a non-404 failure still propagates', async () => {

@@ -16,8 +16,14 @@ function typosquatFinding(overrides: Partial<Finding> = {}): Omit<Finding, 'fing
 // `noRecordNames` models a confirmed "npm answered, no download history"
 // name (registry-client.ts's DownloadCountsResult.noRecord) -- distinct
 // from a name that is simply absent from `counts` and not listed here,
-// which models an unresolved/ambiguous absence (e.g. a swallowed
-// single-name 404): present in neither counts nor noRecord.
+// which models an unresolved absence: present in neither counts nor
+// noRecord. This check does not know or care what upstream cause
+// produces that absence (registry-client.ts resolves an ordinary
+// single-name 404 into noRecord or throws before it ever reaches here --
+// see its own DownloadCountsResult doc comment -- so in production this
+// state means a defensive, malformed-response-shaped gap); the check's
+// contract is simply that an unresolved name is left alone, regardless of
+// why it is unresolved.
 function fakeDeps(counts: Record<string, number>, noRecordNames: string[] = []) {
   return {
     fetchWeeklyDownloads: async (names: string[]) => {
@@ -72,12 +78,12 @@ describe('applyTyposquatAsymmetry', () => {
     expect(findings[0].details).toMatchObject({ onlineWeeklyDownloads: 0 });
   });
 
-  test('leaves a finding at its offline severity behind an unresolved (ambiguous) absence', async () => {
-    // Present in neither counts nor noRecord -- the shape a swallowed
-    // single-name 404 produces (see registry-client.ts). This is
-    // genuinely unknown, not a confirmed zero, and must not escalate:
-    // otherwise a misconfigured downloadsApi (every single-name lookup
-    // 404ing) would silently escalate every low typosquat match to high
+  test('leaves a finding at its offline severity behind an unresolved absence', async () => {
+    // Present in neither counts nor noRecord: genuinely unknown, not a
+    // confirmed zero, regardless of what upstream cause produced the
+    // absence (see the fakeDeps comment above). Must not escalate:
+    // trusting an unresolved absence as a signal would let a broken
+    // downloads fetch silently escalate every low typosquat match to high
     // instead of surfacing as online-check-unreachable.
     const findings = [typosquatFinding({ packageName: 'ambiguous-pkg' })];
     const diagnostics: Diagnostic[] = [];

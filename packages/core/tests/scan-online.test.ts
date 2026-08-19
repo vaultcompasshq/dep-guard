@@ -167,11 +167,13 @@ describe('scan(): online enrichment', () => {
     expect(result.findings.some((f) => f.ruleId === 'registered-squat')).toBe(true);
   });
 
-  test('--online does not invent a registered-squat finding behind an unresolved (ambiguous) 404', async () => {
+  test('--online does not invent a registered-squat finding behind an unresolved absence', async () => {
     // A name absent from BOTH counts and noRecord is unresolved, not a
-    // confirmed zero -- the shape a swallowed single-name 404 or a broken
-    // downloadsApi produces. This must not mint a finding even though the
-    // candidate is otherwise young enough to qualify.
+    // confirmed zero, regardless of what upstream cause produced it (this
+    // test mocks the whole registry-client module, so it exercises
+    // scan()'s wiring against that result directly rather than any
+    // particular upstream cause). This must not mint a finding even
+    // though the candidate is otherwise young enough to qualify.
     fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map(), noRecord: new Set() });
     fetchPackumentMock.mockResolvedValue({
       createdAt: new Date().toISOString(),
@@ -190,6 +192,41 @@ describe('scan(): online enrichment', () => {
       online: true,
     });
     expect(result.findings.some((f) => f.ruleId === 'registered-squat')).toBe(false);
+  });
+
+  test('a real count in the fetch result is never overwritten by noRecord, even from a malformed result carrying the same name in both', async () => {
+    // scan.ts's cachedFetchWeeklyDownloads iterates fetched.counts before
+    // fetched.noRecord and writes noRecord entries as a cached 0 -- so a
+    // malformed fetch result carrying the SAME name in both sets (which
+    // registry-client.ts's own intersection guard should prevent, but
+    // this wrapper does not get to assume its caller is well-behaved)
+    // must not let the noRecord pass overwrite the real count with a
+    // fabricated zero and cache that zero for 24 hours. The candidate's
+    // real count (5) is well below the registered-squat floor either way,
+    // so this asserts on the finding's own weeklyDownloads detail --
+    // the only way to tell "5 survived" apart from "0 overwrote it".
+    fetchWeeklyDownloadsMock.mockResolvedValue({
+      counts: new Map([['both-sets-thing', 5]]),
+      noRecord: new Set(['both-sets-thing']),
+    });
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: new Date().toISOString(),
+      latestVersion: '0.0.1',
+      latestPublishedAt: new Date().toISOString(),
+      deprecated: false,
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'both-sets-thing': '^0.0.1' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+    const finding = result.findings.find((f) => f.ruleId === 'registered-squat');
+    expect(finding?.details).toMatchObject({ weeklyDownloads: 5 });
   });
 
   test('config online:true turns it on without the flag', async () => {

@@ -622,9 +622,10 @@ states, not two, and both checks read the distinction rather than
 collapsing it: a name npm reports a real count for; a name npm's
 response confirms it has no record for -- either a null entry in a
 successful bulk response, or (a scoped name always, or an unscoped name
-whenever it is the only cache miss in a scan) a single-name 404 that a
-sentinel probe confirmed was genuine rather than a symptom of a broken
-downloads API, by asking the same downloads endpoint about a name
+whenever it is alone in its 128-name batch of unscoped names) a
+single-name 404 that a sentinel probe confirmed was genuine rather than
+a symptom of a broken downloads API, by asking the same downloads
+endpoint about a name
 certain to exist and certain to have downloads (`react`, verified
 against the corpus's own popularity list) before trusting the original
 404 -- both checks treat this, and only this, as a confirmed zero; and a
@@ -673,14 +674,25 @@ one failure mode this whole feature exists to avoid.
 The online cache (`online/cache.ts`) is deliberately not a trust input, and
 that is a different property from failing closed rather than a relaxation
 of it. `config.ts` and `baseline.ts` fail closed on a broken file because
-trusting a corrupt one would accept whatever it happened to contain. The
-online cache holds nothing an attacker benefits from forging -- a stale or
-fabricated download count or creation date can only make a check less
-likely to fire, never a name look more dangerous than it is, so the worst
-a corrupt cache file can cost is an extra fetch, never a false "safe" the
-way a corrupt config or baseline could. It is loaded permissively on
-purpose: a cache file that fails to parse is discarded and rebuilt from an
-empty state, not a `DepGuardError`.
+trusting a corrupt one would accept whatever it happened to contain. A
+stale or fabricated download count can swing a check in either direction
+-- a forged high count can suppress an escalation the online checks would
+otherwise have added, and (since the zero-download-blindness fix) a
+forged low count, or a machine-global cache entry poisoned to a literal
+0, can cause a check to fire, or escalate, for a package that is
+genuinely fine; the cached 0 this fix writes for a confirmed no-record
+answer persists for the same 24 hours as any other cached count and is
+exactly as forgeable. What the online cache can never do, either
+direction, is remove or downgrade a finding the six OFFLINE checks
+already established: `applyTyposquatAsymmetry` only ever escalates a
+low to high or leaves it alone, `findRegisteredSquats` only ever adds a
+new finding or adds nothing, and neither touches an existing offline
+finding's severity or presence. So a corrupt or forged online cache can
+cost an extra fetch, a missed online-only escalation, or a spurious
+online-only finding -- never a name that the offline checks flagged
+reading as clean. It is loaded permissively on purpose: a cache file
+that fails to parse is discarded and rebuilt from an empty state, not a
+`DepGuardError`.
 
 ## The popularity list is a trust input, and it is sized for its own rule
 

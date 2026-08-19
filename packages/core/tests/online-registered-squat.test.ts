@@ -100,8 +100,14 @@ const nowFn = () => NOW;
 // `noRecordNames` models a confirmed "npm answered, no download history"
 // name (registry-client.ts's DownloadCountsResult.noRecord) -- distinct
 // from a name that is simply absent from `downloads` and not listed here,
-// which models an unresolved/ambiguous absence (e.g. a swallowed
-// single-name 404): present in neither counts nor noRecord.
+// which models an unresolved absence: present in neither counts nor
+// noRecord. This check does not know or care what upstream cause
+// produces that absence (registry-client.ts resolves an ordinary
+// single-name 404 into noRecord or throws before it ever reaches here --
+// see its own DownloadCountsResult doc comment -- so in production this
+// state means a defensive, malformed-response-shaped gap); the check's
+// contract is simply that an unresolved name is skipped, regardless of
+// why it is unresolved.
 function fakeDeps(
   downloads: Record<string, number>,
   packuments: Record<string, string | null>,
@@ -199,13 +205,13 @@ describe('findRegisteredSquats', () => {
     });
   });
 
-  test('does not flag a recently-created name behind an unresolved (ambiguous) single-name 404', async () => {
-    // Present in neither counts nor noRecord -- the shape a swallowed
-    // single-name 404 produces (see registry-client.ts). This is
-    // genuinely unknown, not a confirmed zero, and must not mint a
-    // finding: otherwise a misconfigured downloadsApi (every single-name
-    // lookup 404ing) would silently flag every young candidate as a
-    // registered squat instead of surfacing as online-check-unreachable.
+  test('does not flag a recently-created name behind an unresolved absence', async () => {
+    // Present in neither counts nor noRecord: genuinely unknown, not a
+    // confirmed zero, regardless of what upstream cause produced the
+    // absence (see the fakeDeps comment above). Must not mint a finding:
+    // trusting an unresolved absence as a signal would let a broken
+    // downloads fetch silently flag every young candidate as a registered
+    // squat instead of surfacing as online-check-unreachable.
     const ctx = makeContext([makeChange({ name: 'ambiguous-pkg' })]);
     const findings = await findRegisteredSquats(
       ctx,

@@ -56,14 +56,20 @@ export async function applyTyposquatAsymmetry(
     // sentinel probe confirmed was genuine rather than a symptom of a
     // broken downloadsApi -- a stronger unpopularity signal than a low
     // recorded count, so it is treated as zero rather than left at the
-    // offline severity. A name in neither is unresolved -- in production
-    // this reaches here only if the upstream fetch had a defensive,
-    // malformed-response-shaped gap, since a single-name 404 is resolved
-    // (into `noRecord`) or turned into a thrown, diagnosed failure before
-    // it would ever otherwise land here -- and is left alone exactly as
-    // it would have been before this fix -- an unresolved absence is not
-    // evidence the candidate is unpopular, regardless of which upstream
-    // implementation produced it.
+    // offline severity. A name in neither is unresolved -- as a matter of
+    // what this function could establish it reaches here only if the
+    // upstream fetch had a defensive, malformed-response-shaped gap,
+    // since a single-name 404 is resolved (into `noRecord`) or turned
+    // into a thrown, diagnosed failure before it would ever otherwise
+    // land here -- and is left alone exactly as it would have been before
+    // this fix -- an unresolved absence is not evidence the candidate is
+    // unpopular, regardless of which upstream implementation produced it.
+    // In the actual production wiring (scan.ts's
+    // cachedFetchWeeklyDownloads), `noRecord` always arrives here empty:
+    // the cache wrapper has already folded any confirmed no-record answer
+    // into `counts` as a literal 0 before this function ever sees it, so
+    // this branch is exercised by this file's own tests, not by a real
+    // scan.
     const fromCounts = downloadsResult.counts.get(finding.packageName);
     let downloads: number;
     if (fromCounts !== undefined) {

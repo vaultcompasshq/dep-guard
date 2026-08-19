@@ -240,7 +240,19 @@ async function cachedFetchWeeklyDownloads(names: string[]): Promise<DownloadCoun
     // withholds a missing creation date below. Once cached as 0, it is
     // deliberately indistinguishable from an actual zero-download week --
     // that is the resolved answer, not a placeholder for one.
+    //
+    // Guarded on `!counts.has(name)`: fetched.counts is authoritative and
+    // must never be overwritten by fetched.noRecord. readDownloadCounts
+    // now intersects noRecord with what was actually requested, so this
+    // should not fire against npm's real behavior -- but a malformed
+    // downloads response is exactly the case a fetch layer has to be
+    // defensive about, not trusting, and the cost of getting this wrong is
+    // a real count silently replaced by a fabricated 0 that then persists
+    // in the cache for a full day.
     for (const name of fetched.noRecord) {
+      if (counts.has(name)) {
+        continue;
+      }
       counts.set(name, 0);
       store.set(`downloads:${name}`, 0, DOWNLOADS_TTL_MS);
     }

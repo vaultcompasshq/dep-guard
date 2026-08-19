@@ -187,7 +187,25 @@ function readDownloadCounts(payload: unknown, requested: string[]): DownloadCoun
     counts.set(requested[0], record.downloads);
     return { counts, noRecord };
   }
+  // requestedSet gates every entry read from the response body, not just
+  // the numeric ones: a bulk response is keyed by whatever the SERVER
+  // chose to put in it, and this loop must not trust that blindly. A
+  // point-shaped body ({"downloads": null, ...}) read by this branch
+  // (never actually reached today, since the requested.length === 1
+  // check above already handles the real point shape, but readDownloadCounts
+  // has no way to know a future caller will not exercise it some other
+  // way) would otherwise inject the literal string "downloads" into
+  // noRecord; a bulk body carrying a null entry for a name that was never
+  // requested would inject that name too. Now that noRecord is a signal
+  // strong enough to mint a finding, an injected name is a false positive
+  // manufactured from a response shape npm never actually sends, not a
+  // theoretical concern -- the fetch layer has to be as suspicious of the
+  // server's OWN keys as it already is of a swallowed 404.
+  const requestedSet = new Set(requested);
   for (const [name, entry] of Object.entries(record)) {
+    if (!requestedSet.has(name)) {
+      continue;
+    }
     if (entry !== null && typeof entry === 'object' && typeof (entry as { downloads?: unknown }).downloads === 'number') {
       counts.set(name, (entry as { downloads: number }).downloads);
     } else if (entry === null) {
@@ -231,22 +249,37 @@ export const DOWNLOAD_DISAMBIGUATION_SENTINEL = 'react';
 // probe asked the registry instead -- exactly the fabricated-block this
 // whole disambiguation exists to prevent, just moved one service over.
 //
-// A failure here (the sentinel itself 404s, or the request fails
-// outright) is deliberately NOT caught: it propagates out of
-// fetchWeeklyDownloads to the caller's own try/catch, identical to
-// today's behavior for a dead downloads API, so it is diagnosed as
-// online-check-unreachable rather than silently read as a confirmed
-// no-record answer for every single-name candidate in the batch.
+// A failure here (the sentinel itself 404s, the request fails outright,
+// or the response is a 2xx that is not actually a real download count --
+// a downloads API can be reachable and still answer with an error body
+// or something non-JSON-shaped under a 200) is deliberately NOT caught:
+// it propagates out of fetchWeeklyDownloads to the caller's own
+// try/catch, identical to today's behavior for a dead downloads API, so
+// it is diagnosed as online-check-unreachable rather than silently read
+// as a confirmed no-record answer for every single-name candidate in the
+// batch.
 async function probeDownloadsApiHealth(options: FetchOptions): Promise<void> {
   const downloadsApi = options.downloadsApi ?? DEFAULT_DOWNLOADS_API;
-  await fetchJson(
+  const payload = await fetchJson(
     `${downloadsApi}/downloads/point/last-week/${encodeURIComponent(DOWNLOAD_DISAMBIGUATION_SENTINEL)}`,
     options
   );
-  // Reaching this line at all is the confirmation: fetchJson only
-  // returns on a 2xx, and the sentinel's single-name point response is
-  // never anything but a real numeric count, so no further inspection
-  // of the body is needed.
+  // fetchJson only throws for a non-2xx status or a transport failure --
+  // a 2xx with an unexpected body (an error object, an empty object, a
+  // non-JSON-shaped payload) returns normally, and this check is what
+  // turns that into a failure too. Deliberately reused rather than
+  // hand-rolled: readDownloadCounts is already this file's one definition
+  // of "a well-formed downloads answer", and the sentinel's response has
+  // to be held to that exact same standard, not a second, looser one that
+  // could drift from it. A healthy downloads API's answer for the
+  // sentinel is never anything but a real numeric count, so anything
+  // readDownloadCounts cannot read as one is treated exactly like the
+  // sentinel 404ing.
+  if (!readDownloadCounts(payload, [DOWNLOAD_DISAMBIGUATION_SENTINEL]).counts.has(DOWNLOAD_DISAMBIGUATION_SENTINEL)) {
+    throw new Error(
+      `downloads API health probe for "${DOWNLOAD_DISAMBIGUATION_SENTINEL}" returned an unexpected response shape`
+    );
+  }
 }
 
 // This is gated on requested.length === 1 on purpose: a real bulk request
