@@ -18,13 +18,14 @@
 
 import type { CheckContext } from '../checks/types.js';
 import { newRegistryNames } from '../checks/candidates.js';
+import type { DownloadCountsResult } from './registry-client.js';
 import type { Diagnostic, Finding } from '../types.js';
 
 export const REGISTERED_SQUAT_DOWNLOAD_FLOOR = 50;
 export const REGISTERED_SQUAT_MAX_AGE_DAYS = 30;
 
 export interface RegisteredSquatDeps {
-  fetchWeeklyDownloads(names: string[]): Promise<Map<string, number>>;
+  fetchWeeklyDownloads(names: string[]): Promise<DownloadCountsResult>;
   fetchPackument(name: string): Promise<{ createdAt: string | null } | null>;
 }
 
@@ -47,9 +48,9 @@ export async function findRegisteredSquats(
     return [];
   }
 
-  let counts: Map<string, number>;
+  let downloadsResult: DownloadCountsResult;
   try {
-    counts = await deps.fetchWeeklyDownloads(candidates.map((c) => c.registryName));
+    downloadsResult = await deps.fetchWeeklyDownloads(candidates.map((c) => c.registryName));
   } catch (err) {
     diagnostics.push({
       code: 'online-check-unreachable',
@@ -63,16 +64,28 @@ export async function findRegisteredSquats(
   const findings: Omit<Finding, 'fingerprint'>[] = [];
 
   for (const { change, registryName } of candidates) {
-    // A key missing from counts here means the API answered for this batch
-    // (a whole-batch failure would have thrown above and been caught as
-    // online-check-unreachable) but has no download record for this exact
-    // name -- npm's actual behaviour for a name it has never seen. That is
-    // the archetypal registered-squat case, not a reason to skip: a
-    // freshly-registered attacker name is precisely the name with no
-    // download history yet. Treat the missing entry as zero downloads
-    // rather than bailing, so this check can fire on its own defining
-    // example instead of going structurally silent on it.
-    const downloads = counts.get(registryName) ?? 0;
+    // Three states, not two -- see DownloadCountsResult in
+    // registry-client.ts. A real count is used as-is. A name in
+    // `noRecord` means npm answered successfully and confirmed it has no
+    // download history for this exact name: the archetypal
+    // registered-squat case (a freshly-registered attacker name is
+    // precisely the name with no download history yet), so it is treated
+    // as zero rather than skipped, letting this check fire on its own
+    // defining example instead of going structurally silent on it. A name
+    // in neither is unresolved (typically a swallowed single-name 404,
+    // ambiguous between "npm has never seen this name" and a structural
+    // failure such as a misconfigured downloadsApi) and is skipped exactly
+    // as it would have been before this fix -- an unresolved absence is
+    // not evidence of anything, and must not mint a finding.
+    const fromCounts = downloadsResult.counts.get(registryName);
+    let downloads: number;
+    if (fromCounts !== undefined) {
+      downloads = fromCounts;
+    } else if (downloadsResult.noRecord.has(registryName)) {
+      downloads = 0;
+    } else {
+      continue;
+    }
     if (downloads >= REGISTERED_SQUAT_DOWNLOAD_FLOOR) {
       continue;
     }

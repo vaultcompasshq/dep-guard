@@ -145,10 +145,36 @@ function splitDownloadBatches(names: string[], batchSize = DOWNLOADS_BATCH_SIZE)
   return batches;
 }
 
-function readDownloadCounts(payload: unknown, requested: string[]): Map<string, number> {
+// The result of a downloads lookup, split into three states rather than
+// two, because the fix for zero-download blindness (treating "no record"
+// as a signal worth escalating on) makes the difference between them
+// load-bearing rather than cosmetic:
+//
+//  - present in `counts`: npm answered with a real, numeric weekly count.
+//  - present in `noRecord`: npm answered successfully (a 200) and said,
+//    explicitly, that it has no download record for this exact name -- a
+//    null entry in a bulk response body. This is a confirmed fact, not a
+//    gap: a consumer that wants "no data recorded" to mean zero downloads
+//    reads this set, not merely a missing key in `counts`.
+//  - absent from both: the name's status is unknown. The only way to land
+//    here today is a swallowed single-name 404 (see fetchDownloadCounts),
+//    which is ambiguous between "npm has genuinely never seen this name"
+//    and a structural failure (a misconfigured downloadsApi, an endpoint
+//    change) that a real "no record" 200 response could never produce. A
+//    consumer must treat this the same as if the name had never been
+//    asked about at all -- never as a confirmed zero -- or a broken
+//    downloadsApi would silently mint a finding for every single-name
+//    lookup instead of surfacing as online-check-unreachable.
+export interface DownloadCountsResult {
+  counts: Map<string, number>;
+  noRecord: Set<string>;
+}
+
+function readDownloadCounts(payload: unknown, requested: string[]): DownloadCountsResult {
   const counts = new Map<string, number>();
+  const noRecord = new Set<string>();
   if (payload === null || typeof payload !== 'object') {
-    return counts;
+    return { counts, noRecord };
   }
   const record = payload as Record<string, unknown>;
   // A single-name request answers with the record itself; a bulk request
@@ -156,70 +182,106 @@ function readDownloadCounts(payload: unknown, requested: string[]): Map<string, 
   // API has no data for.
   if (typeof record.downloads === 'number' && requested.length === 1) {
     counts.set(requested[0], record.downloads);
-    return counts;
+    return { counts, noRecord };
   }
   for (const [name, entry] of Object.entries(record)) {
     if (entry !== null && typeof entry === 'object' && typeof (entry as { downloads?: unknown }).downloads === 'number') {
       counts.set(name, (entry as { downloads: number }).downloads);
+    } else if (entry === null) {
+      noRecord.add(name);
     }
   }
-  return counts;
+  return { counts, noRecord };
 }
 
-// A 404 from a single-name (point-form) lookup means npm has no data for
-// that exact name -- unknown, unpublished, or (for a batch of exactly one
-// unscoped name, which the point endpoint also answers) simply never
-// downloaded -- and that is precisely the bulk endpoint's own semantics for
-// a name it has no data for: a null entry, which readDownloadCounts already
-// omits rather than reports as zero. Treating a 404 as "omit this name"
-// rather than "the whole lookup failed" keeps that semantics uniform across
-// both request shapes, and keeps one hallucinated name from discarding
-// every other name's already-fetched results.
+// A 404 from a single-name (point-form) lookup is swallowed to "unknown"
+// rather than propagated or trusted as a confirmed no-record answer,
+// because it is genuinely ambiguous in a way a bulk response's explicit
+// null entry is not: npm's real behaviour for a name it has never seen IS
+// a 404 here, but so is a misconfigured downloadsApi, an endpoint path
+// change, or (before the encodeURIComponent fix below) a URL-unsafe name
+// reaching an unencoded path segment -- and unlike the multi-name bulk
+// case just below, there is no cheap structural tell (like "a bulk
+// endpoint never 404s") to separate them from inside this function. Prior
+// to the zero-download-blindness fix, collapsing both into "omit this
+// name" was safe either way, because an omitted name only ever meant
+// "skip" to a caller. Now that an omitted name can mean "treat as zero
+// downloads", conflating the two would let a broken downloadsApi silently
+// mint a finding for every single-name candidate instead of surfacing as
+// online-check-unreachable -- so a swallowed 404 deliberately lands in
+// neither `counts` nor `noRecord`: unresolved, not a signal. See
+// DownloadCountsResult.
 //
 // This is gated on requested.length === 1 on purpose: a real bulk request
 // (more than one unscoped name) never answers 404 for an unknown name --
 // the bulk endpoint returns those as null entries inside a 200 -- so a 404
-// on a multi-name request means something else entirely (a misconfigured
-// downloadsApi, an endpoint path change, a URL-unsafe name reaching the
-// unencoded batch join) and has to propagate rather than be swallowed as
-// "omit every name in the batch". Silently returning an empty map for a
-// whole bulk batch would trade a loud failure for a silent one and rob the
-// caller's degrade-on-failure wrapper of the online-check-unreachable
-// diagnostic it exists to raise.
-async function fetchDownloadCounts(url: string, requested: string[], options: FetchOptions): Promise<Map<string, number>> {
+// on a multi-name request means something else entirely and has to
+// propagate rather than be swallowed as "omit every name in the batch".
+// Silently returning an empty result for a whole bulk batch would trade a
+// loud failure for a silent one and rob the caller's degrade-on-failure
+// wrapper of the online-check-unreachable diagnostic it exists to raise.
+async function fetchDownloadCounts(url: string, requested: string[], options: FetchOptions): Promise<DownloadCountsResult> {
   try {
     const payload = await fetchJson(url, options);
     return readDownloadCounts(payload, requested);
   } catch (err) {
     if (requested.length === 1 && (err as Error & { status?: number }).status === 404) {
-      return new Map();
+      return { counts: new Map(), noRecord: new Set() };
     }
     throw err;
   }
 }
 
+// Returns which of the requested names npm reported a real download count
+// for, and which it explicitly confirmed it has no record of (see
+// DownloadCountsResult for what each of those, and the third case --
+// absent from both -- means). A name missing from `counts` is NOT
+// interchangeable with "zero downloads": only a name in `noRecord` is a
+// confirmed zero; a name in neither is unresolved (typically a swallowed
+// single-name 404) and must be treated as "we don't know", never promoted
+// to a signal. Every current and future caller that wants "no data
+// recorded" to escalate a finding has to make that check explicitly
+// against `noRecord` -- this function deliberately does not decide it.
 export async function fetchWeeklyDownloads(
   names: string[],
   options: FetchOptions = {}
-): Promise<Map<string, number>> {
+): Promise<DownloadCountsResult> {
   const downloadsApi = options.downloadsApi ?? DEFAULT_DOWNLOADS_API;
   const counts = new Map<string, number>();
+  const noRecord = new Set<string>();
 
   for (const batch of splitDownloadBatches(names)) {
-    const url = `${downloadsApi}/downloads/point/last-week/${batch.join(',')}`;
-    for (const [name, count] of await fetchDownloadCounts(url, batch, options)) {
+    // Each name is encoded individually, then joined with a literal comma
+    // -- encoding the joined string as a whole would also encode the
+    // separator itself. A manifest-supplied registryName is only trimmed
+    // and checked for emptiness upstream (checks/candidates.ts), so a
+    // name containing '#', '?', or a space must not reach this URL
+    // unencoded: an unencoded special character can truncate the path,
+    // start a query string, or otherwise corrupt the batch, 404, and --
+    // now that a no-record 404 is a signal, not just a skip -- read as a
+    // false "zero downloads" for a name that was never actually looked up.
+    const url = `${downloadsApi}/downloads/point/last-week/${batch.map((name) => encodeURIComponent(name)).join(',')}`;
+    const result = await fetchDownloadCounts(url, batch, options);
+    for (const [name, count] of result.counts) {
       counts.set(name, count);
+    }
+    for (const name of result.noRecord) {
+      noRecord.add(name);
     }
   }
 
   for (const name of names.filter((n) => n.startsWith('@'))) {
     const url = `${downloadsApi}/downloads/point/last-week/${encodeURIComponent(name)}`;
-    for (const [key, count] of await fetchDownloadCounts(url, [name], options)) {
+    const result = await fetchDownloadCounts(url, [name], options);
+    for (const [key, count] of result.counts) {
       counts.set(key, count);
+    }
+    for (const key of result.noRecord) {
+      noRecord.add(key);
     }
   }
 
-  return counts;
+  return { counts, noRecord };
 }
 
 export interface Packument {

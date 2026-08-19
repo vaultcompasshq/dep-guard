@@ -102,7 +102,7 @@ describe('scan(): online enrichment', () => {
   });
 
   test('--online escalates a confirmed-unpopular typosquat match to high', async () => {
-    fetchWeeklyDownloadsMock.mockResolvedValue(new Map([['raect', 4]]));
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map([['raect', 4]]), noRecord: new Set() });
     const dir = initRepo();
     commitManifest(dir, {});
     commitManifest(dir, { raect: '^1.0.0' });
@@ -118,7 +118,7 @@ describe('scan(): online enrichment', () => {
   });
 
   test('--online adds a registered-squat finding for a young, unpopular new dependency', async () => {
-    fetchWeeklyDownloadsMock.mockResolvedValue(new Map([['some-brand-new-thing', 2]]));
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map([['some-brand-new-thing', 2]]), noRecord: new Set() });
     fetchPackumentMock.mockResolvedValue({
       createdAt: new Date().toISOString(),
       latestVersion: '0.0.1',
@@ -138,8 +138,62 @@ describe('scan(): online enrichment', () => {
     expect(result.findings.some((f) => f.ruleId === 'registered-squat')).toBe(true);
   });
 
+  test('--online adds a registered-squat finding when npm confirms it has no download record at all', async () => {
+    // The headline zero-download-blindness case, exercised through the
+    // real cachedFetchWeeklyDownloads wiring rather than a check-level
+    // fake: a name absent from counts but present in noRecord (npm
+    // answered and explicitly said "nothing on record") must still
+    // escalate, not be skipped.
+    fetchWeeklyDownloadsMock.mockResolvedValue({
+      counts: new Map(),
+      noRecord: new Set(['totally-made-up-hallucinated-xyz123']),
+    });
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: new Date().toISOString(),
+      latestVersion: '0.0.1',
+      latestPublishedAt: new Date().toISOString(),
+      deprecated: false,
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'totally-made-up-hallucinated-xyz123': '^0.0.1' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+    expect(result.findings.some((f) => f.ruleId === 'registered-squat')).toBe(true);
+  });
+
+  test('--online does not invent a registered-squat finding behind an unresolved (ambiguous) 404', async () => {
+    // A name absent from BOTH counts and noRecord is unresolved, not a
+    // confirmed zero -- the shape a swallowed single-name 404 or a broken
+    // downloadsApi produces. This must not mint a finding even though the
+    // candidate is otherwise young enough to qualify.
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map(), noRecord: new Set() });
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: new Date().toISOString(),
+      latestVersion: '0.0.1',
+      latestPublishedAt: new Date().toISOString(),
+      deprecated: false,
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'ambiguous-new-thing': '^0.0.1' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+    expect(result.findings.some((f) => f.ruleId === 'registered-squat')).toBe(false);
+  });
+
   test('config online:true turns it on without the flag', async () => {
-    fetchWeeklyDownloadsMock.mockResolvedValue(new Map([['raect', 4]]));
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map([['raect', 4]]), noRecord: new Set() });
     const dir = initRepo();
     writeFileSync(path.join(dir, '.dep-guard.json'), JSON.stringify({ online: true }));
     commitManifest(dir, {});
@@ -168,7 +222,7 @@ describe('scan(): online enrichment', () => {
   });
 
   test('checkSingle honors --online the same way scan() does', async () => {
-    fetchWeeklyDownloadsMock.mockResolvedValue(new Map([['raect', 4]]));
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map([['raect', 4]]), noRecord: new Set() });
     const dir = initRepo();
     commitManifest(dir, {});
 
@@ -229,7 +283,7 @@ describe('scan(): online enrichment', () => {
     // TEST a fresh cache, but does not reset it between two scan() calls
     // within one test), so both calls share one cache the way two real
     // scans of the same repo on one machine would.
-    fetchWeeklyDownloadsMock.mockResolvedValue(new Map([['some-fresh-thing', 2]]));
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map([['some-fresh-thing', 2]]), noRecord: new Set() });
     const dir = initRepo();
     commitManifest(dir, {});
     commitManifest(dir, { 'some-fresh-thing': '^0.0.1' });

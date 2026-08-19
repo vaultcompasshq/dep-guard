@@ -220,8 +220,8 @@ describe('fetchJson', () => {
 describe('fetchWeeklyDownloads', () => {
   test('reads a single-name point response', async () => {
     const fetchImpl = scriptedFetch([jsonResponse({ downloads: 42, package: 'left-pad' })]);
-    const counts = await fetchWeeklyDownloads(['left-pad'], { fetchImpl, sleepImpl: noSleep });
-    expect(counts.get('left-pad')).toBe(42);
+    const result = await fetchWeeklyDownloads(['left-pad'], { fetchImpl, sleepImpl: noSleep });
+    expect(result.counts.get('left-pad')).toBe(42);
   });
 
   test('reads a bulk name-keyed response and batches at DOWNLOADS_BATCH_SIZE', async () => {
@@ -232,9 +232,9 @@ describe('fetchWeeklyDownloads', () => {
     }
     const lastBody = { downloads: 99, package: names[DOWNLOADS_BATCH_SIZE] };
     const fetchImpl = scriptedFetch([jsonResponse(bulkBody), jsonResponse(lastBody)]);
-    const counts = await fetchWeeklyDownloads(names, { fetchImpl, sleepImpl: noSleep });
-    expect(counts.get(names[0])).toBe(10);
-    expect(counts.get(names[DOWNLOADS_BATCH_SIZE])).toBe(99);
+    const result = await fetchWeeklyDownloads(names, { fetchImpl, sleepImpl: noSleep });
+    expect(result.counts.get(names[0])).toBe(10);
+    expect(result.counts.get(names[DOWNLOADS_BATCH_SIZE])).toBe(99);
     expect(fetchImpl.calls).toHaveLength(2);
   });
 
@@ -242,43 +242,55 @@ describe('fetchWeeklyDownloads', () => {
     const fetchImpl = scriptedFetch([
       jsonResponse({ downloads: 5, package: '@scope/pkg' }),
     ]);
-    const counts = await fetchWeeklyDownloads(['@scope/pkg'], { fetchImpl, sleepImpl: noSleep });
-    expect(counts.get('@scope/pkg')).toBe(5);
+    const result = await fetchWeeklyDownloads(['@scope/pkg'], { fetchImpl, sleepImpl: noSleep });
+    expect(result.counts.get('@scope/pkg')).toBe(5);
     expect(fetchImpl.calls[0].url).toContain('%40scope%2Fpkg');
   });
 
-  test('a name the API has no data for is simply absent from the map', async () => {
+  test('a name the API confirms it has no data for lands in noRecord, not counts', async () => {
+    // A bulk-shaped 200 response (a name-keyed body, even for a single
+    // requested name) with an explicit null is npm's confirmed "no
+    // download record" answer -- distinct from a swallowed single-name
+    // 404 (see the two tests below), and the only case a caller may treat
+    // as zero downloads rather than merely "unknown".
     const fetchImpl = scriptedFetch([jsonResponse({ 'unknown-pkg': null })]);
-    const counts = await fetchWeeklyDownloads(['unknown-pkg'], { fetchImpl, sleepImpl: noSleep });
-    expect(counts.has('unknown-pkg')).toBe(false);
+    const result = await fetchWeeklyDownloads(['unknown-pkg'], { fetchImpl, sleepImpl: noSleep });
+    expect(result.counts.has('unknown-pkg')).toBe(false);
+    expect(result.noRecord.has('unknown-pkg')).toBe(true);
   });
 
-  test('a scoped-name 404 leaves other names counts intact and omits only that name', async () => {
+  test('a scoped-name 404 leaves other names counts intact and resolves only that name as unknown', async () => {
     // The bulk batch (an unscoped name) answers first; the scoped name's
     // individual point request 404s second. Regression test: a 404 on any
     // single-name lookup used to throw out of the whole function,
-    // discarding the bulk batch's already-fetched results too.
+    // discarding the bulk batch's already-fetched results too. A
+    // single-name 404 is ambiguous (see fetchDownloadCounts), so the
+    // scoped name lands in neither counts nor noRecord -- unresolved, not
+    // a confirmed zero.
     const fetchImpl = scriptedFetch([
       jsonResponse({ 'left-pad': { downloads: 10 } }),
       jsonResponse(null, { status: 404 }),
     ]);
-    const counts = await fetchWeeklyDownloads(['left-pad', '@scope/pkg'], {
+    const result = await fetchWeeklyDownloads(['left-pad', '@scope/pkg'], {
       fetchImpl,
       sleepImpl: noSleep,
     });
-    expect(counts.get('left-pad')).toBe(10);
-    expect(counts.has('@scope/pkg')).toBe(false);
+    expect(result.counts.get('left-pad')).toBe(10);
+    expect(result.counts.has('@scope/pkg')).toBe(false);
+    expect(result.noRecord.has('@scope/pkg')).toBe(false);
   });
 
-  test('a single-unscoped-name batch 404 returns an empty map rather than throwing', async () => {
+  test('a single-unscoped-name batch 404 returns an empty, unresolved result rather than throwing', async () => {
     // A batch of exactly one unscoped name answers in the same point form
-    // as a scoped name, so it can 404 for an unknown name the same way.
+    // as a scoped name, so it can 404 for an unknown name the same way --
+    // and, being ambiguous, must not land in noRecord either.
     const fetchImpl = scriptedFetch([jsonResponse(null, { status: 404 })]);
-    const counts = await fetchWeeklyDownloads(['hallucinated-pkg'], {
+    const result = await fetchWeeklyDownloads(['hallucinated-pkg'], {
       fetchImpl,
       sleepImpl: noSleep,
     });
-    expect(counts.size).toBe(0);
+    expect(result.counts.size).toBe(0);
+    expect(result.noRecord.size).toBe(0);
   });
 
   test('a non-404 failure still propagates', async () => {
@@ -288,7 +300,7 @@ describe('fetchWeeklyDownloads', () => {
     ).rejects.toThrow(/500/);
   });
 
-  test('a multi-name bulk 404 propagates rather than resolving to an empty map', async () => {
+  test('a multi-name bulk 404 propagates rather than resolving to an empty result', async () => {
     // A real bulk request (more than one unscoped name) never 404s for an
     // unknown name -- the bulk endpoint answers those as null entries
     // inside a 200. A 404 here means something else (a misconfigured
@@ -301,6 +313,18 @@ describe('fetchWeeklyDownloads', () => {
     await expect(
       fetchWeeklyDownloads(['pkg-a', 'pkg-b'], { fetchImpl, sleepImpl: noSleep, attempts: 1 })
     ).rejects.toThrow(/404/);
+  });
+
+  test('encodes each name in a bulk batch, so a URL-unsafe name cannot corrupt the query', async () => {
+    const fetchImpl = scriptedFetch([
+      jsonResponse({ 'left-pad': { downloads: 10 }, 'weird#name': { downloads: 3 } }),
+    ]);
+    const result = await fetchWeeklyDownloads(['left-pad', 'weird#name'], {
+      fetchImpl,
+      sleepImpl: noSleep,
+    });
+    expect(fetchImpl.calls[0].url).toContain('left-pad,weird%23name');
+    expect(result.counts.get('weird#name')).toBe(3);
   });
 });
 

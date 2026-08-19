@@ -606,18 +606,45 @@ gave it offline; a network failure means it leaves every candidate exactly
 as it found them. The registered-squat check either adds a medium finding
 for a recently-published, near-zero-download name, or adds nothing; a
 network failure means it adds nothing, the same outcome as a scan that
-turned up no candidates for it at all. "Near-zero-download" includes a
-name the downloads API has no record for at all: both checks treat a name
-missing from the fetched counts as zero downloads, not as a reason to skip
-it, because a freshly-registered name -- the case both checks exist to
-catch -- is exactly the one npm has no download history for yet. Neither
-check downgrades a finding, removes one, or turns a network problem into a
-reason to trust a name more than the offline checks already do. Whatever a
-check could not establish is
-named, not implied: a diagnostic with code `online-check-unreachable` says
-which check was asking, how many findings or candidates were affected, and
-why the request failed, so a consumer can tell "the network was down" apart
-from "nothing was there to find" instead of reading silence as either.
+turned up no candidates for it at all.
+
+"Near-zero-download" includes a name the downloads API has no record for
+at all, and that case is not an edge case for registered-squat: a
+freshly-registered attacker name is exactly the name npm has no download
+history for yet, so treating an absent count as "skip" made the check
+structurally unable to fire on its own defining example. For
+typosquat-asymmetry, the same absent-count case is a stronger version of
+the low-download signal it already escalates on -- it is not specific to
+a freshly-registered name the way registered-squat's purpose is; it
+applies to any resemblance match the offline pass could not price.
+`registry-client.ts`'s `fetchWeeklyDownloads` answers this with three
+states, not two, and both checks read the distinction rather than
+collapsing it: a name npm reports a real count for; a name npm's
+response explicitly confirms it has no record for (a null entry in a
+successful bulk response) -- both checks treat this, and only this, as a
+confirmed zero; and a name that is unresolved (in practice, a swallowed
+single-name 404, ambiguous between "npm has never seen this name" and a
+structural failure such as a misconfigured downloadsApi or an endpoint
+change) -- both checks leave this one exactly as they would have before
+the distinction existed, at the candidate's offline severity, never
+promoted to a signal. Collapsing "confirmed no record" and "unresolved"
+into one absent-key case, the way both checks did before this
+distinction was added, would have let a broken downloadsApi silently
+mint a finding for every single-name lookup instead of surfacing as
+online-check-unreachable -- the same failure mode a real network outage
+is supposed to produce, not a wave of new findings.
+
+Neither check downgrades a finding, removes one, or turns a network
+problem into a reason to trust a name more than the offline checks
+already do. Whatever a check could not establish is named, not implied:
+a diagnostic with code `online-check-unreachable` says which check was
+asking, how many findings or candidates were affected, and why the
+request failed, so a consumer can tell three things apart, not two --
+"the network was down" (a diagnostic fired), "the API answered and
+confirmed nothing was on record" (now a signal, per above), and "the API
+answered but this one name's status is unresolved" (silence, the same as
+if the name had never been asked about) -- instead of reading any
+silence as interchangeable with any other.
 
 `enrichOnline` -- the function `scan()` and `checkSingle()` both call to run
 the online checks -- must never itself throw. Each check it calls

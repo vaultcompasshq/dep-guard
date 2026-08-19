@@ -13,16 +13,24 @@ function typosquatFinding(overrides: Partial<Finding> = {}): Omit<Finding, 'fing
   };
 }
 
-function fakeDeps(counts: Record<string, number>) {
+// `noRecordNames` models a confirmed "npm answered, no download history"
+// name (registry-client.ts's DownloadCountsResult.noRecord) -- distinct
+// from a name that is simply absent from `counts` and not listed here,
+// which models an unresolved/ambiguous absence (e.g. a swallowed
+// single-name 404): present in neither counts nor noRecord.
+function fakeDeps(counts: Record<string, number>, noRecordNames: string[] = []) {
   return {
     fetchWeeklyDownloads: async (names: string[]) => {
-      const map = new Map<string, number>();
+      const countsMap = new Map<string, number>();
+      const noRecord = new Set<string>();
       for (const name of names) {
         if (name in counts) {
-          map.set(name, counts[name]);
+          countsMap.set(name, counts[name]);
+        } else if (noRecordNames.includes(name)) {
+          noRecord.add(name);
         }
       }
-      return map;
+      return { counts: countsMap, noRecord };
     },
   };
 }
@@ -47,19 +55,34 @@ describe('applyTyposquatAsymmetry', () => {
     expect(findings[0].severity).toBe('low');
   });
 
-  test('escalates a finding when the API has no download record for it at all', async () => {
-    // A name missing from the counts Map means the API answered but has no
-    // download record for this exact name -- the archetypal case for a
-    // freshly-registered squat, and a stronger signal than a low count, not
-    // a reason to skip it. This replaces a prior version of this test that
-    // asserted the opposite (leaving the finding alone), which encoded the
-    // zero-download-blindness bug: a name with no record at all was the one
-    // case the check could never fire on.
+  test('escalates a finding when the API confirms it has no download record for it at all', async () => {
+    // A name in noRecord means the API answered successfully and
+    // explicitly confirmed it has no download record for this exact name
+    // -- the archetypal case for a freshly-registered squat, and a
+    // stronger signal than a low count, not a reason to skip it. This
+    // replaces a prior version of this test that asserted the opposite
+    // (leaving the finding alone on a name simply missing from the
+    // response), which encoded the zero-download-blindness bug: a name
+    // with no record at all was the one case the check could never fire
+    // on.
     const findings = [typosquatFinding({ packageName: 'no-data-pkg' })];
     const diagnostics: Diagnostic[] = [];
-    await applyTyposquatAsymmetry(findings, fakeDeps({}), diagnostics);
+    await applyTyposquatAsymmetry(findings, fakeDeps({}, ['no-data-pkg']), diagnostics);
     expect(findings[0].severity).toBe('high');
     expect(findings[0].details).toMatchObject({ onlineWeeklyDownloads: 0 });
+  });
+
+  test('leaves a finding at its offline severity behind an unresolved (ambiguous) absence', async () => {
+    // Present in neither counts nor noRecord -- the shape a swallowed
+    // single-name 404 produces (see registry-client.ts). This is
+    // genuinely unknown, not a confirmed zero, and must not escalate:
+    // otherwise a misconfigured downloadsApi (every single-name lookup
+    // 404ing) would silently escalate every low typosquat match to high
+    // instead of surfacing as online-check-unreachable.
+    const findings = [typosquatFinding({ packageName: 'ambiguous-pkg' })];
+    const diagnostics: Diagnostic[] = [];
+    await applyTyposquatAsymmetry(findings, fakeDeps({}), diagnostics);
+    expect(findings[0].severity).toBe('low');
   });
 
   test('never touches a critical alias-list finding', async () => {
@@ -96,7 +119,7 @@ describe('applyTyposquatAsymmetry', () => {
     const deps = {
       fetchWeeklyDownloads: async () => {
         called = true;
-        return new Map<string, number>();
+        return { counts: new Map<string, number>(), noRecord: new Set<string>() };
       },
     };
     await applyTyposquatAsymmetry([], deps, []);

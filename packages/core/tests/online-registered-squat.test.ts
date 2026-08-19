@@ -61,16 +61,28 @@ function makeContext(changes: DepChange[]): CheckContext {
 const NOW = Date.parse('2026-08-16T00:00:00.000Z');
 const nowFn = () => NOW;
 
-function fakeDeps(downloads: Record<string, number>, packuments: Record<string, string | null>) {
+// `noRecordNames` models a confirmed "npm answered, no download history"
+// name (registry-client.ts's DownloadCountsResult.noRecord) -- distinct
+// from a name that is simply absent from `downloads` and not listed here,
+// which models an unresolved/ambiguous absence (e.g. a swallowed
+// single-name 404): present in neither counts nor noRecord.
+function fakeDeps(
+  downloads: Record<string, number>,
+  packuments: Record<string, string | null>,
+  noRecordNames: string[] = []
+) {
   return {
     fetchWeeklyDownloads: async (names: string[]) => {
-      const map = new Map<string, number>();
+      const counts = new Map<string, number>();
+      const noRecord = new Set<string>();
       for (const name of names) {
         if (name in downloads) {
-          map.set(name, downloads[name]);
+          counts.set(name, downloads[name]);
+        } else if (noRecordNames.includes(name)) {
+          noRecord.add(name);
         }
       }
-      return map;
+      return { counts, noRecord };
     },
     fetchPackument: async (name: string) => {
       if (!(name in packuments)) {
@@ -125,15 +137,20 @@ describe('findRegisteredSquats', () => {
     expect(findings).toEqual([]);
   });
 
-  test('flags a recently-created name the downloads API has no record for at all', async () => {
-    // A name missing from the counts Map means the API answered but has no
-    // download record for this exact name -- precisely the archetypal
-    // registered-squat case (a freshly-registered attacker name), and a
-    // stronger signal than a low recorded count, not a reason to skip it.
+  test('flags a recently-created name the downloads API confirms it has no record for at all', async () => {
+    // A name in noRecord means the API answered successfully and
+    // explicitly confirmed it has no download record for this exact name
+    // -- precisely the archetypal registered-squat case (a
+    // freshly-registered attacker name), and a stronger signal than a low
+    // recorded count, not a reason to skip it.
     const ctx = makeContext([makeChange({ name: 'totally-made-up-hallucinated-xyz123' })]);
     const findings = await findRegisteredSquats(
       ctx,
-      fakeDeps({}, { 'totally-made-up-hallucinated-xyz123': '2026-08-10T00:00:00.000Z' }),
+      fakeDeps(
+        {},
+        { 'totally-made-up-hallucinated-xyz123': '2026-08-10T00:00:00.000Z' },
+        ['totally-made-up-hallucinated-xyz123']
+      ),
       ctx.diagnostics,
       nowFn
     );
@@ -144,6 +161,23 @@ describe('findRegisteredSquats', () => {
       packageName: 'totally-made-up-hallucinated-xyz123',
       details: { signal: 'registered-squat', weeklyDownloads: 0 },
     });
+  });
+
+  test('does not flag a recently-created name behind an unresolved (ambiguous) single-name 404', async () => {
+    // Present in neither counts nor noRecord -- the shape a swallowed
+    // single-name 404 produces (see registry-client.ts). This is
+    // genuinely unknown, not a confirmed zero, and must not mint a
+    // finding: otherwise a misconfigured downloadsApi (every single-name
+    // lookup 404ing) would silently flag every young candidate as a
+    // registered squat instead of surfacing as online-check-unreachable.
+    const ctx = makeContext([makeChange({ name: 'ambiguous-pkg' })]);
+    const findings = await findRegisteredSquats(
+      ctx,
+      fakeDeps({}, { 'ambiguous-pkg': '2026-08-10T00:00:00.000Z' }),
+      ctx.diagnostics,
+      nowFn
+    );
+    expect(findings).toEqual([]);
   });
 
   test('does not flag a name with no packument data', async () => {
@@ -175,7 +209,7 @@ describe('findRegisteredSquats', () => {
     const deps = {
       fetchWeeklyDownloads: async () => {
         called = true;
-        return new Map<string, number>();
+        return { counts: new Map<string, number>(), noRecord: new Set<string>() };
       },
       fetchPackument: async () => null,
     };
@@ -206,7 +240,10 @@ describe('findRegisteredSquats', () => {
     ]);
     const diagnostics: Diagnostic[] = [];
     const deps = {
-      fetchWeeklyDownloads: async () => new Map([['react-codeshift', 4], ['unused-imports', 9]]),
+      fetchWeeklyDownloads: async () => ({
+        counts: new Map([['react-codeshift', 4], ['unused-imports', 9]]),
+        noRecord: new Set<string>(),
+      }),
       fetchPackument: async (name: string) => {
         if (name === 'react-codeshift') {
           throw new Error('timed out');
