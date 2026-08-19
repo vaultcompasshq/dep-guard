@@ -783,10 +783,11 @@ this project actually publishes.
 
 ## A published corpus is built in the release job, never committed, and a release gate demands what the reader tolerates
 
-`packages/core/data/` (the path `DEFAULT_CORPUS_DIR` in scan.ts resolves
-to when nothing overrides it) is gitignored on purpose: a built corpus is
-around 8MB of generated data whose provenance is a dated registry walk, and
-it belongs to a release, not a commit. Nothing is ever checked in there.
+`packages/core/data/corpus` (the path `DEFAULT_CORPUS_DIR` in scan.ts
+resolves to when nothing overrides it) is gitignored on purpose: a built
+corpus is about ten megabytes of generated data whose provenance is a dated
+registry walk, and it belongs to a release, not a commit. Nothing is ever
+checked in there.
 Instead, `.github/workflows/release.yml`'s `release` job runs `node
 scripts/build-corpus.mjs --out packages/core/data/corpus` as one of its own
 steps, so every release builds its own corpus fresh from
@@ -833,21 +834,30 @@ it. `scripts/tests/shippable-corpus.test.mjs` exercises both directions of
 every rule, including the two cases the reader tolerates and this gate does
 not (formatVersion absent, walkComplete absent) -- verified adversarially
 by weakening the gate to match the reader's tolerance and confirming those
-specific tests, and no others, go red.
+specific tests, and no others, go red -- and also covers `readMeta`'s two
+failure branches directly: meta.json present but unreadable as a file, and
+present and readable but not valid JSON.
 
-The release smoke job (`smoke-published`) passes no `--corpus-dir` to
-either of its `dep-guard check` invocations, on purpose: the point of that
+The release smoke job (`smoke-published`) passes no `--corpus-dir` to any
+of its four `dep-guard check` invocations, on purpose: the point of that
 job is to prove the corpus that actually shipped inside the published
 package resolves correctly at its default path, not to re-prove something
 about the repository's own fixture corpus (which the job no longer checks
-out at all). It asserts `react` resolves as known and that at least one of
-three distinct hallucinated names resolves as an `unknown-package` finding
--- three rather than one, because the corpus is rebuilt on every release
-now, so a single name's non-collision against the bloom filter's 0.001
-false-positive rate is a fresh draw each time instead of a fact fixed
-against a committed fixture; three names bring the chance all three
-collide down to roughly 1e-9 while still proving the same thing a single
-name proved before.
+out at all). It asserts `react` resolves as known and that ALL THREE
+distinct hallucinated names resolve as `unknown-package` findings --
+three names, and requiring every one of them, because the corpus is
+rebuilt on every release now, so a single name's non-collision against the
+bloom filter's 0.0001 false-positive rate is a fresh draw each time
+instead of a fact fixed against a committed fixture. Requiring all three
+is the stronger check: a bloom filter that wrongly answered "present" for
+roughly half of all inputs -- a plausible shape for a deserialization
+regression -- would still pass a weaker "at least one" check 87.5% of the
+time (it only fails when all three collide, which is down near 1e-12 at
+the real rate), where requiring all three fails in that same scenario
+87.5% of the time. What that costs is a higher spurious-failure rate
+against a genuinely healthy corpus, roughly 3e-4 per release, from the
+union of three independent ~0.0001 chances that any one collides -- well
+within tolerance for a gate that runs once per release.
 
 ## A partial corpus refuses itself, and the builder has to verify around that refusal
 

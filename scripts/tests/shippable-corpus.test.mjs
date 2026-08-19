@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -79,6 +79,28 @@ describe('assertCorpusShippable', () => {
     expect(() => assertCorpusShippable(dir, 1)).toThrow(/meta\.json/);
   });
 
+  // readMeta's two failure branches, exercised directly: a meta.json that
+  // exists (so assertRequiredFilesPresent does not catch it) but cannot be
+  // read as a file, and one that reads fine but is not valid JSON.
+  it('refuses a corpus whose meta.json cannot be read as a file', () => {
+    const dir = tempCorpusDir();
+    writeCorpusFiles(dir);
+    // A directory in place of meta.json reproduces "exists but cannot be
+    // read as a file" (readFileSync throws EISDIR) without relying on
+    // chmod, which a test runner with elevated privileges can bypass.
+    mkdirSync(path.join(dir, 'meta.json'));
+
+    expect(() => assertCorpusShippable(dir, 1)).toThrow(/could not read/);
+  });
+
+  it('refuses a corpus whose meta.json is not valid JSON', () => {
+    const dir = tempCorpusDir();
+    writeCorpusFiles(dir);
+    writeFileSync(path.join(dir, 'meta.json'), 'not json');
+
+    expect(() => assertCorpusShippable(dir, 1)).toThrow(/not valid JSON/);
+  });
+
   // The whole point of this gate: the reader tolerates an absent
   // formatVersion (a pre-versioning local artifact excuse), but nothing
   // about to be published gets that excuse.
@@ -87,7 +109,13 @@ describe('assertCorpusShippable', () => {
     writeCorpusFiles(dir);
     writeMeta(dir, validMeta({ formatVersion: undefined }));
 
-    expect(() => assertCorpusShippable(dir, 1)).toThrow(/formatVersion/);
+    // Matches the PRESENCE-check message specifically (assertFormatVersion-
+    // PresentAndSupported's "has no formatVersion" branch), not the
+    // present-but-wrong-value message ("formatVersion is X, which this
+    // build does not understand") that a deleted presence check would fall
+    // through to. A bare /formatVersion/ regex would pass either way and
+    // not actually prove the presence check ran.
+    expect(() => assertCorpusShippable(dir, 1)).toThrow(/has no formatVersion/);
   });
 
   it('refuses a corpus whose formatVersion is not one this build understands', () => {
@@ -106,7 +134,13 @@ describe('assertCorpusShippable', () => {
     writeCorpusFiles(dir);
     writeMeta(dir, validMeta({ walkComplete: undefined }));
 
-    expect(() => assertCorpusShippable(dir, 1)).toThrow(/walkComplete/);
+    // Matches the PRESENCE-check message specifically (assertWalkComplete-
+    // PresentAndTrue's "has no walkComplete" branch), not the
+    // present-but-wrong-value message ("walkComplete is X, not true") that
+    // a deleted presence check would fall through to. A bare /walkComplete/
+    // regex would pass either way and not actually prove the presence
+    // check ran.
+    expect(() => assertCorpusShippable(dir, 1)).toThrow(/has no walkComplete/);
   });
 
   it('refuses a corpus whose walkComplete is false', () => {

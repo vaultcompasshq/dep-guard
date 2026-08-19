@@ -125,10 +125,20 @@ function assertLoadsAndResolvesKnownName(dir) {
     );
   }
   if (!corpus.hasName(KNOWN_POPULAR_NAME)) {
+    // What this actually establishes: the bloom filter deserializes and
+    // answers correctly for a name every real build includes, which is
+    // enough to catch a corrupted, truncated, or substituted filter file.
+    // It does NOT establish walk completeness -- collectExtras
+    // (scripts/build-corpus.mjs) injects every name in
+    // scripts/data/top-packages.txt, "react" included, into the filter
+    // regardless of what the registry walk itself found, so this check
+    // passes even for a --max-names 1 build. Walk completeness is what
+    // assertWalkCompletePresentAndTrue and assertNameCountAtLeast above
+    // establish, not this check.
     throw new Error(
       `refusing to ship ${dir}: "${KNOWN_POPULAR_NAME}" does not resolve as present in the ` +
-        'bloom filter. A corpus that cannot recognise one of the most-downloaded packages on ' +
-        'the registry is not a corpus that finished a real walk, whatever its meta claims.'
+        'bloom filter. A corpus whose filter cannot recognise one of the most-downloaded ' +
+        'packages on the registry has a corrupted, truncated, or substituted bloom filter.'
     );
   }
 }

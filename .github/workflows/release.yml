@@ -90,6 +90,20 @@ jobs:
     - name: Check the corpus is fit to publish
       run: node scripts/check-shippable-corpus.mjs packages/core/data/corpus
 
+    # Packs packages/core the same way the "Publish to npm" step below will,
+    # then reads the pack listing back and asserts all four corpus files are
+    # in it. This is the one check in this workflow that verifies the
+    # corpus actually reaches the published tarball. Everything above this
+    # step gates the corpus ON DISK (build, then shippability); nothing
+    # before this point checks that packages/core/package.json's "files"
+    # array actually carries that on-disk corpus into what npm packs.
+    # scripts/tests/core-package-files.test.mjs only asserts the string
+    # "data" is present in that array, which does not prove npm packs the
+    # directory. See scripts/check-corpus-packed.mjs for the command this
+    # runs and how it was verified.
+    - name: Check the corpus reaches the packed tarball
+      run: node scripts/check-corpus-packed.mjs
+
     # npm Trusted Publishing (OIDC): no NPM_TOKEN, auth via id-token: write
     # plus a trusted publisher configured per @vaultcompass/* package.
     # Requires npm CLI >= 11.5.1 (Node >= 22.14.0). Pin major 11 - npm@12
@@ -213,13 +227,26 @@ jobs:
           # corpus is now rebuilt from a live registry walk on every
           # release (see the "Build the shipped corpus" step in this
           # workflow), so a single name's non-collision is effectively a
-          # fresh draw against the target false-positive rate (0.001) on
+          # fresh draw against the target false-positive rate (0.0001) on
           # every release, which means a spurious, deeply confusing release
-          # failure roughly once every thousand releases. Three distinct
-          # hallucinated names bring the probability that ALL THREE collide
-          # down to roughly 1e-9, while still proving exactly what matters:
-          # the shipped corpus plus the shipped CLI agree that a name which
-          # is not real is not real.
+          # failure roughly once every ten thousand releases.
+          #
+          # This assertion requires EVERY one of the three names to resolve
+          # as unknown, not merely at least one. "At least one" is the
+          # weaker check: it would still pass 87.5% of the time even if the
+          # corpus's bloom filter wrongly answered "present" for roughly
+          # half of all inputs -- a plausible shape for a bloom
+          # deserialization regression -- because it only fails when all
+          # three names happen to collide (roughly 1e-12 at the real 0.0001
+          # rate, since three names each independently colliding is
+          # 0.0001^3). Requiring all three to resolve as unknown fails in
+          # that same corrupted-filter scenario 87.5% of the time instead,
+          # which is the direction a release gate should lean. What it costs
+          # is a higher spurious-failure rate against a genuinely healthy
+          # corpus: roughly 3e-4 per release, from the union of three
+          # independent ~0.0001 chances that any one of the three names
+          # collides -- still well within tolerance for a gate that runs
+          # once per release.
           set +e
           ./node_modules/.bin/dep-guard check totally-made-up-hallucinated-xyz123 --format json > unknown-1.json
           UNKNOWN_EC_1=$?
@@ -236,13 +263,13 @@ jobs:
               ['unknown-2.json', ${UNKNOWN_EC_2}],
               ['unknown-3.json', ${UNKNOWN_EC_3}],
             ];
-            const hit = cases.some(([file, exitCode]) => {
+            const allUnknown = cases.every(([file, exitCode]) => {
               if (exitCode === 0) return false;
               const j = JSON.parse(fs.readFileSync(file, 'utf8'));
               return (j.findings || []).some((f) => f.ruleId === 'unknown-package');
             });
-            if (!hit) {
-              console.error('Expected at least one of three hallucinated names to exit non-zero with an unknown-package finding.');
+            if (!allUnknown) {
+              console.error('Expected all three hallucinated names to exit non-zero with an unknown-package finding.');
               for (const [file] of cases) {
                 console.error(file, fs.readFileSync(file, 'utf8'));
               }
