@@ -72,15 +72,70 @@ function lineNumberAt(text, index) {
   return text.slice(0, index).split('\n').length;
 }
 
+// "_" is a word character to JavaScript's \b, so \b never fires inside a
+// run like "my_codename_thing" or "CODENAME_API_KEY" -- the whole
+// underscore-joined run is invisible to \b-based extraction, which is
+// exactly the shape a codename most plausibly takes in source (an
+// identifier or an env var). camelCase compounds ("theCodenameApp") have no
+// non-word separator between humps at all, so they have the same problem.
+// Insert a real breaking space at every underscore and every
+// lower-to-upper camelCase hump before handing the text to the token
+// regex, so each embedded word becomes its own \b-delimited token.
+function splitCompoundWords(text) {
+  return text.replace(/_/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2');
+}
+
+// Extracts every candidate token from a string: the existing hyphenated
+// \b-delimited tokens (unchanged, so "some-codename-thing" still yields the
+// whole hyphenated compound), the same extraction re-run over a
+// snake_case/camelCase-split copy of the text (so "my_codename_thing",
+// "CODENAME_API_KEY", and "theCodenameApp" each yield "codename" among
+// their tokens), and each individual word of any hyphenated token (so
+// "some-codename-thing" also yields "codename" on its own).
+function extractTokens(text) {
+  const tokens = new Set();
+
+  for (const match of text.matchAll(TOKEN)) {
+    tokens.add(match[0]);
+  }
+  for (const match of splitCompoundWords(text).matchAll(TOKEN)) {
+    tokens.add(match[0]);
+  }
+  for (const token of [...tokens]) {
+    if (token.includes('-')) {
+      for (const part of token.split('-')) {
+        tokens.add(part);
+      }
+    }
+  }
+
+  return tokens;
+}
+
 // bannedHashes is injectable (default: the real, shipped blocklist) so
 // tests can prove the hash-matching mechanism itself with a made-up token
 // and a test-only hash, instead of needing a real banned plaintext.
 export function scanFile(rel, text, { allowlisted, bannedHashes = BANNED_HASHES }) {
   const findings = [];
+  const lines = text.split('\n');
 
-  for (const [lineNum, line] of text.split('\n').entries()) {
+  for (const [lineNum, line] of lines.entries()) {
     if (DASH.test(line)) {
       findings.push(`${rel}:${lineNum + 1}: em/en dash (non-ASCII) in tracked file`);
+    }
+  }
+
+  // The file's own path is visible on the public file tree whether or not
+  // its contents are scanned, so this check runs even for allowlisted
+  // files -- an allowlist exempts a file's CONTENTS from scanning, not its
+  // name. A path like "docs/<codename>-migration.md" or a directory like
+  // "fixtures/<codename>/" leaks the same way a line of file content
+  // would, and gets a distinct message so the two cases are
+  // distinguishable in the output.
+  for (const token of extractTokens(rel)) {
+    if (bannedHashes.has(hashToken(token))) {
+      findings.push(`${rel}: blocked token in file path (hash match)`);
+      break;
     }
   }
 
@@ -93,9 +148,11 @@ export function scanFile(rel, text, { allowlisted, bannedHashes = BANNED_HASHES 
     findings.push(`${rel}:${lineNumberAt(text, pathMatch.index)}: internal workspace path`);
   }
 
-  for (const match of text.matchAll(TOKEN)) {
-    if (bannedHashes.has(hashToken(match[0]))) {
-      findings.push(`${rel}:${lineNumberAt(text, match.index)}: blocked token (hash match)`);
+  for (const [lineNum, line] of lines.entries()) {
+    for (const token of extractTokens(line)) {
+      if (bannedHashes.has(hashToken(token))) {
+        findings.push(`${rel}:${lineNum + 1}: blocked token (hash match)`);
+      }
     }
   }
 
