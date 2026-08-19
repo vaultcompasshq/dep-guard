@@ -151,20 +151,23 @@ function splitDownloadBatches(names: string[], batchSize = DOWNLOADS_BATCH_SIZE)
 // load-bearing rather than cosmetic:
 //
 //  - present in `counts`: npm answered with a real, numeric weekly count.
-//  - present in `noRecord`: npm answered successfully (a 200) and said,
-//    explicitly, that it has no download record for this exact name -- a
-//    null entry in a bulk response body. This is a confirmed fact, not a
+//  - present in `noRecord`: npm confirmed, one way or another, that it has
+//    no download record for this exact name -- either a null entry in a
+//    bulk response body, or (for a name whose single-name lookup 404d) a
+//    sentinel probe that positively confirmed the downloads API's
+//    single-name path is working right now, so the 404 means "no
+//    record" rather than something else. This is a confirmed fact, not a
 //    gap: a consumer that wants "no data recorded" to mean zero downloads
 //    reads this set, not merely a missing key in `counts`.
-//  - absent from both: the name's status is unknown. The only way to land
-//    here today is a swallowed single-name 404 (see fetchDownloadCounts),
-//    which is ambiguous between "npm has genuinely never seen this name"
-//    and a structural failure (a misconfigured downloadsApi, an endpoint
-//    change) that a real "no record" 200 response could never produce. A
-//    consumer must treat this the same as if the name had never been
-//    asked about at all -- never as a confirmed zero -- or a broken
-//    downloadsApi would silently mint a finding for every single-name
-//    lookup instead of surfacing as online-check-unreachable.
+//  - absent from both: a defensive case, not the common path -- a bulk
+//    response entry in some shape neither a real count nor an explicit
+//    null. A single-name 404 no longer lands here: it either resolves to
+//    `noRecord` (the sentinel probe confirmed the endpoint is healthy) or
+//    makes the whole fetchWeeklyDownloads call throw (the sentinel probe
+//    itself failed, see probeDownloadsApiHealth), never a silent gap. A
+//    consumer must still treat an absence from both sets the same as if
+//    the name had never been asked about at all -- never as a confirmed
+//    zero.
 export interface DownloadCountsResult {
   counts: Map<string, number>;
   noRecord: Set<string>;
@@ -194,24 +197,58 @@ function readDownloadCounts(payload: unknown, requested: string[]): DownloadCoun
   return { counts, noRecord };
 }
 
-// A 404 from a single-name (point-form) lookup is swallowed to "unknown"
-// rather than propagated or trusted as a confirmed no-record answer,
-// because it is genuinely ambiguous in a way a bulk response's explicit
-// null entry is not: npm's real behaviour for a name it has never seen IS
-// a 404 here, but so is a misconfigured downloadsApi, an endpoint path
-// change, or (before the encodeURIComponent fix below) a URL-unsafe name
-// reaching an unencoded path segment -- and unlike the multi-name bulk
-// case just below, there is no cheap structural tell (like "a bulk
-// endpoint never 404s") to separate them from inside this function. Prior
-// to the zero-download-blindness fix, collapsing both into "omit this
-// name" was safe either way, because an omitted name only ever meant
-// "skip" to a caller. Now that an omitted name can mean "treat as zero
-// downloads", conflating the two would let a broken downloadsApi silently
-// mint a finding for every single-name candidate instead of surfacing as
-// online-check-unreachable -- so a swallowed 404 deliberately lands in
-// neither `counts` nor `noRecord`: unresolved, not a signal. See
-// DownloadCountsResult.
+// A module-level literal, not read from anywhere at runtime -- this
+// client has no other dependency on corpus data, and importing the
+// popularity list just to pick a sentinel would be a new coupling for no
+// real benefit. It must name a package that certainly exists and
+// certainly has a nonzero weekly download count for as long as npm
+// itself does, so it can never legitimately 404 on the downloads API
+// (see probeDownloadsApiHealth). react qualifies and is already this
+// codebase's own online-check test fixture name. The claim that it
+// belongs on that footing is anchored by a test asserting it appears in
+// scripts/data/top-packages.txt -- the corpus's own reviewed,
+// twice-verified popularity list (docs/INVARIANTS.md's "The popularity
+// list is a trust input" section) -- rather than left as an unverified
+// assertion in this comment.
+export const DOWNLOAD_DISAMBIGUATION_SENTINEL = 'react';
+
+// Confirms the downloads API's single-name path is healthy right now, by
+// asking it about a name that cannot legitimately 404: a package this
+// codebase already trusts to be popular and permanently registered (see
+// DOWNLOAD_DISAMBIGUATION_SENTINEL). Used by fetchDownloadCounts to tell
+// apart npm's real behaviour for a name it has never seen (a 404 here
+// too) from a downloads API that 404s on everything -- a misconfigured
+// downloadsApi, an endpoint path change, an outage -- which would
+// otherwise let a broken endpoint masquerade as a confirmed no-record
+// answer for every single-name candidate in a scan.
 //
+// Deliberately probes the downloads endpoint, not the registry: whether
+// a name EXISTS (fetchPackument's question) and whether the DOWNLOADS
+// API is currently answering single-name requests correctly are two
+// different services with independent failure modes. A downloads API
+// that 404s on everything while the registry is fine would make every
+// scoped package in a scan look like a confirmed no-record zero if this
+// probe asked the registry instead -- exactly the fabricated-block this
+// whole disambiguation exists to prevent, just moved one service over.
+//
+// A failure here (the sentinel itself 404s, or the request fails
+// outright) is deliberately NOT caught: it propagates out of
+// fetchWeeklyDownloads to the caller's own try/catch, identical to
+// today's behavior for a dead downloads API, so it is diagnosed as
+// online-check-unreachable rather than silently read as a confirmed
+// no-record answer for every single-name candidate in the batch.
+async function probeDownloadsApiHealth(options: FetchOptions): Promise<void> {
+  const downloadsApi = options.downloadsApi ?? DEFAULT_DOWNLOADS_API;
+  await fetchJson(
+    `${downloadsApi}/downloads/point/last-week/${encodeURIComponent(DOWNLOAD_DISAMBIGUATION_SENTINEL)}`,
+    options
+  );
+  // Reaching this line at all is the confirmation: fetchJson only
+  // returns on a 2xx, and the sentinel's single-name point response is
+  // never anything but a real numeric count, so no further inspection
+  // of the body is needed.
+}
+
 // This is gated on requested.length === 1 on purpose: a real bulk request
 // (more than one unscoped name) never answers 404 for an unknown name --
 // the bulk endpoint returns those as null entries inside a 200 -- so a 404
@@ -220,13 +257,26 @@ function readDownloadCounts(payload: unknown, requested: string[]): DownloadCoun
 // Silently returning an empty result for a whole bulk batch would trade a
 // loud failure for a silent one and rob the caller's degrade-on-failure
 // wrapper of the online-check-unreachable diagnostic it exists to raise.
-async function fetchDownloadCounts(url: string, requested: string[], options: FetchOptions): Promise<DownloadCountsResult> {
+//
+// A single-name 404 (scoped or unscoped -- both shapes reach this same
+// branch) is not trusted on its own: confirmDownloadsApiHealthy (a
+// per-fetchWeeklyDownloads-call memoized probe, supplied by the caller so
+// the sentinel is asked at most once per call rather than once per 404)
+// must resolve first. If it throws, this function does not catch it --
+// see probeDownloadsApiHealth.
+async function fetchDownloadCounts(
+  url: string,
+  requested: string[],
+  options: FetchOptions,
+  confirmDownloadsApiHealthy: () => Promise<void>
+): Promise<DownloadCountsResult> {
   try {
     const payload = await fetchJson(url, options);
     return readDownloadCounts(payload, requested);
   } catch (err) {
     if (requested.length === 1 && (err as Error & { status?: number }).status === 404) {
-      return { counts: new Map(), noRecord: new Set() };
+      await confirmDownloadsApiHealthy();
+      return { counts: new Map(), noRecord: new Set(requested) };
     }
     throw err;
   }
@@ -234,14 +284,16 @@ async function fetchDownloadCounts(url: string, requested: string[], options: Fe
 
 // Returns which of the requested names npm reported a real download count
 // for, and which it explicitly confirmed it has no record of (see
-// DownloadCountsResult for what each of those, and the third case --
-// absent from both -- means). A name missing from `counts` is NOT
+// DownloadCountsResult for what each of those, and the third, defensive
+// case -- absent from both -- means). A name missing from `counts` is NOT
 // interchangeable with "zero downloads": only a name in `noRecord` is a
-// confirmed zero; a name in neither is unresolved (typically a swallowed
-// single-name 404) and must be treated as "we don't know", never promoted
-// to a signal. Every current and future caller that wants "no data
-// recorded" to escalate a finding has to make that check explicitly
-// against `noRecord` -- this function deliberately does not decide it.
+// confirmed zero, and a single-name 404 (scoped or unscoped) is actively
+// confirmed via probeDownloadsApiHealth before it is ever allowed to mean
+// that -- it either resolves to `noRecord` or makes this whole call throw,
+// never a silent per-name gap. Every current and future caller that wants
+// "no data recorded" to escalate a finding has to make that check
+// explicitly against `noRecord` -- this function deliberately does not
+// decide it.
 export async function fetchWeeklyDownloads(
   names: string[],
   options: FetchOptions = {}
@@ -249,6 +301,20 @@ export async function fetchWeeklyDownloads(
   const downloadsApi = options.downloadsApi ?? DEFAULT_DOWNLOADS_API;
   const counts = new Map<string, number>();
   const noRecord = new Set<string>();
+
+  // Memoized for the lifetime of this one fetchWeeklyDownloads call: the
+  // question probeDownloadsApiHealth answers ("is the downloads API's
+  // single-name path working right now?") does not change between one
+  // single-name 404 and the next within the same call, so it is asked at
+  // most once here and reused, rather than once per 404 -- see
+  // fetchDownloadCounts.
+  let sentinelProbe: Promise<void> | null = null;
+  function confirmDownloadsApiHealthy(): Promise<void> {
+    if (sentinelProbe === null) {
+      sentinelProbe = probeDownloadsApiHealth(options);
+    }
+    return sentinelProbe;
+  }
 
   for (const batch of splitDownloadBatches(names)) {
     // Each name is encoded individually, then joined with a literal comma
@@ -261,7 +327,7 @@ export async function fetchWeeklyDownloads(
     // now that a no-record 404 is a signal, not just a skip -- read as a
     // false "zero downloads" for a name that was never actually looked up.
     const url = `${downloadsApi}/downloads/point/last-week/${batch.map((name) => encodeURIComponent(name)).join(',')}`;
-    const result = await fetchDownloadCounts(url, batch, options);
+    const result = await fetchDownloadCounts(url, batch, options, confirmDownloadsApiHealthy);
     for (const [name, count] of result.counts) {
       counts.set(name, count);
     }
@@ -272,7 +338,7 @@ export async function fetchWeeklyDownloads(
 
   for (const name of names.filter((n) => n.startsWith('@'))) {
     const url = `${downloadsApi}/downloads/point/last-week/${encodeURIComponent(name)}`;
-    const result = await fetchDownloadCounts(url, [name], options);
+    const result = await fetchDownloadCounts(url, [name], options, confirmDownloadsApiHealthy);
     for (const [key, count] of result.counts) {
       counts.set(key, count);
     }

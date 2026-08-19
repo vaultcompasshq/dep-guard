@@ -1,8 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   fetchJson,
   fetchPackument,
   fetchWeeklyDownloads,
   DOWNLOADS_BATCH_SIZE,
+  DOWNLOAD_DISAMBIGUATION_SENTINEL,
 } from '../src/online/registry-client.js';
 
 function jsonResponse(body: unknown, init: { status?: number; headers?: Record<string, string> } = {}) {
@@ -259,38 +262,102 @@ describe('fetchWeeklyDownloads', () => {
     expect(result.noRecord.has('unknown-pkg')).toBe(true);
   });
 
-  test('a scoped-name 404 leaves other names counts intact and resolves only that name as unknown', async () => {
-    // The bulk batch (an unscoped name) answers first; the scoped name's
-    // individual point request 404s second. Regression test: a 404 on any
-    // single-name lookup used to throw out of the whole function,
-    // discarding the bulk batch's already-fetched results too. A
-    // single-name 404 is ambiguous (see fetchDownloadCounts), so the
-    // scoped name lands in neither counts nor noRecord -- unresolved, not
-    // a confirmed zero.
+  test('a scoped-name 404, when the sentinel probe confirms the downloads API is healthy, resolves to noRecord', async () => {
+    // The headline case: every scoped name goes through the single-name
+    // path (bulk lookups reject scoped names outright, verified live --
+    // a 400, "scoped packages are not currently supported in bulk
+    // lookups"), so this is the ONLY way a scoped name's no-record answer
+    // can ever be confirmed. The bulk batch (an unscoped name) answers
+    // first; the scoped name's individual point request 404s second,
+    // triggering a sentinel probe (a single-name point lookup for
+    // DOWNLOAD_DISAMBIGUATION_SENTINEL) third, which succeeds -- so the
+    // 404 is trusted as a confirmed no-record answer. Regression
+    // coverage: a 404 on any single-name lookup used to throw out of the
+    // whole function, discarding the bulk batch's already-fetched
+    // results too.
     const fetchImpl = scriptedFetch([
       jsonResponse({ 'left-pad': { downloads: 10 } }),
       jsonResponse(null, { status: 404 }),
+      jsonResponse({ downloads: 100_000, package: 'react' }),
     ]);
     const result = await fetchWeeklyDownloads(['left-pad', '@scope/pkg'], {
       fetchImpl,
       sleepImpl: noSleep,
     });
     expect(result.counts.get('left-pad')).toBe(10);
+    expect(fetchImpl.calls[2].url).toContain('/react');
     expect(result.counts.has('@scope/pkg')).toBe(false);
-    expect(result.noRecord.has('@scope/pkg')).toBe(false);
+    expect(result.noRecord.has('@scope/pkg')).toBe(true);
   });
 
-  test('a single-unscoped-name batch 404 returns an empty, unresolved result rather than throwing', async () => {
+  test('a single-unscoped-name batch 404, when the sentinel probe confirms the downloads API is healthy, resolves to noRecord', async () => {
     // A batch of exactly one unscoped name answers in the same point form
-    // as a scoped name, so it can 404 for an unknown name the same way --
-    // and, being ambiguous, must not land in noRecord either.
-    const fetchImpl = scriptedFetch([jsonResponse(null, { status: 404 })]);
+    // as a scoped name, so it 404s for an unknown name the same way and
+    // is disambiguated by the same sentinel probe, not a different
+    // mechanism -- scoped and unscoped single-name 404s are handled
+    // identically once past the initial 404.
+    const fetchImpl = scriptedFetch([
+      jsonResponse(null, { status: 404 }),
+      jsonResponse({ downloads: 100_000, package: 'react' }),
+    ]);
     const result = await fetchWeeklyDownloads(['hallucinated-pkg'], {
       fetchImpl,
       sleepImpl: noSleep,
     });
     expect(result.counts.size).toBe(0);
-    expect(result.noRecord.size).toBe(0);
+    expect(result.noRecord.has('hallucinated-pkg')).toBe(true);
+  });
+
+  test('the sentinel probe runs at most once per fetchWeeklyDownloads call, reused across multiple 404s', async () => {
+    // Two scoped names, both 404ing -- the sentinel probe must fire only
+    // once (three total calls: the first 404, the probe it triggers, then
+    // the second 404 reusing the already-resolved probe), not once per
+    // 404, and both names resolve identically off that single probe.
+    const fetchImpl = scriptedFetch([
+      jsonResponse(null, { status: 404 }), // @scope/one's lookup
+      jsonResponse({ downloads: 100_000, package: 'react' }), // the one sentinel probe
+      jsonResponse(null, { status: 404 }), // @scope/two's lookup
+    ]);
+    const result = await fetchWeeklyDownloads(['@scope/one', '@scope/two'], {
+      fetchImpl,
+      sleepImpl: noSleep,
+    });
+    expect(fetchImpl.calls).toHaveLength(3);
+    expect(result.noRecord.has('@scope/one')).toBe(true);
+    expect(result.noRecord.has('@scope/two')).toBe(true);
+  });
+
+  test('a single-name 404, when the sentinel probe itself 404s, propagates rather than being trusted', async () => {
+    // The sentinel is a package certain to exist and certain to have
+    // downloads, so the probe 404ing means the downloads API itself is
+    // misbehaving (not the candidate name) -- this must not be read as a
+    // confirmed no-record answer for every single-name candidate in the
+    // batch. Not caught: it propagates through fetchWeeklyDownloads
+    // exactly like any other unreachable downloads API.
+    const fetchImpl = scriptedFetch([
+      jsonResponse(null, { status: 404 }),
+      jsonResponse(null, { status: 404 }),
+    ]);
+    await expect(
+      fetchWeeklyDownloads(['hallucinated-pkg'], { fetchImpl, sleepImpl: noSleep, attempts: 1 })
+    ).rejects.toThrow(/404/);
+  });
+
+  test('a single-name 404 whose sentinel probe fails outright propagates rather than resolving silently', async () => {
+    // The original single-name 404 is ambiguous; the sentinel probe is a
+    // genuine network failure (not a clean answer either way). This is
+    // deliberately NOT swallowed into "unresolved" -- it propagates
+    // through fetchWeeklyDownloads exactly like any other unreachable
+    // downloads API, so the caller's degrade-on-failure wrapper diagnoses
+    // it as online-check-unreachable rather than silently reading it as
+    // either a confirmed zero or a quiet skip.
+    const fetchImpl = scriptedFetch([
+      jsonResponse(null, { status: 404 }),
+      jsonResponse(null, { status: 500 }),
+    ]);
+    await expect(
+      fetchWeeklyDownloads(['hallucinated-pkg'], { fetchImpl, sleepImpl: noSleep, attempts: 1 })
+    ).rejects.toThrow(/500/);
   });
 
   test('a non-404 failure still propagates', async () => {
@@ -379,5 +446,22 @@ describe('fetchPackument', () => {
     await expect(
       fetchPackument('some-404-package', { fetchImpl, sleepImpl: noSleep, attempts: 1 })
     ).rejects.toThrow(/request failed: 500/);
+  });
+});
+
+describe('DOWNLOAD_DISAMBIGUATION_SENTINEL', () => {
+  test('appears in the corpus\'s own reviewed popularity list', () => {
+    // The client never reads scripts/data/top-packages.txt at runtime --
+    // that would be a new coupling for no benefit (see the comment on
+    // DOWNLOAD_DISAMBIGUATION_SENTINEL) -- but the guarantee the sentinel
+    // relies on (certainly registered, certainly downloaded) should not
+    // rest on this comment's say-so alone. This anchors it to the
+    // corpus's own twice-verified list without the client depending on
+    // that list existing or being readable at scan time.
+    const topPackagesPath = fileURLToPath(
+      new URL('../../../scripts/data/top-packages.txt', import.meta.url)
+    );
+    const names = readFileSync(topPackagesPath, 'utf8').split('\n').map((line) => line.trim());
+    expect(names).toContain(DOWNLOAD_DISAMBIGUATION_SENTINEL);
   });
 });

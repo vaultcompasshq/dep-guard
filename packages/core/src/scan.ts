@@ -244,15 +244,21 @@ async function cachedFetchWeeklyDownloads(names: string[]): Promise<DownloadCoun
       counts.set(name, 0);
       store.set(`downloads:${name}`, 0, DOWNLOADS_TTL_MS);
     }
-    // Anything neither counted nor confirmed no-record (an unresolved
-    // single-name 404 -- see fetchDownloadCounts in registry-client.ts) is
-    // left out of both the cache and the returned counts, exactly as
-    // before this fix: unresolved, not a signal either way. Returning an
-    // always-empty noRecord here is correct, not a shortcut -- every name
-    // this function could confirm as no-record has already been folded
-    // into `counts` above, so by the time a caller sees this result, a
-    // name in `counts` may be a real count OR a resolved zero, and a name
-    // in neither is still unresolved.
+    // Anything neither counted nor confirmed no-record is left out of
+    // both the cache and the returned counts: unresolved, not a signal
+    // either way. In production this is rare -- registry-client.ts's own
+    // sentinel probe (see probeDownloadsApiHealth) resolves a single-name
+    // 404 (scoped or unscoped) into a confirmed `noRecord` entry before
+    // it ever reaches here, or makes the whole fetchWeeklyDownloads call
+    // throw (caught above, per-name results discarded, an
+    // online-check-unreachable diagnostic raised by the check instead);
+    // a name landing here at all means the upstream fetch had a
+    // defensive, malformed-bulk-response-shaped gap, not an unresolved
+    // 404. Returning an always-empty noRecord here is correct, not a
+    // shortcut -- every name this function could confirm as no-record has
+    // already been folded into `counts` above, so by the time a caller
+    // sees this result, a name in `counts` may be a real count OR a
+    // resolved zero, and a name in neither is still unresolved.
   }
   store.save();
   return { counts, noRecord: new Set() };

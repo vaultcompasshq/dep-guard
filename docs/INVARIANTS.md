@@ -620,19 +620,33 @@ applies to any resemblance match the offline pass could not price.
 `registry-client.ts`'s `fetchWeeklyDownloads` answers this with three
 states, not two, and both checks read the distinction rather than
 collapsing it: a name npm reports a real count for; a name npm's
-response explicitly confirms it has no record for (a null entry in a
-successful bulk response) -- both checks treat this, and only this, as a
-confirmed zero; and a name that is unresolved (in practice, a swallowed
-single-name 404, ambiguous between "npm has never seen this name" and a
-structural failure such as a misconfigured downloadsApi or an endpoint
-change) -- both checks leave this one exactly as they would have before
-the distinction existed, at the candidate's offline severity, never
-promoted to a signal. Collapsing "confirmed no record" and "unresolved"
-into one absent-key case, the way both checks did before this
-distinction was added, would have let a broken downloadsApi silently
-mint a finding for every single-name lookup instead of surfacing as
-online-check-unreachable -- the same failure mode a real network outage
-is supposed to produce, not a wave of new findings.
+response confirms it has no record for -- either a null entry in a
+successful bulk response, or (a scoped name always, or an unscoped name
+whenever it is the only cache miss in a scan) a single-name 404 that a
+sentinel probe confirmed was genuine rather than a symptom of a broken
+downloads API, by asking the same downloads endpoint about a name
+certain to exist and certain to have downloads (`react`, verified
+against the corpus's own popularity list) before trusting the original
+404 -- both checks treat this, and only this, as a confirmed zero; and a
+name that is unresolved, which in practice a single-name 404 no longer
+produces (it resolves via the sentinel probe, or the whole fetch call
+throws and is diagnosed instead), so reaching this state now means the
+fetch returned a malformed or unrecognized response shape -- both checks
+leave this one exactly as they would have before the distinction
+existed, at the candidate's offline severity, never promoted to a
+signal. Deliberately probing the downloads API rather than the registry
+(fetchPackument) to confirm a single-name 404: those are two different
+services with independent failure modes, and a downloads API that 404s
+on everything while the registry is perfectly healthy would make every
+existing scoped package read as a confirmed zero if the registry were
+asked instead -- the same fabricated-block failure this whole
+distinction exists to prevent, just moved to a different service.
+Collapsing "confirmed no record" and "unresolved" into one absent-key
+case, the way both checks did before this distinction was added, would
+have let a broken downloadsApi silently mint a finding for every
+single-name lookup instead of surfacing as online-check-unreachable --
+the same failure mode a real network outage is supposed to produce, not
+a wave of new findings.
 
 Neither check downgrades a finding, removes one, or turns a network
 problem into a reason to trust a name more than the offline checks

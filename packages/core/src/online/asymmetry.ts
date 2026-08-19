@@ -50,15 +50,20 @@ export async function applyTyposquatAsymmetry(
   for (const finding of candidates) {
     // Three states, not two -- see DownloadCountsResult in
     // registry-client.ts. A real count is used as-is. A name in
-    // `noRecord` means npm answered successfully and confirmed it has no
-    // download history for this exact name -- a stronger unpopularity
-    // signal than a low recorded count, so it is treated as zero rather
-    // than left at the offline severity. A name in neither is unresolved
-    // (typically a swallowed single-name 404, ambiguous between "npm has
-    // never seen this name" and a structural failure such as a
-    // misconfigured downloadsApi) and is left alone exactly as it would
-    // have been before this fix -- an unresolved absence is not evidence
-    // the candidate is unpopular.
+    // `noRecord` means the downloads fetch confirmed it has no download
+    // history for this exact name -- either a null entry in a bulk
+    // response, or a single-name 404 that registry-client.ts's own
+    // sentinel probe confirmed was genuine rather than a symptom of a
+    // broken downloadsApi -- a stronger unpopularity signal than a low
+    // recorded count, so it is treated as zero rather than left at the
+    // offline severity. A name in neither is unresolved -- in production
+    // this reaches here only if the upstream fetch had a defensive,
+    // malformed-response-shaped gap, since a single-name 404 is resolved
+    // (into `noRecord`) or turned into a thrown, diagnosed failure before
+    // it would ever otherwise land here -- and is left alone exactly as
+    // it would have been before this fix -- an unresolved absence is not
+    // evidence the candidate is unpopular, regardless of which upstream
+    // implementation produced it.
     const fromCounts = downloadsResult.counts.get(finding.packageName);
     let downloads: number;
     if (fromCounts !== undefined) {
