@@ -227,6 +227,23 @@ describe('loadCorpus', () => {
     expectCorpusCorrupt(() => loadCorpus(dir));
   });
 
+  // The message names the versions this build actually supports, derived
+  // from SUPPORTED_CORPUS_FORMAT_VERSIONS rather than a hardcoded literal
+  // -- locks in that the two stay in sync, since a hardcoded copy would
+  // pass every other test here while quietly lying once a second version
+  // is ever added.
+  test('meta.json with an unsupported formatVersion names the supported version(s) in the message', () => {
+    const dir = writeFixtureDir({
+      meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01, formatVersion: 2 },
+    });
+    try {
+      loadCorpus(dir);
+      throw new Error('expected loadCorpus to throw');
+    } catch (err) {
+      expect((err as DepGuardError).message).toContain('format version(s) 1');
+    }
+  });
+
   test('meta.json with no formatVersion loads fine (a pre-versioning local corpus)', () => {
     const dir = writeFixtureDir({
       meta: { builtAt: '2026-08-01', nameCount: 1, fpRate: 0.01 },

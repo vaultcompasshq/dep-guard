@@ -698,16 +698,23 @@ docs/release/stability-policy.md promises a release reads its bundled
 format and at least the immediately previous format version, so the day a
 version 2 exists, `SUPPORTED_CORPUS_FORMAT_VERSIONS` has to grow to admit
 both, not just move the comparison -- that promise is why the constant is
-a set and not a single literal.
+a list and not a single literal. The refusal message names the supported
+versions by reading this same list (`.join(', ')`), rather than restating
+them as a literal in the message text, so the two cannot drift apart the
+day a second version is added.
 
 `formatVersion` is ABSENT-tolerant on purpose: a corpus missing the field
 entirely is accepted, not refused. That is the same "refuse only what is
 explicitly wrong, tolerate absence" rule `walkComplete` follows (next
-section) and for the same reason -- nothing has ever shipped, so every
-existing meta.json anywhere (the committed fixture corpus, every test
-helper that builds a minimal meta by hand, and any corpus built with a
-pre-versioning dep-guard) predates the field and is a legitimate local
-artifact, not a corpus in the wild claiming an unsupported version.
+section) and for the same reason -- nothing has ever shipped, so a
+meta.json written by a builder that predates this field (the committed
+fixture corpus, and any corpus already built with a pre-versioning
+dep-guard) is a legitimate local artifact missing the field, not a corpus
+in the wild claiming an unsupported version. That is narrower than "every
+meta.json anywhere": the current builder writes the field on every corpus
+it produces now, and this suite's own tests build metas that carry it too
+-- the tolerance is for what a pre-versioning builder could have already
+produced, not a claim that nothing ever carries the field.
 
 **This tolerance is provisional, not permanent, and the obligation is
 recorded here so it survives past whichever comment first stated it.** The

@@ -125,7 +125,13 @@ function assertMetaShape(filePath: string, value: unknown): asserts value is Cor
   if ('formatVersion' in value && !SUPPORTED_CORPUS_FORMAT_VERSIONS.includes(value.formatVersion as number)) {
     throw new DepGuardError(
       `corpus meta.formatVersion is ${JSON.stringify(value.formatVersion)}, which this ` +
-        `dep-guard does not understand (it understands format version 1): ${filePath}. ` +
+        // Derived from the constant, not restated as a literal: once a
+        // second version is added, an error that still said "version 1"
+        // while SUPPORTED_CORPUS_FORMAT_VERSIONS accepted both would be
+        // lying to whoever reads it, in the exact message that exists to
+        // keep this claim honest.
+        `dep-guard does not understand (it understands format version(s) ` +
+        `${SUPPORTED_CORPUS_FORMAT_VERSIONS.join(', ')}): ${filePath}. ` +
         'Upgrade dep-guard, or rebuild the corpus in a format version this dep-guard supports.',
       'corpus-corrupt'
     );
