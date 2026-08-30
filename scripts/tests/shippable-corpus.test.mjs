@@ -23,13 +23,31 @@ function tempCorpusDir() {
 
 // A large-enough name count clears DEFAULT_MIN_NAME_COUNT (1,000,000) so
 // tests that only want to exercise a different rule can use this without
-// also tripping the name-count floor. Individual tests still pass a small
-// minNameCount override so they don't need a filter actually sized in the
-// millions.
+// also tripping the walked-name floor. Individual tests still pass a small
+// minWalkedNameCount override so they don't need a filter actually sized
+// in the millions.
 const PLAUSIBLE_NAME_COUNT = 1_500_000;
 
-function writeCorpusFiles(dir, { names = ['react'], top = ['react'], aliases = {} } = {}) {
-  const filter = BloomFilter.create(names, Math.max(names.length, 1), 0.01);
+// Matches validMeta()'s default fpRate below, so a test that overrides
+// neither gets a names.bloom on disk whose size agrees with what meta.json
+// claims -- required for assertBloomSizeMatchesMeta to accept it.
+const DEFAULT_TEST_FP_RATE = 0.0001;
+
+// nameCount and fpRate are sizing parameters for the REAL bloom filter
+// written to disk, independent of `names` (what actually gets inserted).
+// assertBloomSizeMatchesMeta compares names.bloom's on-disk byte size
+// against what meta.nameCount/meta.fpRate imply, derived by calling
+// BloomFilter.create the same way the gate does -- so any test whose
+// meta.json claims a nameCount/fpRate has to build its filter with those
+// same values here, or the geometry check (correctly) refuses it. Sizing
+// depends only on the count and fpRate BloomFilter.create is given, never
+// on how many names are actually inserted, so `names` can stay a short,
+// realistic list even when nameCount is in the millions.
+function writeCorpusFiles(
+  dir,
+  { names = ['react'], top = ['react'], aliases = {}, nameCount = PLAUSIBLE_NAME_COUNT, fpRate = DEFAULT_TEST_FP_RATE } = {}
+) {
+  const filter = BloomFilter.create(names, nameCount, fpRate);
   writeFileSync(path.join(dir, 'names.bloom'), filter.serialize());
   writeFileSync(path.join(dir, 'top.json'), JSON.stringify(top));
   writeFileSync(path.join(dir, 'aliases.json'), JSON.stringify(aliases));
@@ -46,7 +64,7 @@ function validMeta(overrides = {}) {
     formatVersion: 1,
     builtAt: '2026-08-18T00:00:00.000Z',
     nameCount: PLAUSIBLE_NAME_COUNT,
-    fpRate: 0.0001,
+    fpRate: DEFAULT_TEST_FP_RATE,
     walkComplete: true,
     ...overrides,
   };
@@ -167,9 +185,12 @@ describe('assertCorpusShippable', () => {
     expect(() => assertCorpusShippable(dir, 1000)).toThrow(/nameCount/);
   });
 
-  it('accepts a corpus whose nameCount meets the minimum floor exactly', () => {
+  it('accepts a corpus whose walked name count meets the minimum floor exactly', () => {
     const dir = tempCorpusDir();
-    writeCorpusFiles(dir);
+    // top: [] means no curated extras, so the entire claimed nameCount has
+    // to come from the walk -- this test is about the walked-name floor
+    // exactly, not about a top list padding it out to reach it.
+    writeCorpusFiles(dir, { top: [], nameCount: 1000, fpRate: DEFAULT_TEST_FP_RATE });
     writeMeta(dir, validMeta({ nameCount: 1000 }));
 
     expect(() => assertCorpusShippable(dir, 1000)).not.toThrow();
@@ -186,6 +207,65 @@ describe('assertCorpusShippable', () => {
 
     expect(() => assertCorpusShippable(dir)).toThrow(/nameCount/);
     expect(DEFAULT_MIN_NAME_COUNT).toBeGreaterThan(20_000);
+  });
+
+  // The whole reason this floor is on the WALKED count rather than the
+  // bare nameCount field: a bare "nameCount >= floor" check could in
+  // principle be satisfied by an inflated top.json alone, with the walk
+  // itself having contributed almost nothing.
+  it('refuses a corpus whose nameCount clears the floor but is almost entirely injected extras, not walked names', () => {
+    const dir = tempCorpusDir();
+    const injectedExtras = Array.from({ length: 995 }, (_, i) => `extra-pkg-${i}`);
+    writeCorpusFiles(dir, { top: injectedExtras, nameCount: 1000, fpRate: DEFAULT_TEST_FP_RATE });
+    writeMeta(dir, validMeta({ nameCount: 1000 }));
+
+    // The bare nameCount (1000) clears a floor of 100 easily. Only 5 of
+    // those 1000 names were actually walked (1000 claimed minus 995
+    // injected extras from top.json), which does not.
+    expect(() => assertCorpusShippable(dir, 100)).toThrow(/walk itself contributed/);
+  });
+
+  describe('the bloom-size-matches-meta geometry cross-check', () => {
+    it('accepts a corpus whose names.bloom size on disk matches what meta.nameCount and meta.fpRate imply', () => {
+      const dir = tempCorpusDir();
+      writeCorpusFiles(dir, { nameCount: 50, fpRate: 0.01 });
+      writeMeta(dir, validMeta({ nameCount: 50, fpRate: 0.01 }));
+
+      expect(() => assertCorpusShippable(dir, 1)).not.toThrow();
+    });
+
+    // The essential case (b) exists for: a hand-edited or stale meta.json
+    // claiming a nameCount the physical filter never grew to match. Every
+    // field in meta.json reads as a plausible type; only the size
+    // cross-check against the real artifact on disk catches it.
+    it('refuses a corpus whose meta.nameCount is inflated far beyond what names.bloom on disk could hold', () => {
+      const dir = tempCorpusDir();
+      // The bloom file on disk is genuinely small (sized for 50 names).
+      writeCorpusFiles(dir, { nameCount: 50, fpRate: DEFAULT_TEST_FP_RATE });
+      // meta.json claims a huge nameCount with the same fpRate -- the
+      // walked-name floor (a) would happily accept this on the numbers
+      // alone; only the geometry check catches that the file on disk
+      // never actually grew.
+      writeMeta(dir, validMeta({ nameCount: 2_000_000, fpRate: DEFAULT_TEST_FP_RATE }));
+
+      expect(() => assertCorpusShippable(dir, 1)).toThrow(/names\.bloom/);
+    });
+
+    it('refuses a corpus whose meta.fpRate is missing', () => {
+      const dir = tempCorpusDir();
+      writeCorpusFiles(dir, { nameCount: 50, fpRate: DEFAULT_TEST_FP_RATE });
+      writeMeta(dir, validMeta({ nameCount: 50, fpRate: undefined }));
+
+      expect(() => assertCorpusShippable(dir, 1)).toThrow(/fpRate/);
+    });
+
+    it('refuses a corpus whose meta.fpRate is not a usable rate (zero)', () => {
+      const dir = tempCorpusDir();
+      writeCorpusFiles(dir, { nameCount: 50, fpRate: DEFAULT_TEST_FP_RATE });
+      writeMeta(dir, validMeta({ nameCount: 50, fpRate: 0 }));
+
+      expect(() => assertCorpusShippable(dir, 1)).toThrow(/fpRate/);
+    });
   });
 
   it('refuses a corpus whose files are well-formed but does not load through the real reader (malformed JSON)', () => {

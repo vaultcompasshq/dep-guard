@@ -822,21 +822,60 @@ gate that closes that gap: it refuses to publish unless all four corpus
 files exist, `meta.formatVersion` is PRESENT and is one of
 `SUPPORTED_CORPUS_FORMAT_VERSIONS` (imported from the built core, not
 restated -- see "derive, do not describe" at the top of this file),
-`meta.walkComplete` is PRESENT and is exactly the boolean `true`,
-`meta.nameCount` clears a floor high enough that a `--max-names` slice
-could never pass it by accident (`DEFAULT_MIN_NAME_COUNT`, one million,
-against a real walk's several million names), and the directory loads
-through the real `loadCorpus` with a known-popular name (`react`)
-resolving as present in the bloom filter. That last check makes the gate
-additive to the reader's own checks rather than a replacement for them: a
-corpus this gate accepts still has to load the way a real scan would load
-it. `scripts/tests/shippable-corpus.test.mjs` exercises both directions of
+`meta.walkComplete` is PRESENT and is exactly the boolean `true`, the
+walked-name floor and bloom-size cross-check below both hold, and the
+directory loads through the real `loadCorpus` with a known-popular name
+(`react`) resolving as present in the bloom filter. That last check makes
+the gate additive to the reader's own checks rather than a replacement for
+them: a corpus this gate accepts still has to load the way a real scan
+would load it -- but it only catches a corrupted, truncated, or
+substituted bloom filter, not an incomplete walk, because `collectExtras`
+(scripts/build-corpus.mjs) injects every name on the top list into the
+filter regardless of what the walk found, and `react` is on that list; no
+other popular name would fare differently, since anything popular enough
+to be worth probing is on the same list. Walk completeness is what the two
+checks below establish, together with `walkComplete`.
+
+`meta.nameCount` does not clear a bare floor. It clears the floor MINUS
+the names `top.json` and `aliases.json` inject into the filter regardless
+of the walk -- the same union `collectExtras` computes, read directly from
+the two files the corpus being gated ships, not recomputed from anywhere
+else. A bare `nameCount >= floor` check could in principle be satisfied by
+an inflated top list alone, with the walk itself contributing almost
+nothing; subtracting the injected extras first closes that. The floor
+itself is unchanged (`DEFAULT_MIN_NAME_COUNT`, one million, against a real
+walk's several million names).
+
+`meta.json` is self-reported; `names.bloom` is a physical artifact on
+disk. The gate asserts they agree: the expected serialized size for
+`meta.nameCount` and `meta.fpRate` is derived by calling the real
+`BloomFilter.create([], meta.nameCount, meta.fpRate).serialize().byteLength`
+(imported from `packages/core/dist/bloom.js`, the same module
+`scripts/build-corpus.mjs` uses) rather than restating the bit-array
+sizing formula or the header layout as a second copy -- again "derive, do
+not describe". `BloomFilter.create` sizes its bit array from the count and
+fpRate it is given, never from what it actually inserts, so an empty
+filter built with a corpus's own claimed values has exactly the geometry a
+real one built with those same values would. Comparing that against
+`names.bloom`'s actual on-disk byte count is what stops a hand-edited or
+stale `meta.json` from claiming a walk that never happened: every field
+in it can read as a plausible type while the physical filter never grew to
+match, and only a comparison against the artifact itself catches that.
+
+`scripts/tests/shippable-corpus.test.mjs` exercises both directions of
 every rule, including the two cases the reader tolerates and this gate does
 not (formatVersion absent, walkComplete absent) -- verified adversarially
 by weakening the gate to match the reader's tolerance and confirming those
 specific tests, and no others, go red -- and also covers `readMeta`'s two
-failure branches directly: meta.json present but unreadable as a file, and
-present and readable but not valid JSON.
+failure branches directly (meta.json present but unreadable as a file, and
+present and readable but not valid JSON), the walked-name floor's
+extras-subtraction specifically (a nameCount that clears the bare floor
+but is almost entirely injected extras, verified adversarially by
+reverting the subtraction and confirming exactly that test goes red), and
+the bloom-size cross-check in both directions, including the case the
+check exists for: a `meta.nameCount` inflated far beyond what the
+`names.bloom` on disk actually holds (verified adversarially by disabling
+the cross-check and confirming exactly those tests go red).
 
 The release smoke job (`smoke-published`) passes no `--corpus-dir` to any
 of its four `dep-guard check` invocations, on purpose: the point of that
