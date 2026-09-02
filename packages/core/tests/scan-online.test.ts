@@ -124,6 +124,8 @@ describe('scan(): online enrichment', () => {
       latestVersion: '0.0.1',
       latestPublishedAt: new Date().toISOString(),
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -153,6 +155,8 @@ describe('scan(): online enrichment', () => {
       latestVersion: '0.0.1',
       latestPublishedAt: new Date().toISOString(),
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -180,6 +184,8 @@ describe('scan(): online enrichment', () => {
       latestVersion: '0.0.1',
       latestPublishedAt: new Date().toISOString(),
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -214,6 +220,8 @@ describe('scan(): online enrichment', () => {
       latestVersion: '0.0.1',
       latestPublishedAt: new Date().toISOString(),
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -339,11 +347,20 @@ describe('scan(): online enrichment', () => {
     // lookup's null had been cached, this second scan would read that
     // stale "created: null" back out of the cache instead of calling
     // fetchPackument again, and would stay silent forever.
-    fetchPackumentMock.mockResolvedValueOnce({
+    //
+    // mockResolvedValue rather than mockResolvedValueOnce: as of 0.2.0
+    // the unknown-package resolver asks the registry about this same name
+    // too, and runs first, so a one-shot mock would be consumed by that
+    // call and registered-squat would still see the default null. Both
+    // callers ask about one name and in production both get one answer,
+    // which is what this now models.
+    fetchPackumentMock.mockResolvedValue({
       createdAt: new Date().toISOString(),
       latestVersion: '0.0.1',
       latestPublishedAt: new Date().toISOString(),
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const secondResult = await scan({
       repoRoot: dir,
@@ -377,6 +394,8 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
       latestVersion: '3.0.0',
       latestPublishedAt: '2026-08-01T00:00:00.000Z',
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -416,6 +435,8 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
       latestVersion: '1.0.0',
       latestPublishedAt: '2026-08-01T00:00:00.000Z',
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     fetchWeeklyDownloadsMock.mockResolvedValue({
       counts: new Map([['raect', 999_999]]),
@@ -571,6 +592,73 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
     for (const finding of first.findings) {
       expect(finding.details ?? {}).not.toHaveProperty('onlineResolution');
     }
+  });
+
+  test('a security-holding placeholder does not clear the finding, through the real wiring', async () => {
+    // The case that matters most: npm seizes a name precisely because it
+    // was malicious, and a 200 for a seized name used to read as "the
+    // package is fine" all the way through scan().
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: '2019-01-01T00:00:00.000Z',
+      latestVersion: '0.0.1-security',
+      latestPublishedAt: '2019-01-02T00:00:00.000Z',
+      deprecated: false,
+      unpublished: false,
+      securityHolder: true,
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'seized-name-xyz': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    const finding = result.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.details).toMatchObject({ onlineResolution: 'security-holder' });
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('existence is asked live every scan, never served from the created cache', async () => {
+    // The created: cache never expires and was written for a different
+    // question (registered-squat's age check). Serving this check from it
+    // would mean a name that existed when some earlier scan asked reads
+    // as present forever, including a name npm has since removed for
+    // security reasons. Two scans in one process share one cache, so a
+    // second scan reaching the network is the observable property.
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: '2020-01-01T00:00:00.000Z',
+      latestVersion: '1.0.0',
+      latestPublishedAt: '2020-01-01T00:00:00.000Z',
+      deprecated: false,
+      unpublished: false,
+      securityHolder: false,
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'cached-name-thing': '^1.0.0' });
+
+    const options = {
+      repoRoot: dir,
+      mode: { kind: 'base' as const, ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    };
+    await scan(options);
+    const callsAfterFirst = fetchPackumentMock.mock.calls.filter(
+      (c) => c[0] === 'cached-name-thing'
+    ).length;
+    await scan(options);
+    const callsAfterSecond = fetchPackumentMock.mock.calls.filter(
+      (c) => c[0] === 'cached-name-thing'
+    ).length;
+
+    expect(callsAfterFirst).toBeGreaterThan(0);
+    expect(callsAfterSecond).toBeGreaterThan(callsAfterFirst);
   });
 
   test('checkSingle resolves its unknown-package finding the same way scan() does', async () => {

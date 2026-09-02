@@ -60,11 +60,37 @@ import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
 
+// The facts this check needs about a 200 from the registry. Deliberately
+// NOT `{ createdAt }`: a creation date cannot distinguish a real package
+// from a name npm has taken over for security reasons, and the previous
+// version of this file narrowed the dep to exactly that, discarding the
+// discriminator registry-client had already computed. A 200 then read as
+// "the name is fine" for a package npm had seized precisely because it
+// was not.
+export interface PackumentFacts {
+  latestVersion: string | null;
+  unpublished: boolean;
+  securityHolder: boolean;
+}
+
 export interface UnknownPackageDeps {
-  fetchPackument(name: string): Promise<{ createdAt: string | null } | null>;
+  fetchPackument(name: string): Promise<PackumentFacts | null>;
 }
 
 const CHECK_LABEL = 'unknown-package online resolution';
+
+// Why each not-present answer left the finding alone, in the finding's
+// own details. A consumer reading one finding out of a JSON or SARIF
+// report has no other way to learn that the registry did answer and that
+// the answer was not reassuring.
+const NOT_PRESENT_REASONS: Record<'tombstone' | 'security-holder' | 'no-usable-version', string> = {
+  tombstone:
+    'the registry answered, but every version of this name has been unpublished, so there is no package here to install',
+  'security-holder':
+    'the registry answered with an npm security-holding placeholder, which means npm took this name over rather than that the package is real',
+  'no-usable-version':
+    'the registry answered, but the response carried no usable latest version, so it does not confirm the package exists',
+};
 
 // Recorded on the finding itself, not only in a diagnostic. A diagnostic
 // describes the run; this describes THIS finding, and a consumer reading
@@ -72,7 +98,18 @@ const CHECK_LABEL = 'unknown-package online resolution';
 // way to attribute a run-level note to it. The three values are the three
 // ways the question can fail to be settled -- there is deliberately no
 // value for "resolved, exists", because that finding no longer exists.
-type OnlineResolution = 'registry-absent' | 'unreachable' | 'deadline-exceeded';
+type OnlineResolution =
+  | 'registry-absent'
+  | 'unreachable'
+  | 'deadline-exceeded'
+  // The three "200, but not a usable package" answers. Each keeps the
+  // finding exactly as the offline check made it, and each says which
+  // kind of 200 it was, because they mean different things to a reader:
+  // a tombstone is a name that was withdrawn, a security holder is a name
+  // npm seized, and no-usable-version is a body that answered nothing.
+  | 'tombstone'
+  | 'security-holder'
+  | 'no-usable-version';
 
 function recordResolution(
   finding: Omit<Finding, 'fingerprint'>,
@@ -172,7 +209,7 @@ export async function resolveUnknownPackages(
       continue;
     }
 
-    let packument: { createdAt: string | null } | null;
+    let packument: PackumentFacts | null;
     try {
       packument = await deps.fetchPackument(name);
     } catch (err) {
@@ -190,6 +227,32 @@ export async function resolveUnknownPackages(
     }
 
     if (packument !== null) {
+      // A 200 is not by itself an answer. Only a body carrying a real
+      // latest version, with no unpublish record and no security-holder
+      // placeholder, means an installable package exists under this name.
+      // Everything else is a 200 about a name that is NOT a usable
+      // package, and each of those keeps the offline finding exactly as
+      // it was while saying which case it hit.
+      //
+      // The order matters: a seized name is reported as seized even if it
+      // somehow also carries a version, because that is the fact a reader
+      // most needs, and the check is deliberately made before the
+      // has-a-version test rather than after it.
+      const notPresent: OnlineResolution | null = packument.unpublished
+        ? 'tombstone'
+        : packument.securityHolder
+          ? 'security-holder'
+          : packument.latestVersion === null
+            ? 'no-usable-version'
+            : null;
+
+      if (notPresent !== null) {
+        for (const finding of group) {
+          recordResolution(finding, notPresent, NOT_PRESENT_REASONS[notPresent]);
+        }
+        continue;
+      }
+
       // The name is real. The corpus was stale, not the manifest.
       for (const finding of group) {
         stoodDown.add(finding);

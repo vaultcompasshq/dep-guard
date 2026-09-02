@@ -472,7 +472,86 @@ describe('fetchPackument', () => {
       latestVersion: '1.0.0',
       latestPublishedAt: '2026-08-01T00:00:00.000Z',
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
+  });
+
+  // A 200 does not mean a usable package exists. npm keeps answering 200
+  // for a name after every version has been unpublished, and for a name
+  // it has taken over for security reasons, and both bodies are shaped
+  // quite unlike an ordinary packument. Whoever consumes this has to be
+  // able to tell them apart, so the discrimination happens here, once,
+  // against the raw body, rather than being re-derived by each caller.
+  test('flags a fully unpublished package (npm tombstone shape)', async () => {
+    // The real shape npm serves after `npm unpublish --force`: a time
+    // object carrying only an "unpublished" record, no versions map and
+    // no dist-tags at all.
+    const fetchImpl = scriptedFetch([
+      jsonResponse({
+        name: 'gone-pkg',
+        time: {
+          unpublished: {
+            name: 'gone-pkg',
+            time: '2026-05-04T00:00:00.000Z',
+            versions: ['1.0.0', '1.0.1'],
+          },
+        },
+      }),
+    ]);
+    const packument = await fetchPackument('gone-pkg', { fetchImpl, sleepImpl: noSleep });
+    expect(packument?.unpublished).toBe(true);
+    expect(packument?.latestVersion).toBeNull();
+    expect(packument?.securityHolder).toBe(false);
+  });
+
+  test('flags an npm security-holding placeholder by its version', async () => {
+    const fetchImpl = scriptedFetch([
+      jsonResponse({
+        name: 'held-pkg',
+        time: { created: '2019-01-01T00:00:00.000Z', '0.0.1-security': '2019-02-02T00:00:00.000Z' },
+        'dist-tags': { latest: '0.0.1-security' },
+        versions: { '0.0.1-security': { description: 'security holding package' } },
+      }),
+    ]);
+    const packument = await fetchPackument('held-pkg', { fetchImpl, sleepImpl: noSleep });
+    expect(packument?.securityHolder).toBe(true);
+    expect(packument?.unpublished).toBe(false);
+  });
+
+  test('flags a security-holding placeholder by its description marker alone', async () => {
+    // Not every holder carries the 0.0.1-security version string, so the
+    // description marker npm writes is checked independently rather than
+    // as a confirmation of the version pattern.
+    const fetchImpl = scriptedFetch([
+      jsonResponse({
+        name: 'held-two',
+        description: 'security holding package',
+        time: { created: '2019-01-01T00:00:00.000Z', '1.0.2': '2019-02-02T00:00:00.000Z' },
+        'dist-tags': { latest: '1.0.2' },
+        versions: { '1.0.2': {} },
+      }),
+    ]);
+    const packument = await fetchPackument('held-two', { fetchImpl, sleepImpl: noSleep });
+    expect(packument?.securityHolder).toBe(true);
+  });
+
+  test('does not mistake an ordinary package for a holder or a tombstone', async () => {
+    // The falsifiable half. A prerelease that merely mentions security in
+    // an unrelated way, at an ordinary version, is a normal package.
+    const fetchImpl = scriptedFetch([
+      jsonResponse({
+        name: 'real-pkg',
+        description: 'helpers for security headers',
+        time: { created: '2024-01-01T00:00:00.000Z', '3.1.0': '2026-02-02T00:00:00.000Z' },
+        'dist-tags': { latest: '3.1.0' },
+        versions: { '3.1.0': {} },
+      }),
+    ]);
+    const packument = await fetchPackument('real-pkg', { fetchImpl, sleepImpl: noSleep });
+    expect(packument?.securityHolder).toBe(false);
+    expect(packument?.unpublished).toBe(false);
+    expect(packument?.latestVersion).toBe('3.1.0');
   });
 
   test('reports deprecated true when the latest version carries a deprecation notice', async () => {

@@ -326,6 +326,32 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
 // handling and turns a failure into a diagnostic, because --online
 // reaching a pre-commit hook must not let a flaky connection block a
 // commit.
+// Existence for the unknown-package check is asked LIVE, never served
+// from the shared cache, and the two reasons are independent.
+//
+// First, the cache cannot answer this question. It stores a `created:`
+// date, written for registered-squat's age question, and a date cannot
+// tell a real package from an npm security-holding placeholder or from a
+// name whose every version has been unpublished. Handing a cache hit to
+// this check is handing it a fact about a different question.
+//
+// Second, even a cache that did store presence would be the wrong input
+// here. `created:` entries never expire, so a name that existed when some
+// earlier scan asked would read as present forever afterwards on that
+// machine -- including a name npm has since removed for security reasons,
+// which is the single case where a stale "it exists" is most harmful.
+// Standing a blocking finding down, or downgrading it, is the one place
+// in this subsystem where a wrong answer costs coverage rather than
+// costing an extra signal, so it goes to the network or it leaves the
+// finding alone.
+//
+// The cache stays exactly as valid as it was for registered-squat's age
+// question, which is what it was written for: a real creation date does
+// not change.
+async function liveFetchPackument(name: string) {
+  return fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
+}
+
 async function enrichOnline(
   rawFindings: Omit<Finding, 'fingerprint'>[],
   ctx: CheckContext
@@ -335,7 +361,7 @@ async function enrichOnline(
   const resolved = await resolveUnknownPackages(
     rawFindings,
     ctx,
-    { fetchPackument: cachedFetchPackument },
+    { fetchPackument: liveFetchPackument },
     ctx.diagnostics,
     deadline
   );

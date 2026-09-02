@@ -82,6 +82,17 @@ function typosquatFinding(name: string): Omit<Finding, 'fingerprint'> {
 
 const freshDeadline = () => createOnlineDeadline(10_000, () => 0);
 
+// The facts resolveUnknownPackages asks registry-client for. A real,
+// installable package: a genuine latest version, no tombstone, not a
+// security holder.
+const REAL_PACKAGE = { latestVersion: '1.2.3', unpublished: false, securityHolder: false };
+const TOMBSTONE = { latestVersion: null, unpublished: true, securityHolder: false };
+const SECURITY_HOLDER = {
+  latestVersion: '0.0.1-security',
+  unpublished: false,
+  securityHolder: true,
+};
+
 describe('resolveUnknownPackages', () => {
   test('a packument that exists stands the finding down', async () => {
     const diagnostics: Diagnostic[] = [];
@@ -90,7 +101,7 @@ describe('resolveUnknownPackages', () => {
     const result = await resolveUnknownPackages(
       findings,
       makeContext(),
-      { fetchPackument: async () => ({ createdAt: '2026-08-01T00:00:00.000Z' }) },
+      { fetchPackument: async () => REAL_PACKAGE },
       diagnostics,
       freshDeadline()
     );
@@ -111,7 +122,7 @@ describe('resolveUnknownPackages', () => {
     const result = await resolveUnknownPackages(
       findings,
       makeContext(),
-      { fetchPackument: async () => ({ createdAt: '2026-08-01T00:00:00.000Z' }) },
+      { fetchPackument: async () => REAL_PACKAGE },
       [],
       freshDeadline()
     );
@@ -288,6 +299,69 @@ describe('resolveUnknownPackages', () => {
     expect(result.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('high');
   });
 
+  // A 200 is not the same as "this package exists and can be installed".
+  // npm keeps answering 200 for a name whose every version has been
+  // unpublished, and for a name it has taken over for security reasons.
+  // Both are names an attacker can plausibly be pointing at, and treating
+  // either as registry-present would clear the finding for exactly the
+  // case the finding is for.
+  test('a fully unpublished name leaves the finding unchanged, marked as a tombstone', async () => {
+    const findings = [unknownPackageFinding('gone-pkg')];
+
+    const result = await resolveUnknownPackages(
+      findings,
+      makeContext(),
+      { fetchPackument: async () => TOMBSTONE },
+      [],
+      freshDeadline()
+    );
+
+    const finding = result.find((f) => f.ruleId === 'unknown-package');
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('high');
+    expect(finding?.message).toContain('not in the known-package corpus');
+    expect(finding?.details).toMatchObject({ onlineResolution: 'tombstone' });
+  });
+
+  test('an npm security-holding placeholder leaves the finding unchanged', async () => {
+    const findings = [unknownPackageFinding('held-pkg')];
+
+    const result = await resolveUnknownPackages(
+      findings,
+      makeContext(),
+      { fetchPackument: async () => SECURITY_HOLDER },
+      [],
+      freshDeadline()
+    );
+
+    const finding = result.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.details).toMatchObject({ onlineResolution: 'security-holder' });
+  });
+
+  test('a 200 with no latest version at all is not treated as present', async () => {
+    // Neither an explicit tombstone nor a holder, just a body with
+    // nothing installable in it. Fail closed: the question was "does this
+    // package exist", and a body with no version does not answer yes.
+    const result = await resolveUnknownPackages(
+      [unknownPackageFinding('empty-pkg')],
+      makeContext(),
+      {
+        fetchPackument: async () => ({
+          latestVersion: null,
+          unpublished: false,
+          securityHolder: false,
+        }),
+      },
+      [],
+      freshDeadline()
+    );
+
+    const finding = result.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.details).toMatchObject({ onlineResolution: 'no-usable-version' });
+  });
+
   test('nothing is fetched when there are no unknown-package findings', async () => {
     let called = 0;
     const findings = [typosquatFinding('raect')];
@@ -349,7 +423,7 @@ describe('resolveUnknownPackages', () => {
     const result = await resolveUnknownPackages(
       findings,
       makeContext(),
-      { fetchPackument: async () => ({ createdAt: '2026-08-01T00:00:00.000Z' }) },
+      { fetchPackument: async () => REAL_PACKAGE },
       [],
       freshDeadline()
     );
