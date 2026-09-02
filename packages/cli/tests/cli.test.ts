@@ -625,6 +625,43 @@ describe('--no-online flag', () => {
   }, CLI_TIMEOUT_MS);
 });
 
+describe('the init command, through the real binary', () => {
+  // init's behaviour is covered in depth in init.test.ts, against the
+  // module directly. These two prove the command is actually reachable
+  // from the built binary and reports the exit codes it promises, which
+  // is the one thing a module-level test cannot show.
+  test('installs the hook and exits 0, and a re-run exits 0 without duplicating it', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const first = await runCli(['init'], repo);
+    expect(first.exitCode).toBe(0);
+    const hook = path.join(repo, '.git', 'hooks', 'pre-commit');
+    expect(existsSync(hook)).toBe(true);
+    const content = await readFile(hook, 'utf8');
+    expect(content).toContain('dep-guard scan --staged');
+
+    const second = await runCli(['init'], repo);
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain('already installed');
+    expect(await readFile(hook, 'utf8')).toBe(content);
+  }, CLI_TIMEOUT_MS);
+
+  test('--dry-run writes nothing, and a bad --manager exits 2', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const dry = await runCli(['init', '--dry-run'], repo);
+    expect(dry.exitCode).toBe(0);
+    expect(dry.stdout).toContain('dry run');
+    expect(existsSync(path.join(repo, '.git', 'hooks', 'pre-commit'))).toBe(false);
+
+    const bad = await runCli(['init', '--manager', 'nonsense'], repo);
+    expect(bad.exitCode).toBe(2);
+    expect(bad.stderr).toContain('--manager must be one of');
+  }, CLI_TIMEOUT_MS);
+});
+
 describe('a first run with no corpus built yet', () => {
   test('omitting --corpus-dir produces an actionable message, not a bare internal path', async () => {
     // This test's whole premise is that core's default corpus path

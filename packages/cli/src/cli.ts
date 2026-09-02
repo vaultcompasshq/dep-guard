@@ -11,6 +11,8 @@ import { Command, CommanderError } from 'commander';
 import { checkSingle, DepGuardError, FAIL_ON_LEVELS, scan } from '@vaultcompass/dep-guard-core';
 import type { FailOn, ScanMode, ScanResult } from '@vaultcompass/dep-guard-core';
 import { renderDiagnosticLine, renderText, sanitizeText } from './output-text.js';
+import { HOOK_MANAGERS, initCommand } from './init.js';
+import type { HookManager } from './init.js';
 
 // A pipe reader (head, less, a CI log collector that stops reading early)
 // closing its end mid-write is ordinary, not a bug in this tool -- but
@@ -88,6 +90,21 @@ function parseFailOn(value: string | undefined): FailOn | undefined {
   return value as FailOn;
 }
 
+// Validated against init.ts's own list rather than a second copy of the
+// four names, so a manager added there cannot be silently unreachable
+// from the command line.
+function parseManager(value: string | undefined): HookManager | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!(HOOK_MANAGERS as readonly string[]).includes(value)) {
+    throw new CliUsageError(
+      `--manager must be one of ${HOOK_MANAGERS.join(', ')} (got "${value}")`
+    );
+  }
+  return value as HookManager;
+}
+
 function parseFormat(value: string): OutputFormat {
   if (value !== 'json' && value !== 'text') {
     throw new CliUsageError(`--format must be "json" or "text" (got "${value}")`);
@@ -109,6 +126,12 @@ interface CheckCliOptions {
   failOn?: string;
   corpusDir?: string;
   online?: boolean;
+}
+
+interface InitCliOptions {
+  manager?: string;
+  dryRun?: boolean;
+  json?: boolean;
 }
 
 function resolveMode(options: ScanCliOptions): ScanMode {
@@ -254,6 +277,30 @@ function buildProgram(): Command {
         process.exitCode = result.exitCode;
       } catch (err) {
         reportError(err, options.corpusDir === undefined);
+      }
+    });
+
+  program
+    .command('init')
+    .description('Install the dep-guard pre-commit hook in this repository')
+    .option(
+      '--manager <manager>',
+      `hook manager to install for: ${HOOK_MANAGERS.join(', ')}`,
+      'native'
+    )
+    .option('--dry-run', 'print what would be written without writing anything')
+    .option('--json', 'print the result as JSON')
+    .exitOverride()
+    .action((options: InitCliOptions) => {
+      try {
+        process.exitCode = initCommand({
+          cwd: process.cwd(),
+          manager: parseManager(options.manager),
+          dryRun: options.dryRun,
+          json: options.json,
+        });
+      } catch (err) {
+        reportError(err);
       }
     });
 
