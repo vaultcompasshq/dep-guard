@@ -64,6 +64,7 @@ import { BloomFilter } from '../packages/core/dist/bloom.js';
 
 import { ALIAS_SEED } from './lib/aliases.mjs';
 import { assertBloomParity } from './lib/bloom-vector.mjs';
+import { collectExtras } from './lib/corpus-extras.mjs';
 import {
   assertAliasKeysNotPopular,
   assertTopListWellFormed,
@@ -399,21 +400,6 @@ function* namesForFilter(namesPath, extras) {
   yield* extras;
 }
 
-function collectExtras(top, aliases) {
-  const extras = new Set(top);
-  for (const targets of Object.values(aliases)) {
-    if (!Array.isArray(targets)) {
-      continue;
-    }
-    for (const target of targets) {
-      if (typeof target === 'string' && target.length > 0) {
-        extras.add(target);
-      }
-    }
-  }
-  return [...extras];
-}
-
 // A rough empirical read on the filter, probed with names shaped like real
 // ones but random enough not to be any. It is a sanity check on the sizing
 // maths rather than a measurement: at a target of one in ten thousand, a
@@ -539,13 +525,13 @@ async function main() {
   log('Counting stored names.');
   const storedCount = countNames(namesPath);
   const extras = collectExtras(top, aliases);
-  const nameCount = storedCount + extras.length;
+  const nameCount = storedCount + extras.size;
   if (nameCount < 1) {
     fail('the name store is empty, so there is nothing to build');
     return;
   }
 
-  log(`Building the filter over ${storedCount} walked names plus ${extras.length} curated ones.`);
+  log(`Building the filter over ${storedCount} walked names plus ${extras.size} curated ones.`);
   const filter = BloomFilter.create(namesForFilter(namesPath, extras), nameCount, options.fpRate);
   const serialized = filter.serialize();
   const observedFpRate = measureFalsePositives(filter, 200_000);
