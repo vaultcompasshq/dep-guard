@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -19,6 +20,13 @@ const ROOT = path.join(__dirname, '..', '..', '..');
 const FIXTURE_CORPUS = path.join(ROOT, 'packages', 'core', 'fixtures', 'corpus');
 const CLI_ENTRY = path.join(ROOT, 'packages', 'cli', 'dist', 'cli.js');
 const TSC_BIN = path.join(ROOT, 'node_modules', '.bin', 'tsc');
+// Mirrors scan.ts's own DEFAULT_CORPUS_DIR computation (packages/core/src/
+// scan.ts: path.join(dirname(scan.js), '..', 'data', 'corpus')), from this
+// file's own vantage point in the repo rather than the built module's --
+// both resolve to the same packages/core/data/corpus. See the
+// "no corpus built yet" describe block below for why this has to be a
+// known, checkable path rather than an assumption.
+const DEFAULT_CORPUS_DIR = path.join(ROOT, 'packages', 'core', 'data', 'corpus');
 
 const execFileAsync = promisify(execFile);
 
@@ -545,6 +553,32 @@ describe('--online flag', () => {
 
 describe('a first run with no corpus built yet', () => {
   test('omitting --corpus-dir produces an actionable message, not a bare internal path', async () => {
+    // This test's whole premise is that core's default corpus path
+    // (packages/core/data/corpus) is EMPTY in this checkout. That is true
+    // in a clean clone (the directory is gitignored, see the top of
+    // scan.ts) but not always true locally: `pnpm corpus:build --out
+    // packages/core/data/corpus` or a manual packaging experiment leaves a
+    // real corpus sitting exactly there, and against that state this test
+    // fails opaquely ("Expected: 2, Received: 0") with no hint of why.
+    // Diagnose the precondition explicitly instead of letting the
+    // assertions below fail blind. Never skip: a silent skip loses the
+    // coverage this test exists for, and the release workflow itself
+    // depends on this test's premise -- see the corpus-build step's
+    // comment in .github/workflows/release.yml, which is why the build
+    // step runs only after `pnpm test`.
+    if (existsSync(DEFAULT_CORPUS_DIR)) {
+      throw new Error(
+        `This test requires no corpus at the default path (${DEFAULT_CORPUS_DIR}), but one ` +
+          'exists there. It is probably left over from a local ' +
+          '"corpus:build --out packages/core/data/corpus" (or a packaging experiment that ' +
+          'wrote there directly) -- packages/core/data/ is gitignored, so this is a local ' +
+          'artifact, not something a clean clone would have. Remove that directory and rerun. ' +
+          'The release workflow avoids this exact collision by running the corpus build only ' +
+          'after `pnpm test`, never before -- see the "Build the shipped corpus" step in ' +
+          '.github/workflows/release.yml.'
+      );
+    }
+
     await write('package.json', manifestJson({}));
     await commitAll('first');
 

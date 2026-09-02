@@ -3,7 +3,7 @@
 Blocks risky dependencies at the moment they are added -- before install,
 before commit, before CI.
 
-**Status: pre-release.** The engine and CLI work and are covered by 738
+**Status: pre-release.** The engine and CLI work and are covered by 1038
 tests, but the package name corpus is not built yet, so `--corpus-dir` is
 required and nothing is published to npm. See [Building a corpus](#building-a-corpus).
 

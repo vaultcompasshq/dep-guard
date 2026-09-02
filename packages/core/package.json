@@ -2,10 +2,37 @@
   "name": "@vaultcompass/dep-guard-core",
   "version": "0.1.0",
   "type": "module",
+  "description": "Offline dependency-risk engine: diffs a manifest/lockfile change and scores it for typosquats, lockfile tampering, install-script acquisition, and hallucinated package names.",
+  "license": "MIT",
+  "homepage": "https://github.com/vaultcompasshq/dep-guard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vaultcompasshq/dep-guard.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/vaultcompasshq/dep-guard/issues"
+  },
+  "keywords": [
+    "supply-chain-security",
+    "dependency-security",
+    "typosquatting",
+    "npm-audit",
+    "lockfile",
+    "package-hallucination"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
-    "dist"
+    "dist",
+    "data"
   ],
   "engines": {
     "node": ">=22"

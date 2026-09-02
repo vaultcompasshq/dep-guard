@@ -115,7 +115,25 @@ the first when it means the second is blind to transitive entries and to
 any entry a decoy can hide behind, which is exactly how a repointed
 transitive tarball and a same-version decoy both used to scan clean. A fact
 reached by both walks is deduplicated on (manifest path, package name,
-signal), so a tampered direct dependency is still one finding.
+signal) for tamper and confusion, so a tampered direct dependency is
+still one finding. install-script.ts dedupes on (manifest path, package
+name) alone, without the signal -- deliberately, not an inconsistency.
+The rule can raise four signals in total across its branches: 'added',
+'flag-acquired', 'present' (raised instead of 'added'/'flag-acquired'
+whenever hasComparisonBase is false, on either the npm or the pnpm
+branch), and 'only-built-added' (the pnpm onlyBuiltDependencies branch's
+own signal, pushed straight into `findings` rather than through this
+dedupe at all). Only 'added' and 'flag-acquired' can ever co-occur under
+one (manifest path, package name) key, though: hasComparisonBase is a
+single value fixed for the whole scan, so within one run this dedupe's key
+space sees either 'present' on every entry it covers or 'added'/
+'flag-acquired' on every entry, never a mix of 'present' with either of
+the other two -- and 'only-built-added' lives on the pnpm branch, which
+this dedupe (guarding the npm branch's two loops) never runs for at all.
+'added' and 'flag-acquired' are mutually exclusive outcomes of the same
+acquisition question, never two simultaneous facts about the same
+dependency the way tamper's signals can be, so there is nothing a third
+component of the key would ever need to keep apart.
 
 `kind` is `added` or `changed`, and never `removed`: dropping a dependency
 cannot introduce any of the risks this tool looks for. Which checks gate on
@@ -144,11 +162,20 @@ bumps into criticals whose message was backwards and which vanished if the
 two lockfile keys were swapped.
 
 Both selectors are therefore guesses under the same rule. A counterpart is
-narrowed from the strongest evidence down: an identical resolved URL, then
-a shared origin, then a matching install-script flag, and each step only
-applies when it leaves a candidate standing. A pairing that survives all of
-that with more than one candidate is a guess, and a guess may not
-manufacture a fact.
+narrowed from the strongest evidence down: a matching version, then an
+identical resolved URL, then a shared origin, then a matching
+install-script flag, and each step only applies when it leaves a candidate
+standing. The version rung is the one exception to "only applies when it
+leaves a candidate standing": it is the only rung that runs unconditionally
+(whenever the after entry has a version at all) rather than being gated on
+more than one candidate still being in play, so it is the one rung that can
+decide a pairing entirely on its own, with nothing else in the ladder ever
+getting a look at the remaining candidates. That matters beyond ordering --
+see "The narrowing ladder is the list that is still a description" below
+for the attacker-constructible edge this creates when a before side holds
+one hashed entry at one version and one hashless entry at another. A
+pairing that survives all of that with more than one candidate is a guess,
+and a guess may not manufacture a fact.
 
 What a guess costs, though, is narrower than it looks, and getting that
 wrong made the suppression attacker-constructible. Suppressing every
@@ -176,12 +203,32 @@ and others do not, because that one really would be a fact about which
 candidate was picked. Install-script follows the same rule: an acquisition
 when no candidate ran scripts, silence when one of them did.
 
-`delta-ambiguous-lock-entry` follows the suppression rather than the guess.
-It is raised when a comparison actually dropped something, and not
-otherwise -- which is what makes it mean something. Firing on every guess
+`delta-ambiguous-lock-entry` has three producers, and they mean different
+things under the same code. `selectEntry` (delta.ts) raises it directly,
+in `computeDelta`, on a pure SELECTION guess -- a dependency's specifier
+matches more than one lock entry under its name and the code cannot tell
+which one it resolves to -- with no comparison involved at all. That guess
+is not reported unconditionally: computeDelta drops it when the specifier
+held and the selected before/after entries do not differ (delta.ts:576-587),
+unless `ambiguity.material === true` -- a merely version-level ambiguity
+under a package nobody touched is noise, but one that could have decided
+whether a tampered entry or a clean one was compared has to survive the
+skip (the whole point of `pickCounterpart` below is a second, separate
+guess about which BEFORE entry to compare against, and the two are not the
+same event). The second producer, `checks/tamper.ts`'s `certainFindings`,
+follows the suppression rather than the guess: it is raised only when a
+comparison actually dropped something, and not otherwise -- which is what
+makes IT mean something on its own terms. Firing that one on every guess
 made it simultaneously the only honesty channel covering this hole and the
 noisiest note in the set, since a nested duplicate of any bumped package
-produces an undecidable pairing on nearly every routine refresh.
+produces an undecidable pairing on nearly every routine refresh. The third
+producer is `checks/install-script.ts`: it declares the same code
+(`AMBIGUOUS_LOCK_ENTRY_CODE`, install-script.ts:31) and raises it from
+`noteSuppressedByPairing` (install-script.ts:141), reached from
+`agreementAcrossCandidates` dropping a verdict (install-script.ts:258) --
+the install-script rule's own suppressed-acquisition case, following the
+same follow-the-suppression rule as tamper's producer rather than the pure
+selection guess above.
 
 How that is decided is the part worth stating carefully, because the first
 answer to it was wrong in the way this file is most concerned with. The
@@ -247,8 +294,17 @@ which earlier entry applies and the entry should be treated as suspect.
 
 High rather than critical is the honest severity: a critical asserts the
 tampering happened, and this cannot assert that. One escalation per
-undecidable entry, however many verdicts went undecided, because they are
-one admission. Drops carrying nothing above high stay diagnostic-only --
+(manifest path, package name), however many verdicts went undecided across
+however many lock entry changes under that name, because they are one
+admission -- not one per undecidable entry, which is a level too fine:
+`certainFindings` runs once per changed lock entry and could in principle
+push more than one `ambiguous-critical` escalation for one package at one
+manifest path, but `report()`'s own dedupe (manifest path, package name,
+signal) collapses them, since the signal this escalation carries is the
+constant `AMBIGUOUS_CRITICAL_SIGNAL` every time. The direction is the safe
+one: a reader could in principle undercount how many entries went
+undecided from a single admission, never overcount how many are suspect.
+Drops carrying nothing above high stay diagnostic-only --
 install-script's suppressed acquisition is the case, and making an
 unattributable high block would put a note on every lockfile with a nested
 duplicate back into the gate. The blocking decision stays in findings, where
@@ -355,8 +411,19 @@ both of those messages carried their own copy of the list, both copies were
 written when there were six signals, and neither learned about
 `tarball-repointed` or `resolution-unreadable` when those were added to the
 check. Both messages are now built from the one declaration, and every
-`details.signal` is produced through a helper typed against it, so a signal
-absent from the list does not compile and cannot go unnamed.
+comparison-derived `details.signal` -- the eight named just above -- is
+produced through a helper typed against that declaration, so one of THOSE
+absent from the list does not compile and cannot go unnamed. Two signals
+in `checks/tamper.ts` are deliberate exceptions, raw strings rather than
+values from that typed helper, because they are not comparison-derived
+signals at all: `AMBIGUOUS_CRITICAL_SIGNAL` (`ambiguous-critical`, tamper.ts
+around line 682) names the dropped-verdict escalation described in "What a
+dropped verdict costs" above, not one of the eight; and the git-source and
+url-source signal (a template string, tamper.ts around line 720) is built
+from the specifier's protocol and host, which are not fixed members of any
+declared list to type against. Both are outside the "coverage lost across
+the board" guarantee this paragraph is about, because neither is a
+comparison signal that could go missing from a `tamper-signals.ts` update.
 
 A diagnostic about ONE entry says which comparisons did not run for that
 entry, which is a different and narrower sentence:
@@ -521,8 +588,10 @@ silence is indistinguishable from a clean result. That is why a missing
 lockfile, an unparsed lockfile format, a binary lockfile, pnpm's absent
 install-script flag, audit mode's unreachable tamper comparisons,
 `checkSingle`'s reduced coverage, an unparseable npmrc pin, an unreadable
-resolved URL, an ambiguous lock entry selection, an unmatched ignore entry
-and findings dropped by a matched one all have codes. Adding a code is the cheapest possible fix for
+resolved URL, an ambiguous lock entry selection, an unmatched ignore entry,
+a workspace directory the walk could not read, a resolved path escaping
+the repository root, a symlink chain that cycles back on itself, and
+findings dropped by a matched one all have codes. Adding a code is the cheapest possible fix for
 a gap, and a gap with no code is a bug even when the code that has the gap
 is correct.
 
@@ -534,9 +603,17 @@ Current diagnostic codes: `audit-anchor-differs`,
 `lockfile-format-manifest-only`, `lockfile-missing`,
 `manifest-alias-empty`, `npm-lockfile-invalid-entry`, `npm-lockfile-v1`,
 `npmrc-pin-unparseable`, `online-check-unreachable`,
-`pnpm-lockfile-invalid-entry`,
-`pnpm-no-install-script-flag`, `tamper-resolution-unreadable`,
+`path-outside-root`, `pnpm-lockfile-invalid-entry`,
+`pnpm-no-install-script-flag`, `symlink-cycle`,
+`tamper-resolution-unreadable`, `workspace-dir-unreadable`,
 `workspace-duplicate-directory`, `workspace-glob-unsupported`.
+
+This list is hand-maintained, not compile-checked -- `Diagnostic.code` is
+typed `string`, so a new code compiles and runs without ever being added
+here. It has to be re-verified against the code (grep git-source.ts and
+the checks for every string literal assigned to a diagnostic's `code`)
+whenever a code is added, rather than trusted as current because it is
+checked in.
 
 ## Failing closed, and the error codes that do it
 
@@ -774,19 +851,218 @@ it produces now, and this suite's own tests build metas that carry it too
 -- the tolerance is for what a pre-versioning builder could have already
 produced, not a claim that nothing ever carries the field.
 
-**This tolerance is provisional, not permanent, and the obligation is
-recorded here so it survives past whichever comment first stated it.** The
-release pipeline is INTENDED to independently require `formatVersion` and
-`walkComplete: true` to be present and correct on any corpus that
-actually ships, before the reader's tolerance-of-absence can be trusted to
-only ever fire on a genuine pre-versioning local artifact. That gate does
-not exist yet as of this entry (2026-08-18): release.yml has no
-corpus-meta check, and its smoke job runs against the fixture corpus,
-which carries neither field. Until it lands, a hand-built or otherwise
-malformed corpus with genuinely missing fields would load exactly as if it
-were a legitimate pre-versioning artifact. Building that gate is the next
-change; when it lands, this paragraph should be updated to say so, and the
-"provisional" framing above should be removed.
+The reader's tolerance-of-absence is now safe to rely on, and the gate that
+makes it safe is described in the next section. Before that gate existed, a
+hand-built or otherwise malformed corpus with genuinely missing fields
+would have loaded exactly as if it were a legitimate pre-versioning
+artifact; the gate is what makes that scenario unreachable for anything
+this project actually publishes.
+
+## core and cli publish in lockstep, and a burned version is never re-released
+
+`packages/core` and `packages/cli` always move to a new version together,
+even when only one of them changed. `.github/workflows/release.yml`
+asserts this before publish (see its "Assert core and cli versions match
+each other, and the tag if there is one" step) and refuses to continue if
+they disagree.
+
+The reason is `pnpm`'s own publish behavior, not caution for its own
+sake: `packages/cli/package.json` depends on core via `workspace:*`, and
+`pnpm` rewrites that to an EXACT version pin -- not a range -- at pack
+time, pinned to whatever core's version is at that moment. A cli
+published without a matching core bump pins the OLD core, and a fix that
+only touched core silently does not ship to anyone who installs cli at
+its new version: npm resolves cli's dependency to the pinned old core
+version regardless of what core's latest version is, and there is no
+range for a later core patch to satisfy. Lockstep versioning is what
+keeps that pin meaningful.
+
+The corollary is that a version number, once published, is never
+reused, broken or not: npm does not allow re-publishing an existing
+version under any circumstance, so there is no version number a
+corrective re-release could target even if this project wanted one. A
+release that goes out broken is fixed by a new version, bumped in both
+packages together, exactly like any other change -- not by finding a way
+to overwrite the old one. See the comment on the publish loop's
+already-on-registry skip in release.yml for the failure mode this
+prevents: that skip exists to make a partial-release re-run safe, and it
+must never be asked to make a corrective re-release of an existing
+version look safe too, because there is no version left for it to target.
+
+## A published corpus is built in the release job, never committed, and a release gate demands what the reader tolerates
+
+`packages/core/data/corpus` (the path `DEFAULT_CORPUS_DIR` in scan.ts
+resolves to when nothing overrides it) is gitignored on purpose: a built
+corpus is about ten megabytes of generated data whose provenance is a dated
+registry walk, and it belongs to a release, not a commit. Nothing is ever
+checked in there.
+Instead, `.github/workflows/release.yml`'s `release` job runs `node
+scripts/build-corpus.mjs --out packages/core/data/corpus` as one of its own
+steps, so every release builds its own corpus fresh from
+`replicate.npmjs.com` and ships it inside the published tarball --
+`packages/core/package.json`'s `files` array lists `data` alongside `dist`
+for exactly this reason, and `scripts/tests/core-package-files.test.mjs`
+guards against that entry ever being dropped again, since nothing else in
+`pnpm test`'s suite would catch its removal. That test proves only that
+the string `"data"` is present in the `"files"` array, though -- it cannot
+prove npm actually packs the directory it names. The check that proves
+that is `scripts/check-corpus-packed.mjs`, wired into release.yml right
+after the shippability gate: it packs `packages/core` the same way the
+publish step will (`npm pack --dry-run --json`) and reads the listing
+back, so it is the one gate that actually observes the corpus reach a
+tarball rather than inferring it from a string being present in a JSON
+array. It is not part of `pnpm test` and does not run in CI outside a
+release, which makes it easy to mistake for a redundant duplicate of the
+test above and delete while tidying the workflow -- it is not: an agent
+or reviewer who cannot picture how the two differ should re-read this
+paragraph before removing either one.
+
+That step has to run after `pnpm test`, never before, in the same job.
+`packages/cli/tests/cli.test.ts`'s "a first run with no corpus built yet"
+case asserts that a scan with no `--corpus-dir` and nothing at the default
+corpus path fails with an actionable `corpus-missing` message -- the whole
+test depends on that default path being empty when it runs. Building the
+corpus first, at that same default path, would make the test's premise
+false in CI the same way a local `corpus:build --out
+packages/core/data/corpus` makes it false on a developer's machine. The
+test now diagnoses that precondition itself (an explicit failure naming the
+path, rather than the opaque `Expected: 2, Received: 0` it used to produce)
+and release.yml's corpus-build step carries a comment pointing at this same
+constraint, so reordering the steps for tidiness has to go through that
+explanation first.
+
+A corpus that is about to be published cannot lean on the same
+pre-versioning-artifact excuse `assertMetaShape` extends to `formatVersion`
+and `walkComplete` above -- nothing has shipped before this gate existed,
+so there is no legitimate "written by an older builder" case for a corpus
+this build is about to publish. `scripts/lib/shippable-corpus.mjs`
+(`assertCorpusShippable`, run by `scripts/check-shippable-corpus.mjs` and
+wired into release.yml right after the corpus-build step) is the release
+gate that closes that gap: it refuses to publish unless all four corpus
+files exist, `meta.formatVersion` is PRESENT and is one of
+`SUPPORTED_CORPUS_FORMAT_VERSIONS` (imported from the built core, not
+restated -- see "derive, do not describe" at the top of this file),
+`meta.walkComplete` is PRESENT and is exactly the boolean `true`, the
+walked-name floor and bloom-size cross-check below both hold, the
+directory loads through the real `loadCorpus` with a known-popular name
+(`react`) resolving as present in the bloom filter, and its bit-fill ratio
+is plausible for a filter that actually received its claimed inserts. That
+known-name check makes the gate additive to the reader's own checks rather
+than a replacement for them: a corpus this gate accepts still has to load
+the way a real scan would load it -- but it only catches a corrupted,
+truncated, or substituted bloom filter, not an incomplete walk, because
+`collectExtras` (scripts/build-corpus.mjs) injects every name on the top
+list into the filter regardless of what the walk found, and `react` is on
+that list; no other popular name would fare differently, since anything
+popular enough to be worth probing is on the same list.
+
+None of the checks below establish walk completeness on their own, and it
+is worth being precise about what each one actually proves, because two of
+them were mistaken for proof of completeness before and the gap that left
+open is exactly what let a near-empty corpus pass every check but one.
+`walkComplete` and `meta.nameCount` are self-reported: they are what the
+builder claims about itself, and a hand-edited or stale `meta.json` can
+claim anything. The bloom-size cross-check below pins `meta.json` against
+`names.bloom` as they stood at build time -- it proves the two were not
+edited out of step with each other AFTER the filter was written, which
+rules out a mismatched hand-edit but says nothing about what was in the
+filter when it was written. A filter created with the right geometry and
+near-zero content -- a truncated or misread name store, with the walk
+still self-reporting complete -- passes every check described so far. The
+bit-fill-ratio check below the geometry check is what closes that: it
+reads the bit array itself and asks whether roughly the claimed number of
+names was actually inserted, which is the one thing in this list that is
+physical evidence of content rather than a self-report or a consistency
+check between two self-reports.
+
+`meta.nameCount` does not clear a bare floor. It clears the floor MINUS
+the names `top.json` and `aliases.json` inject into the filter regardless
+of the walk -- the same union `collectExtras` computes, read directly from
+the two files the corpus being gated ships, not recomputed from anywhere
+else. A bare `nameCount >= floor` check could in principle be satisfied by
+an inflated top list alone, with the walk itself contributing almost
+nothing; subtracting the injected extras first closes that. The floor
+itself is unchanged (`DEFAULT_MIN_NAME_COUNT`, one million, against a real
+walk's several million names). This is still a check on the SELF-REPORTED
+`nameCount`, though, not on the filter's actual contents -- see the
+bit-fill-ratio check below for the one that reads the artifact itself.
+
+`meta.json` is self-reported; `names.bloom` is a physical artifact on
+disk. The gate asserts they agree: the expected serialized size for
+`meta.nameCount` and `meta.fpRate` is derived by calling the real
+`BloomFilter.create([], meta.nameCount, meta.fpRate).serialize().byteLength`
+(imported from `packages/core/dist/bloom.js`, the same module
+`scripts/build-corpus.mjs` uses) rather than restating the bit-array
+sizing formula or the header layout as a second copy -- again "derive, do
+not describe". `BloomFilter.create` sizes its bit array from the count and
+fpRate it is given, never from what it actually inserts, so an empty
+filter built with a corpus's own claimed values has exactly the geometry a
+real one built with those same values would. Comparing that against
+`names.bloom`'s actual on-disk byte count is what stops a hand-edited or
+stale `meta.json` from claiming a walk that never happened: every field
+in it can read as a plausible type while the physical filter never grew to
+match, and only a comparison against the artifact itself catches that. It
+proves meta and the filter agree; it does not prove either of them is
+telling the truth about what was walked, because `BloomFilter.create`
+sizes its bit array from `count` and `fpRate` alone and never from what is
+actually inserted -- a filter built with a huge claimed count and a single
+real insert has exactly the same on-disk size as one genuinely built from
+a huge walk.
+
+The bit-fill-ratio check (`assertBloomFillRatioPlausible` in
+scripts/lib/shippable-corpus.mjs) is the physical check the two checks
+above are not. A bloom filter sized the standard way (`m` and `k` chosen
+from `n` and a target false-positive rate) has an expected bit-fill ratio,
+after `n` real inserts, of `1 - e^(-kn/m)`, which the optimal
+`k = (m/n) * ln(2)` that `BloomFilter.create` computes drives to almost
+exactly 0.5, independent of `n` and of the target false-positive rate. A
+filter that claims `n` but received only a handful of real inserts reads
+nowhere near that -- fill approaches 0 as the real insert count falls far
+below the claim. The gate reads `names.bloom` back through the real
+`BloomFilter.deserialize` (not a reimplementation of the header layout
+bloom.ts documents -- `bits` and `bitCount` are typed private in bloom.ts,
+but TypeScript's `private` erases to a plain instance property in the
+compiled output the gate imports, so they are genuinely reachable without
+hand-parsing the header) and refuses anything outside `[0.25, 0.75]`,
+generous margin around the ~0.5 expectation. This is the check that
+answers the question the two above cannot: not "do meta and the filter
+agree", but "does the filter actually hold what it claims to".
+
+`scripts/tests/shippable-corpus.test.mjs` exercises both directions of
+every rule, including the two cases the reader tolerates and this gate does
+not (formatVersion absent, walkComplete absent) -- verified adversarially
+by weakening the gate to match the reader's tolerance and confirming those
+specific tests, and no others, go red -- and also covers `readMeta`'s two
+failure branches directly (meta.json present but unreadable as a file, and
+present and readable but not valid JSON), the walked-name floor's
+extras-subtraction specifically (a nameCount that clears the bare floor
+but is almost entirely injected extras, verified adversarially by
+reverting the subtraction and confirming exactly that test goes red), and
+the bloom-size cross-check in both directions, including the case the
+check exists for: a `meta.nameCount` inflated far beyond what the
+`names.bloom` on disk actually holds (verified adversarially by disabling
+the cross-check and confirming exactly those tests go red).
+
+The release smoke job (`smoke-published`) passes no `--corpus-dir` to any
+of its four `dep-guard check` invocations, on purpose: the point of that
+job is to prove the corpus that actually shipped inside the published
+package resolves correctly at its default path, not to re-prove something
+about the repository's own fixture corpus (which the job no longer checks
+out at all). It asserts `react` resolves as known and that ALL THREE
+distinct hallucinated names resolve as `unknown-package` findings --
+three names, and requiring every one of them, because the corpus is
+rebuilt on every release now, so a single name's non-collision against the
+bloom filter's 0.0001 false-positive rate is a fresh draw each time
+instead of a fact fixed against a committed fixture. Requiring all three
+is the stronger check: a bloom filter that wrongly answered "present" for
+roughly half of all inputs -- a plausible shape for a deserialization
+regression -- would still pass a weaker "at least one" check 87.5% of the
+time (it only fails when all three collide, which is down near 1e-12 at
+the real rate), where requiring all three fails in that same scenario
+87.5% of the time. What that costs is a higher spurious-failure rate
+against a genuinely healthy corpus, roughly 3e-4 per release, from the
+union of three independent ~0.0001 chances that any one collides -- well
+within tolerance for a gate that runs once per release.
 
 ## A partial corpus refuses itself, and the builder has to verify around that refusal
 

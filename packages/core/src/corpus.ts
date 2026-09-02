@@ -9,12 +9,12 @@ interface CorpusMeta {
   fpRate: number;
   // Both optional: a corpus built before these fields existed is a local
   // development artifact (nothing has ever been published). The release
-  // pipeline is INTENDED to independently require both to be present and
-  // correct in any corpus that actually ships -- that gate does not exist
-  // yet (tracked in docs/INVARIANTS.md) -- and once it does, tolerating
-  // absence here will only ever fire on a genuine pre-versioning local
-  // artifact. See assertMetaShape below for the tolerance rule this
-  // reflects.
+  // pipeline independently requires both to be present and correct in any
+  // corpus that actually ships -- that gate now exists
+  // (scripts/lib/shippable-corpus.mjs, run from .github/workflows/release.yml
+  // right before publish; see docs/INVARIANTS.md) -- so tolerating absence
+  // here only ever fires on a genuine pre-versioning local artifact. See
+  // assertMetaShape below for the tolerance rule this reflects.
   formatVersion?: number;
   walkComplete?: boolean;
 }
@@ -101,7 +101,7 @@ function assertAliasesShape(
 // version 2 exists, whoever adds it has to grow this set to admit both 1
 // and 2, not just move the comparison to "=== 2", or that promise breaks
 // for anyone still holding a version-1 corpus.
-const SUPPORTED_CORPUS_FORMAT_VERSIONS: readonly number[] = [1];
+export const SUPPORTED_CORPUS_FORMAT_VERSIONS: readonly number[] = [1];
 
 function assertMetaShape(filePath: string, value: unknown): asserts value is CorpusMeta {
   if (!isPlainObject(value) || typeof value.builtAt !== 'string') {
@@ -113,14 +113,15 @@ function assertMetaShape(filePath: string, value: unknown): asserts value is Cor
 
   // formatVersion and walkComplete are both ABSENT-tolerant: a corpus built
   // before these fields existed is a local development artifact (nothing
-  // has ever been published). The release pipeline is INTENDED to
-  // independently require both fields to be present and correct in any
-  // corpus that actually ships -- that gate is not built yet (tracked in
-  // docs/INVARIANTS.md) -- so for now tolerating their absence here costs
-  // nothing, and it keeps the committed fixture corpus and the rest of the
-  // test suite -- which construct minimal metas without either field --
-  // working. Each check below only refuses a value that is present and
-  // explicitly wrong; it never demands the field be there.
+  // has ever been published). The release pipeline independently requires
+  // both fields to be present and correct in any corpus that actually ships
+  // -- that gate now exists (scripts/lib/shippable-corpus.mjs, run from
+  // .github/workflows/release.yml right before publish; see
+  // docs/INVARIANTS.md) -- so tolerating their absence here costs nothing,
+  // and it keeps the committed fixture corpus and the rest of the test
+  // suite -- which construct minimal metas without either field -- working.
+  // Each check below only refuses a value that is present and explicitly
+  // wrong; it never demands the field be there.
 
   if ('formatVersion' in value && !SUPPORTED_CORPUS_FORMAT_VERSIONS.includes(value.formatVersion as number)) {
     throw new DepGuardError(

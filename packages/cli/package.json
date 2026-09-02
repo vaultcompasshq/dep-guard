@@ -2,8 +2,30 @@
   "name": "@vaultcompass/dep-guard",
   "version": "0.1.0",
   "type": "module",
+  "description": "Command-line gate that blocks risky dependency changes -- typosquats, tampered lockfile entries, newly acquired install scripts, and hallucinated package names -- before install, before commit, before CI.",
+  "license": "MIT",
+  "homepage": "https://github.com/vaultcompasshq/dep-guard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vaultcompasshq/dep-guard.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/vaultcompasshq/dep-guard/issues"
+  },
+  "keywords": [
+    "supply-chain-security",
+    "dependency-security",
+    "cli",
+    "typosquatting",
+    "npm-audit",
+    "package-hallucination"
+  ],
   "bin": {
     "dep-guard": "dist/cli.js"
+  },
+  "exports": {
+    "./package.json": "./package.json"
   },
   "files": [
     "dist"

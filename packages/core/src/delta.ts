@@ -293,18 +293,35 @@ function resolutionIdentity(entry: LockEntry): string {
 // resolution with nothing to compare it to. Every changed entry is compared
 // against the best before candidate independently.
 //
-// The narrowing runs from the strongest evidence to the weakest, and each
-// step only ever applies when it leaves at least one candidate standing:
-// an identical resolved URL means this entry did not move at all; a shared
-// origin means the bytes still come from the same place; a matching
-// install-script flag means the acquisition rule has a like-for-like
-// comparison. What is NOT allowed any more is the last step this used to
-// take on its own -- falling through to whichever entry the lockfile
-// happened to list first and then asserting a change against it. Two
-// entries of one name are routine (a mirrored older copy nested under
-// another package, a second version for a different peer set), and a
-// positional pick turned every bump beside one into a host repoint or an
-// install-script acquisition that had not happened.
+// The narrowing runs from the strongest evidence to the weakest: a
+// matching version, then an identical resolved URL, then a shared origin,
+// then a matching install-script flag. A matching version means this is
+// almost certainly the same package's prior resolution; an identical
+// resolved URL means this entry did not move at all; a shared origin means
+// the bytes still come from the same place; a matching install-script flag
+// means the acquisition rule has a like-for-like comparison.
+//
+// The version rung is different from the other three, and deliberately
+// so: it is the only one that is NOT gated on `candidates.length > 1`, so
+// it runs (whenever `after.version` is defined) even when it is about to
+// decide the pairing entirely on its own, with no other rung ever seeing
+// the candidates it narrowed away. The other three only ever apply when
+// they leave at least one candidate standing. This is load-bearing, not
+// an oversight -- it is what lets docs/INVARIANTS.md's "The narrowing
+// ladder is the list that is still a description" attacker analysis go
+// through: a before side holding one hashed entry at one version and one
+// hashless entry at another lets an attacker's entry be steered to the
+// hashless candidate by matching its version, and the version rung alone
+// decides that pairing before the URL, origin, or install-script rungs
+// ever run.
+//
+// What is NOT allowed any more is the last step this used to take on its
+// own -- falling through to whichever entry the lockfile happened to list
+// first and then asserting a change against it. Two entries of one name
+// are routine (a mirrored older copy nested under another package, a
+// second version for a different peer set), and a positional pick turned
+// every bump beside one into a host repoint or an install-script
+// acquisition that had not happened.
 interface Counterpart {
   entry: LockEntry | undefined;
   ambiguous: boolean;

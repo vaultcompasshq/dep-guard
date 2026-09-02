@@ -33,6 +33,32 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
 
     steps:
+    # Runs before checkout on purpose: GITHUB_REF and github.event_name are
+    # populated from the trigger itself, not from anything in the tree, so
+    # this needs nothing checked out to decide. workflow_dispatch has no
+    # branch restriction of its own, so a manual run started from any other
+    # branch would build and publish THAT branch's code under the version
+    # its package.json files happen to carry -- an unreviewed, un-tagged
+    # publish. An explicit failing step is used instead of a job-level "if:"
+    # so a maintainer who fat-fingers the branch dropdown gets a loud,
+    # legible error naming the ref, rather than a run that silently reports
+    # "skipped" with no explanation.
+    #
+    # The tag-push trigger is NOT inherently restricted to main the way the
+    # comment here used to imply: "git tag v0.1.0 <any-commit> && git push
+    # --tags" fires this workflow from any commit, on or off main, with a
+    # real tag and matching GitHub Release. See the ancestry check in
+    # "Assert core and cli versions match" below for how the tag path
+    # guards against that.
+    - name: Refuse workflow_dispatch from anywhere but main
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        set -euo pipefail
+        if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+          echo "::error::Manual workflow_dispatch run from '${GITHUB_REF}', not 'refs/heads/main'. A manual dispatch from any other branch would build and publish that branch's code. Re-run from main, or push a 'v*' tag instead."
+          exit 1
+        fi
+
     - name: Checkout code
       uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -61,6 +87,218 @@ jobs:
     - name: Run tests
       run: pnpm test
 
+    # MUST run after "Run tests", never before. packages/cli/tests/cli.test.ts
+    # has a case ("a first run with no corpus built yet") that asserts a
+    # scan with no --corpus-dir and nothing at core's default corpus path
+    # (packages/core/data/corpus) fails with an actionable corpus-missing
+    # message. That default path is gitignored and empty in every checkout
+    # unless something writes there first -- if this step ran before the
+    # test suite, that test would fail (or worse, silently stop testing
+    # what it claims to, if it were ever weakened to tolerate a populated
+    # default path). See that test's own self-diagnosing precondition
+    # check for the same explanation from the test's side.
+    #
+    # This step makes every release depend on replicate.npmjs.com, the
+    # public registry replica -- roughly 430 requests and 10 to 15 minutes
+    # (see scripts/build-corpus.mjs). A failure here fails the release
+    # closed, before anything is published, which is the correct direction:
+    # a release with no corpus, or a corpus this build could not verify, is
+    # worse than a delayed release.
+    - name: Build the shipped corpus
+      run: node scripts/build-corpus.mjs --out packages/core/data/corpus
+
+    # Refuses to publish a corpus that is not actually fit to ship -- see
+    # scripts/lib/shippable-corpus.mjs for the full set of checks (all four
+    # files present, formatVersion and walkComplete both present and
+    # correct, a name-count floor, and a real load through loadCorpus with
+    # a known-popular name resolving as present). This is stricter than
+    # what loadCorpus itself tolerates at read time, by design.
+    - name: Check the corpus is fit to publish
+      run: node scripts/check-shippable-corpus.mjs packages/core/data/corpus
+
+    # Packs packages/core the same way the "Publish to npm" step below will,
+    # then reads the pack listing back and asserts all four corpus files are
+    # in it. This is the one check in this workflow that verifies the
+    # corpus actually reaches the published tarball. Everything above this
+    # step gates the corpus ON DISK (build, then shippability); nothing
+    # before this point checks that packages/core/package.json's "files"
+    # array actually carries that on-disk corpus into what npm packs.
+    # scripts/tests/core-package-files.test.mjs only asserts the string
+    # "data" is present in that array, which does not prove npm packs the
+    # directory. See scripts/check-corpus-packed.mjs for the command this
+    # runs and how it was verified.
+    - name: Check the corpus reaches the packed tarball
+      run: node scripts/check-corpus-packed.mjs
+
+    # Everything above this point can fail and be re-run harmlessly; this
+    # step exists because everything below it cannot. Tag resolution used
+    # to happen AFTER "Publish to npm" (see "Resolve release tag" below),
+    # so a mistyped tag published whatever version core and cli's
+    # package.json files happened to carry -- irreversibly, since a
+    # publish cannot be taken back -- and then produced a GitHub Release
+    # describing a publish that never actually matched the tag. Checking
+    # BEFORE publish, not after, is the entire point of this step.
+    #
+    # Three assertions, all fatal:
+    #   1. core and cli versions must be EQUAL. The two packages are
+    #      published in lockstep on purpose -- see the comment on the
+    #      publish loop below for why a cli release without a matching
+    #      core bump is not a smaller mistake, it is a silent one.
+    #   2. when this run is tag-triggered, the tag must read "v" + that
+    #      version. workflow_dispatch has no tag at all (GITHUB_REF_TYPE
+    #      is "branch"), so this half only applies to a tag push, and the
+    #      dispatch path is covered instead by the ref guard above.
+    #   3. when this run is tag-triggered, the tagged commit must be an
+    #      ancestor of origin/main. "git tag v0.1.0 <any-commit> && git push
+    #      --tags" fires this workflow from any commit, on or off main; a
+    #      tag on a side branch would otherwise walk straight into an OIDC
+    #      trusted publish around branch protection, with a real tag and a
+    #      matching GitHub Release to show for it.
+    - name: Assert core and cli versions match each other, and the tag if there is one
+      run: |
+        set -euo pipefail
+        CORE_VERSION="$(node -p "require('./packages/core/package.json').version")"
+        CLI_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+
+        # GITHUB_REF_NAME is always set by Actions (a branch name on
+        # workflow_dispatch, a tag name on a tag push), so a ${VAR:-fallback}
+        # here would never actually trigger -- a dispatch run would read
+        # "tag is main", which is not even true (a dispatch run has no tag
+        # at all). Read GITHUB_REF_TYPE instead of guessing from emptiness.
+        if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+          REF_DESCRIPTION="tag ${GITHUB_REF_NAME}"
+        else
+          REF_DESCRIPTION="branch ${GITHUB_REF_NAME} (not a tag push)"
+        fi
+
+        if [[ "${CORE_VERSION}" != "${CLI_VERSION}" ]]; then
+          echo "::error::Version lockstep broken: packages/core is at ${CORE_VERSION}, packages/cli is at ${CLI_VERSION}, ${REF_DESCRIPTION}. core and cli must always carry the same version. Refusing to publish."
+          exit 1
+        fi
+
+        if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+          EXPECTED_TAG="v${CORE_VERSION}"
+          if [[ "${GITHUB_REF_NAME}" != "${EXPECTED_TAG}" ]]; then
+            echo "::error::Tag mismatch: pushed tag is ${GITHUB_REF_NAME}, but packages/core and packages/cli are both at version ${CORE_VERSION} (expected tag ${EXPECTED_TAG}). A mistyped tag would otherwise publish the wrong version irreversibly and describe it in a GitHub Release as though it matched. Refusing to publish."
+            exit 1
+          fi
+
+          # The checkout step above uses actions/checkout's default
+          # fetch-depth (1), so this job's working copy holds only the
+          # tagged commit itself, with no history connecting it to
+          # origin/main and no origin/main ref at all yet. Unshallow first
+          # (only when the repo actually is shallow -- calling --unshallow
+          # on a complete repo is a hard error, and nothing above this step
+          # promises which one this checkout is), then fetch main by name
+          # into an explicit local ref, since a tag-triggered checkout
+          # never sets one up on its own.
+          if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+            git fetch --unshallow origin
+          fi
+          git fetch origin main:refs/remotes/origin/main
+
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not an ancestor of origin/main. A tag pushed at a commit off main would otherwise walk straight into an OIDC trusted publish around branch protection. Refusing to publish."
+            exit 1
+          fi
+        fi
+
+        echo "Version check passed: core=${CORE_VERSION} cli=${CLI_VERSION} ref_type=${GITHUB_REF_TYPE} ref_name=${GITHUB_REF_NAME}"
+
+    # This is the only pre-publish step that executes the shipped artifact
+    # in the shipped layout -- every gate above this point checks the
+    # corpus on disk, the packed tarball's file listing, or package.json's
+    # metadata, but none of them actually installs the packages the way a
+    # real user would and runs the resulting binary. It exists because a
+    # previous audit had to verify that layout by hand.
+    #
+    # A real corpus already exists at packages/core/data/corpus at this
+    # point in the job (built several steps above and verified shippable
+    # and packed), so packing core below includes it -- that is the point:
+    # this exercises the SAME corpus the gates above just verified, not a
+    # stand-in. (A throwaway-clone verification done before this step was
+    # written used a small hand-written corpus instead, to avoid a real
+    # registry walk; that is a property of the verification, not of this
+    # step, which always runs against whatever corpus this job actually
+    # built.)
+    #
+    # Mechanics verified by hand in that throwaway clone: "pnpm pack
+    # --pack-destination" rewrites cli's "workspace:*" dependency on core
+    # to an exact version pin, the same rewrite "pnpm publish" performs, so
+    # installing both tarballs in ONE "npm install" invocation resolves
+    # the local pin correctly -- no separate install-core-first step and
+    # no registry lookup needed.
+    - name: Install the packed tarballs and run the shipped binary
+      run: |
+        set -euo pipefail
+        PACK_DIR="$(mktemp -d)"
+        pnpm --dir packages/core pack --pack-destination "${PACK_DIR}"
+        pnpm --dir packages/cli pack --pack-destination "${PACK_DIR}"
+
+        # Exact filenames, computed from the versions the assert step above
+        # already validated, not a glob: "vaultcompass-dep-guard-*.tgz"
+        # also matches "vaultcompass-dep-guard-core-*.tgz" (npm dedupes the
+        # resulting duplicate argument today, harmlessly, but a release
+        # gate should never depend on that rather than on naming its inputs
+        # exactly).
+        CORE_VERSION="$(node -p "require('./packages/core/package.json').version")"
+        CLI_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+        CORE_TARBALL="${PACK_DIR}/vaultcompass-dep-guard-core-${CORE_VERSION}.tgz"
+        CLI_TARBALL="${PACK_DIR}/vaultcompass-dep-guard-${CLI_VERSION}.tgz"
+
+        INSTALL_DIR="$(mktemp -d)"
+        # "npm install --prefix" creates its own package.json in
+        # INSTALL_DIR the first time it runs there, so no separate init
+        # step is needed. "npm init -y --prefix" must NOT be used for this
+        # -- npm init ignores --prefix entirely and templates into
+        # process.cwd() instead, so it silently writes/normalizes a
+        # package.json in THIS CHECKOUT'S ROOT mid-release rather than in
+        # INSTALL_DIR, which is never what this step wants.
+        npm install --prefix "${INSTALL_DIR}" "${CORE_TARBALL}" "${CLI_TARBALL}"
+
+        BIN="${INSTALL_DIR}/node_modules/.bin/dep-guard"
+
+        # No --corpus-dir anywhere below: the whole point is to resolve the
+        # corpus at its default path inside the installed package, exactly
+        # as a real user's install would.
+        set +e
+        "${BIN}" check react --format json > "${INSTALL_DIR}/known.json"
+        KNOWN_EC=$?
+        "${BIN}" check totally-made-up-hallucinated-xyz123 --format json > "${INSTALL_DIR}/unknown.json"
+        UNKNOWN_EC=$?
+        VERSION_OUT="$("${BIN}" --version)"
+        VERSION_EC=$?
+        set -e
+
+        if [[ "${KNOWN_EC}" -ne 0 ]]; then
+          echo "::error::Expected 'dep-guard check react' to exit 0 from the packed tarball install. Got exit ${KNOWN_EC}."
+          cat "${INSTALL_DIR}/known.json" || true
+          exit 1
+        fi
+
+        node -e "
+          const fs = require('fs');
+          if (${UNKNOWN_EC} === 0) {
+            console.error('Expected dep-guard check <hallucinated-name> to exit non-zero from the packed tarball install.');
+            process.exit(1);
+          }
+          const j = JSON.parse(fs.readFileSync('${INSTALL_DIR}/unknown.json', 'utf8'));
+          const hasUnknown = (j.findings || []).some((f) => f.ruleId === 'unknown-package');
+          if (!hasUnknown) {
+            console.error('dep-guard check <hallucinated-name> exited non-zero but carried no unknown-package finding.');
+            console.error(fs.readFileSync('${INSTALL_DIR}/unknown.json', 'utf8'));
+            process.exit(1);
+          }
+        "
+
+        EXPECTED_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+        if [[ "${VERSION_EC}" -ne 0 || "${VERSION_OUT}" != "${EXPECTED_VERSION}" ]]; then
+          echo "::error::Expected 'dep-guard --version' to print ${EXPECTED_VERSION} from the packed tarball install, got '${VERSION_OUT}' (exit ${VERSION_EC})."
+          exit 1
+        fi
+
+        echo "Install-and-run gate passed: react known, a hallucinated name unknown, --version prints ${EXPECTED_VERSION}."
+
     # npm Trusted Publishing (OIDC): no NPM_TOKEN, auth via id-token: write
     # plus a trusted publisher configured per @vaultcompass/* package.
     # Requires npm CLI >= 11.5.1 (Node >= 22.14.0). Pin major 11 - npm@12
@@ -75,6 +313,17 @@ jobs:
     # partway through. Skips a package already on the registry at its
     # current version, so a failed mid-release can be re-run without
     # erroring on a duplicate version.
+    #
+    # That skip is correct for exactly one situation -- re-running a
+    # release that failed partway, where the packages already published
+    # are done and only the rest need to happen -- and is a silent no-op
+    # for a different one it must never be asked to handle: a corrective
+    # re-release of a version that already went out broken. npm does not
+    # allow re-publishing a version once it exists, broken or not, so
+    # there is no version number this skip can be told to overwrite; the
+    # only way to ship a fix is a NEW version, bumped in both packages
+    # together (see the lockstep assertion above). A burned version number
+    # is never re-released -- it is superseded by the next one.
     - name: Publish to npm
       run: |
         set -euo pipefail
@@ -113,9 +362,11 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (fixture corpus only)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
+      # No checkout step: this job's whole point is to exercise ONLY what a
+      # real installer gets from npm, and every command below reads solely
+      # from the installed @vaultcompass/dep-guard package (no --corpus-dir,
+      # no repo files of any kind). Re-add a checkout only if a future
+      # change here needs something from this repository directly.
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -150,51 +401,84 @@ jobs:
             exit 1
           fi
 
-          # The fixture corpus ships in this checkout, not in the published
-          # package (packages/core's "files" is dist-only), so it is read
-          # from the repo the same way vault-guard reads its release-smoke
-          # fixture: checked out for data, not for code.
-          CORPUS="${GITHUB_WORKSPACE}/packages/core/fixtures/corpus"
-
           TMP=$(mktemp -d)
           cd "${TMP}"
           npm init -y >/dev/null 2>&1
           npm install "@vaultcompass/dep-guard@${VERSION}"
 
-          # "totally-made-up-hallucinated-xyz123" is checked against the
-          # fixture's bloom filter, which has a nonzero false-positive rate
-          # by construction. That is a deterministic property of this exact
-          # string against this exact committed fixture, not a per-run coin
-          # flip - verified by hand not to collide as of the fixture in
-          # this checkout. If the fixture corpus is ever rebuilt and this
-          # starts colliding, this step fails every run, loudly, until the
-          # placeholder name below is swapped for one that doesn't; it does
-          # not fail silently or intermittently.
+          # No --corpus-dir anywhere below. That is the whole point of this
+          # job: it has to exercise the corpus that actually shipped INSIDE
+          # the published package (packages/core's "files" now lists
+          # "data" alongside "dist" - see packages/core/package.json) at
+          # the default path scan.ts resolves when nothing overrides it.
+          # Pointing this job at the repository's fixture corpus, the way
+          # it used to, would smoke-test a corpus that never left this
+          # checkout and prove nothing about what got published.
           set +e
-          ./node_modules/.bin/dep-guard check react --corpus-dir "${CORPUS}" --format json > known-out.json
+          ./node_modules/.bin/dep-guard check react --format json > known-out.json
           KNOWN_EC=$?
-          ./node_modules/.bin/dep-guard check totally-made-up-hallucinated-xyz123 --corpus-dir "${CORPUS}" --format json > unknown-out.json
-          UNKNOWN_EC=$?
           set -e
 
           if [[ "${KNOWN_EC}" -ne 0 ]]; then
-            echo "::error::Expected 'dep-guard check react' to exit 0 (react is in the fixture corpus)."
+            echo "::error::Expected 'dep-guard check react' to exit 0 (react should be present in any real, complete corpus)."
             cat known-out.json || true
             exit 1
           fi
 
-          if [[ "${UNKNOWN_EC}" -eq 0 ]]; then
-            echo "::error::Expected 'dep-guard check totally-made-up-hallucinated-xyz123' to exit non-zero (unknown-package finding)."
-            cat unknown-out.json || true
-            exit 1
-          fi
+          # A single hallucinated name used to be enough here, on the
+          # reasoning that its non-collision against the bloom filter was a
+          # deterministic property of one exact string checked against one
+          # exact COMMITTED fixture corpus, verified by hand once. That
+          # reasoning does not survive this job dropping --corpus-dir: the
+          # corpus is now rebuilt from a live registry walk on every
+          # release (see the "Build the shipped corpus" step in this
+          # workflow), so a single name's non-collision is effectively a
+          # fresh draw against the target false-positive rate (0.0001) on
+          # every release, which means a spurious, deeply confusing release
+          # failure roughly once every ten thousand releases.
+          #
+          # This assertion requires EVERY one of the three names to resolve
+          # as unknown, not merely at least one. "At least one" is the
+          # weaker check: it would still pass 87.5% of the time even if the
+          # corpus's bloom filter wrongly answered "present" for roughly
+          # half of all inputs -- a plausible shape for a bloom
+          # deserialization regression -- because it only fails when all
+          # three names happen to collide (roughly 1e-12 at the real 0.0001
+          # rate, since three names each independently colliding is
+          # 0.0001^3). Requiring all three to resolve as unknown fails in
+          # that same corrupted-filter scenario 87.5% of the time instead,
+          # which is the direction a release gate should lean. What it costs
+          # is a higher spurious-failure rate against a genuinely healthy
+          # corpus: roughly 3e-4 per release, from the union of three
+          # independent ~0.0001 chances that any one of the three names
+          # collides -- still well within tolerance for a gate that runs
+          # once per release.
+          set +e
+          ./node_modules/.bin/dep-guard check totally-made-up-hallucinated-xyz123 --format json > unknown-1.json
+          UNKNOWN_EC_1=$?
+          ./node_modules/.bin/dep-guard check zzq-nonexistent-fictional-pkg-482716 --format json > unknown-2.json
+          UNKNOWN_EC_2=$?
+          ./node_modules/.bin/dep-guard check qwzx-imaginary-not-a-real-package-9284 --format json > unknown-3.json
+          UNKNOWN_EC_3=$?
+          set -e
 
           node -e "
             const fs = require('fs');
-            const j = JSON.parse(fs.readFileSync('unknown-out.json', 'utf8'));
-            const hit = (j.findings || []).some((f) => f.ruleId === 'unknown-package');
-            if (!hit) {
-              console.error('Expected an unknown-package finding', j);
+            const cases = [
+              ['unknown-1.json', ${UNKNOWN_EC_1}],
+              ['unknown-2.json', ${UNKNOWN_EC_2}],
+              ['unknown-3.json', ${UNKNOWN_EC_3}],
+            ];
+            const allUnknown = cases.every(([file, exitCode]) => {
+              if (exitCode === 0) return false;
+              const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+              return (j.findings || []).some((f) => f.ruleId === 'unknown-package');
+            });
+            if (!allUnknown) {
+              console.error('Expected all three hallucinated names to exit non-zero with an unknown-package finding.');
+              for (const [file] of cases) {
+                console.error(file, fs.readFileSync(file, 'utf8'));
+              }
               process.exit(1);
             }
           "
