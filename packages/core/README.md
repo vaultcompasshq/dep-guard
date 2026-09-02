@@ -13,9 +13,14 @@ the command-line entry point that wraps this engine. Reach for this package
 only if you are embedding the scan or the single-name check in your own
 tool.
 
-Nothing is published to npm at the time of writing. See the
-[repository](https://github.com/vaultcompasshq/dep-guard) for status and
-documentation.
+## Install
+
+```
+npm install @vaultcompass/dep-guard-core
+```
+
+See the [repository](https://github.com/vaultcompasshq/dep-guard) for full
+usage and documentation.
 
 ## License
 
