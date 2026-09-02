@@ -20,13 +20,26 @@ export const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
 export const USER_AGENT =
   'dep-guard-corpus-builder/0.1 (+https://github.com/vaultcompasshq/dep-guard)';
 
-// fetchJson and DOWNLOADS_BATCH_SIZE now live in
+// fetchJson, DOWNLOADS_BATCH_SIZE and readDownloadCounts now live in
 // packages/core/src/online/registry-client.ts, imported from the built
 // output here rather than duplicated -- the same shape as the corpus
 // builder already imports BloomFilter from the built core instead of
 // reimplementing it. This script calls fetchJson with its own patient
 // options (more attempts, a much longer timeout) explicitly, since core's
 // own defaults are now tuned tight for a live scan, not a batch job.
+//
+// readDownloadCounts used to be a second copy here with an old,
+// un-intersected loop: it read every key Object.entries(payload) offered,
+// where core's version (which this file now imports instead) intersects
+// the response against the requested batch, so a response key the caller
+// never asked about can never be reported. Recorded as not-exploitable
+// for this file's own consumer (scripts/lib/top-list.mjs looks up results
+// by requested name), but a drift trap regardless, and now there is only
+// one implementation to keep correct. Its return shape is
+// { counts, noRecord } rather than a bare Map -- see DownloadCountsResult
+// in registry-client.ts -- so top-list.mjs reads the `.counts` Map out of
+// it; it has never needed `noRecord`, which exists for fetchWeeklyDownloads'
+// live-scan callers to tell "no data" apart from "not yet answered".
 //
 // Imported (not just re-exported) because fetchReplicaInfo, fetchAllDocsPage,
 // fetchChangesPage and fetchSearchPage below call fetchJson themselves --
@@ -35,9 +48,10 @@ export const USER_AGENT =
 import {
   fetchJson,
   DOWNLOADS_BATCH_SIZE,
+  readDownloadCounts,
 } from '../../packages/core/dist/online/registry-client.js';
 
-export { fetchJson, DOWNLOADS_BATCH_SIZE };
+export { fetchJson, DOWNLOADS_BATCH_SIZE, readDownloadCounts };
 
 // splitDownloadBatches stays a local duplicate rather than an import: core
 // keeps its own copy private (an internal helper of fetchWeeklyDownloads,
@@ -150,24 +164,4 @@ export async function fetchSearchPage(base, { text, from, size = SEARCH_PAGE_SIZ
   });
   const payload = await fetchJson(`${base}/-/v1/search?${params.toString()}`, options);
   return readSearchPage(payload);
-}
-
-export function readDownloadCounts(payload, requested) {
-  const counts = new Map();
-  if (payload === null || typeof payload !== 'object') {
-    return counts;
-  }
-  // A single-name request answers with the record itself; a bulk request
-  // answers with a name-keyed map whose values may be null for a name the
-  // API has no data for.
-  if (typeof payload.downloads === 'number' && requested.length === 1) {
-    counts.set(requested[0], payload.downloads);
-    return counts;
-  }
-  for (const [name, record] of Object.entries(payload)) {
-    if (record !== null && typeof record?.downloads === 'number') {
-      counts.set(name, record.downloads);
-    }
-  }
-  return counts;
 }

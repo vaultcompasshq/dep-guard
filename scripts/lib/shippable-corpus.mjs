@@ -8,6 +8,7 @@ import path from 'node:path';
 
 import { loadCorpus, SUPPORTED_CORPUS_FORMAT_VERSIONS } from '../../packages/core/dist/corpus.js';
 import { BloomFilter } from '../../packages/core/dist/bloom.js';
+import { collectExtras } from './corpus-extras.mjs';
 
 const REQUIRED_FILES = ['names.bloom', 'top.json', 'aliases.json', 'meta.json'];
 
@@ -113,33 +114,14 @@ function assertWalkCompletePresentAndTrue(dir, meta) {
   }
 }
 
-// Mirrors collectExtras in scripts/build-corpus.mjs (the corpus builder):
-// the set of names the builder injects into the bloom filter regardless of
-// what the registry walk found -- every name in top.json, plus every alias
-// target in aliases.json. Computed by reading the two files THIS corpus
-// ships, not recomputed or re-fetched from anywhere else, so it can never
-// drift from what a given corpus actually contains. An unusable shape
-// (top.json not an array, aliases.json not an object) contributes no
-// extras here rather than throwing -- that malformation is loadCorpus's
-// job to catch (assertLoadsAndResolvesKnownName below), and this function
-// only ever runs on a meta.nameCount claim, not on shape validity.
-function collectExtras(top, aliases) {
-  const extras = new Set(Array.isArray(top) ? top : []);
-  if (aliases !== null && typeof aliases === 'object' && !Array.isArray(aliases)) {
-    for (const targets of Object.values(aliases)) {
-      if (!Array.isArray(targets)) {
-        continue;
-      }
-      for (const target of targets) {
-        if (typeof target === 'string' && target.length > 0) {
-          extras.add(target);
-        }
-      }
-    }
-  }
-  return extras;
-}
-
+// collectExtras (scripts/lib/corpus-extras.mjs) is shared with the corpus
+// builder (scripts/build-corpus.mjs): the set of names the builder injects
+// into the bloom filter regardless of what the registry walk found -- every
+// name in top.json, plus every alias target in aliases.json. Called here by
+// reading the two files THIS corpus ships, not recomputed or re-fetched
+// from anywhere else, so it can never drift from what a given corpus
+// actually contains.
+//
 // Replaces a bare "meta.nameCount >= floor" check, which a gigantic top
 // list could in principle satisfy on its own with zero names actually
 // walked. This floor is on meta.nameCount MINUS the names top.json and
@@ -327,13 +309,13 @@ function assertLoadsAndResolvesKnownName(dir) {
     // answers correctly for a name every real build includes, which is
     // enough to catch a corrupted, truncated, or substituted filter file.
     // It does NOT establish walk completeness -- collectExtras
-    // (scripts/build-corpus.mjs) injects every name in
-    // scripts/data/top-packages.txt, "react" included, into the filter
-    // regardless of what the registry walk itself found, so this check
-    // passes even for a --max-names 1 build, and swapping "react" for any
-    // other popular name would not help: any name popular enough to be
-    // worth probing is on that same top list. Walk completeness is what
-    // walkComplete, assertWalkedNameCountAtLeast, and
+    // (scripts/lib/corpus-extras.mjs, shared with the builder) injects
+    // every name in scripts/data/top-packages.txt, "react" included, into
+    // the filter regardless of what the registry walk itself found, so
+    // this check passes even for a --max-names 1 build, and swapping
+    // "react" for any other popular name would not help: any name popular
+    // enough to be worth probing is on that same top list. Walk
+    // completeness is what walkComplete, assertWalkedNameCountAtLeast, and
     // assertBloomSizeMatchesMeta above establish, not this check.
     throw new Error(
       `refusing to ship ${dir}: "${KNOWN_POPULAR_NAME}" does not resolve as present in the ` +
