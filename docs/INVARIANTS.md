@@ -117,13 +117,23 @@ transitive tarball and a same-version decoy both used to scan clean. A fact
 reached by both walks is deduplicated on (manifest path, package name,
 signal) for tamper and confusion, so a tampered direct dependency is
 still one finding. install-script.ts dedupes on (manifest path, package
-name) alone, without the signal -- deliberately, not an inconsistency:
-'added' and 'flag-acquired' are the only two signals that rule can ever
-raise for one package at one manifest path, and they are mutually
-exclusive outcomes of the same acquisition question, never two
-simultaneous facts about the same dependency the way tamper's signals can
-be, so there is nothing a third component of the key would ever need to
-keep apart.
+name) alone, without the signal -- deliberately, not an inconsistency.
+The rule can raise four signals in total across its branches: 'added',
+'flag-acquired', 'present' (raised instead of 'added'/'flag-acquired'
+whenever hasComparisonBase is false, on either the npm or the pnpm
+branch), and 'only-built-added' (the pnpm onlyBuiltDependencies branch's
+own signal, pushed straight into `findings` rather than through this
+dedupe at all). Only 'added' and 'flag-acquired' can ever co-occur under
+one (manifest path, package name) key, though: hasComparisonBase is a
+single value fixed for the whole scan, so within one run this dedupe's key
+space sees either 'present' on every entry it covers or 'added'/
+'flag-acquired' on every entry, never a mix of 'present' with either of
+the other two -- and 'only-built-added' lives on the pnpm branch, which
+this dedupe (guarding the npm branch's two loops) never runs for at all.
+'added' and 'flag-acquired' are mutually exclusive outcomes of the same
+acquisition question, never two simultaneous facts about the same
+dependency the way tamper's signals can be, so there is nothing a third
+component of the key would ever need to keep apart.
 
 `kind` is `added` or `changed`, and never `removed`: dropping a dependency
 cannot introduce any of the risks this tool looks for. Which checks gate on
@@ -193,21 +203,32 @@ and others do not, because that one really would be a fact about which
 candidate was picked. Install-script follows the same rule: an acquisition
 when no candidate ran scripts, silence when one of them did.
 
-`delta-ambiguous-lock-entry` has two producers, and they mean two different
+`delta-ambiguous-lock-entry` has three producers, and they mean different
 things under the same code. `selectEntry` (delta.ts) raises it directly,
 in `computeDelta`, on a pure SELECTION guess -- a dependency's specifier
 matches more than one lock entry under its name and the code cannot tell
-which one it resolves to -- with no comparison involved at all; that guess
-is reported whenever it survives (the whole point of `pickCounterpart`
-below is a second, separate guess about which BEFORE entry to compare
-against, and the two are not the same event). The other producer,
-`checks/tamper.ts`'s `certainFindings`, follows the suppression rather
-than the guess: it is raised only when a comparison actually dropped
-something, and not otherwise -- which is what makes IT mean something on
-its own terms. Firing that one on every guess made it simultaneously the
-only honesty channel covering this hole and the noisiest note in the set,
-since a nested duplicate of any bumped package produces an undecidable
-pairing on nearly every routine refresh.
+which one it resolves to -- with no comparison involved at all. That guess
+is not reported unconditionally: computeDelta drops it when the specifier
+held and the selected before/after entries do not differ (delta.ts:576-587),
+unless `ambiguity.material === true` -- a merely version-level ambiguity
+under a package nobody touched is noise, but one that could have decided
+whether a tampered entry or a clean one was compared has to survive the
+skip (the whole point of `pickCounterpart` below is a second, separate
+guess about which BEFORE entry to compare against, and the two are not the
+same event). The second producer, `checks/tamper.ts`'s `certainFindings`,
+follows the suppression rather than the guess: it is raised only when a
+comparison actually dropped something, and not otherwise -- which is what
+makes IT mean something on its own terms. Firing that one on every guess
+made it simultaneously the only honesty channel covering this hole and the
+noisiest note in the set, since a nested duplicate of any bumped package
+produces an undecidable pairing on nearly every routine refresh. The third
+producer is `checks/install-script.ts`: it declares the same code
+(`AMBIGUOUS_LOCK_ENTRY_CODE`, install-script.ts:31) and raises it from
+`noteSuppressedByPairing` (install-script.ts:141), reached from
+`agreementAcrossCandidates` dropping a verdict (install-script.ts:258) --
+the install-script rule's own suppressed-acquisition case, following the
+same follow-the-suppression rule as tamper's producer rather than the pure
+selection guess above.
 
 How that is decided is the part worth stating carefully, because the first
 answer to it was wrong in the way this file is most concerned with. The
