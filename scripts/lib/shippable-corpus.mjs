@@ -251,6 +251,20 @@ function assertBloomSizeMatchesMeta(dir, meta) {
 // property reads come back `undefined` and the guard below throws loudly
 // naming the file, rather than silently computing a fill ratio of zero
 // from nothing.
+//
+// That guard is unreachable through on-disk corruption today, and stays
+// worth keeping anyway. assertBloomSizeMatchesMeta (above, runs first)
+// already refuses any names.bloom whose byte length does not exactly
+// match what BloomFilter.create(meta.nameCount, meta.fpRate) implies, and
+// that minimum is never zero bits (BloomFilter.create floors bitCount at
+// 8), so a truncated, bits-free file can never reach here. Any file whose
+// size DOES match still has to pass BloomFilter.deserialize's own header
+// checks first, which construct bits/bitCount itself from validated
+// input -- there is no on-disk byte pattern that clears both gates while
+// still handing this guard something malformed. See
+// scripts/tests/shippable-corpus.test.mjs's "names.bloom corruption that
+// IS reachable" describe block for the reachable corruption case this
+// gate actually catches, and for the fuller version of this argument.
 const MIN_FILL_RATIO = 0.25;
 const MAX_FILL_RATIO = 0.75;
 

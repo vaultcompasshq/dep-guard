@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -360,6 +360,64 @@ describe('assertCorpusShippable', () => {
       writeMeta(dir, validMeta({ nameCount: 1_500_000 }));
 
       expect(() => assertCorpusShippable(dir, 1)).toThrow(/bit-fill ratio/);
+    });
+  });
+
+  // fillRatioOf's own fail-closed guard -- the instanceof Uint8Array /
+  // typeof / Number.isFinite check on the bits and bitCount read back off
+  // a deserialized BloomFilter, before any arithmetic runs on them -- has
+  // no test reaching it through on-disk corruption, and this describe
+  // block establishes why: it cannot be reached that way at all, for two
+  // independent reasons that both hold before fillRatioOf ever runs.
+  //
+  //   1. assertBloomSizeMatchesMeta (checked earlier in
+  //      assertCorpusShippable) only accepts a names.bloom whose on-disk
+  //      byte length exactly matches what BloomFilter.create(meta.nameCount,
+  //      meta.fpRate) implies. BloomFilter.create's minimum bitCount is 8
+  //      (bloom.ts: `Math.max(8, ...)`), which is at least one byte of bit
+  //      array, so a header-only file with zero bits bytes can never match
+  //      that expected size regardless of what meta.json claims -- it is
+  //      rejected before fillRatioOf runs at all.
+  //   2. A names.bloom whose SIZE does match still has to survive
+  //      BloomFilter.deserialize's own checks (magic, version, bitCount
+  //      and hashCount both >= 1, and a length check against the header's
+  //      OWN claimed bitCount) before it returns an object. Every field on
+  //      what it returns is a well-typed Uint8Array/number, because
+  //      deserialize constructs bits and bitCount itself from validated
+  //      input -- there is no on-disk byte pattern that survives both
+  //      assertBloomSizeMatchesMeta and BloomFilter.deserialize while
+  //      still producing a malformed bits/bitCount pair for the guard to
+  //      catch.
+  //
+  // What IS reachable is BloomFilter.deserialize rejecting a corrupted
+  // file outright -- exercised below, reached through
+  // assertLoadsAndResolvesKnownName's corpus.hasName() call (loadCorpus()
+  // itself never touches names.bloom; it is read lazily -- see
+  // corpus.ts's loadBloom), which runs before assertBloomFillRatioPlausible
+  // and is not wrapped in that function's own try/catch, so the
+  // DepGuardError from bloom.ts propagates as-is. The guard in fillRatioOf
+  // stays defensive code for a future refactor of BloomFilter's compiled
+  // shape (a real JS #private field, a renamed property -- see the
+  // comment above fillRatioOf in shippable-corpus.mjs), not for on-disk
+  // corruption, which is caught earlier by the two checks above.
+  describe('names.bloom corruption that IS reachable (the fail-closed guard above is not, see comment)', () => {
+    it('refuses a corpus whose names.bloom has the right byte size but a corrupted magic header', () => {
+      const dir = tempCorpusDir();
+      // A real, correctly-sized filter first, so assertBloomSizeMatchesMeta
+      // (which runs before assertLoadsAndResolvesKnownName) sees a byte
+      // length that matches what meta.json claims.
+      writeCorpusFiles(dir, { names: generatedNames(50), nameCount: 50, fpRate: 0.01 });
+      writeMeta(dir, validMeta({ nameCount: 50, fpRate: 0.01 }));
+
+      // Corrupt only the first (magic) byte on disk, in place -- byte
+      // length is untouched, so the geometry cross-check still passes and
+      // this reaches BloomFilter.deserialize itself.
+      const bloomPath = path.join(dir, 'names.bloom');
+      const corrupted = Buffer.from(readFileSync(bloomPath));
+      corrupted[0] = 0x00;
+      writeFileSync(bloomPath, corrupted);
+
+      expect(() => assertCorpusShippable(dir, 1)).toThrow(/bloom filter magic mismatch/);
     });
   });
 });
