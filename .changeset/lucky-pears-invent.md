@@ -14,13 +14,18 @@ a user had was an `allow` entry per package, which is a permanent
 rule-wide exemption bought to clear a finding that was wrong about one
 narrow fact.
 
-`--online` now asks the registry. A name that exists stands the finding
-down, because the finding claimed the name was not on the registry and the
-registry says otherwise. That is not a clean bill of health and does not
-touch anything else: typosquat and registered-squat still judge whether
-the name is suspicious, which is the question that actually matters. A 404
-escalates to critical instead, since the innocent explanation the offline
-message offers has just been ruled out. A timeout, a server error, or a
+`--online` now asks the registry. A name with a real, installable
+packument downgrades the finding to low, because the finding claimed the
+name was not on the registry and the registry says otherwise. It is
+downgraded rather than removed: the finding still says the corpus predates
+the package, which a reviewer should see. That is not a clean bill of
+health and does not touch anything else: typosquat and registered-squat
+still judge whether the name is suspicious, which is the question that
+actually matters. A 404 escalates to critical instead, since the innocent
+explanation the offline message offers has just been ruled out. A name
+npm has withdrawn, whether a tombstone or a security-holding placeholder,
+is left exactly as the offline scan made it. So is a timeout, a server
+error, or a
 spent budget leaves the finding exactly as the offline scan made it. A
 network failure never means fewer findings.
 
