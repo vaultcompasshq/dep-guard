@@ -253,4 +253,64 @@ describe('renderSarif: locations', () => {
     );
     expect(uris).toEqual(['packages/app/package.json', 'nested/package.json']);
   });
+
+  test('strips a Windows drive letter rather than emitting an absolute uri', () => {
+    // A leading "/" was already stripped, but "C:/Users/..." is just as
+    // absolute and survived it untouched, so it would have reached an
+    // uploaded artifact carrying a local directory layout, and %SRCROOT%
+    // could not resolve it either.
+    const sarif = parse(
+      scanResult([
+        finding({ manifestPath: 'C:\\project\\package.json' }),
+        finding({ manifestPath: 'D:/work/app/package.json', fingerprint: 'y' }),
+      ])
+    );
+    const uris = sarif.runs[0].results.map(
+      (r) => r.locations[0].physicalLocation?.artifactLocation.uri
+    );
+    expect(uris).toEqual(['project/package.json', 'work/app/package.json']);
+    for (const uri of uris) {
+      expect(uri).not.toMatch(/^[A-Za-z]:/);
+    }
+  });
+});
+
+describe('renderSarif: the synthetic anchor of dep-guard check', () => {
+  // checkSingle answers "is this name safe to add", a question with no
+  // file behind it. Core fabricates a "package.json" manifestPath for it
+  // (scan.ts's SYNTHETIC_MANIFEST_PATH). Pointing a SARIF physical
+  // location at that path would annotate the consumer's REAL root
+  // manifest with a finding about a package that is not in it, which is
+  // a fabricated location rather than a missing one.
+  function checkSingleResult(findings: Finding[]): ScanResult {
+    return scanResult(findings, {
+      mode: 'audit',
+      diagnostics: [
+        {
+          code: 'check-single-name-only',
+          message: 'checkSingle only evaluates the name-based checks',
+        },
+      ],
+    });
+  }
+
+  test('omits the physical location entirely, keeping the logical one', () => {
+    const sarif = parse(checkSingleResult([finding({ packageName: 'raect' })]));
+    const location = sarif.runs[0].results[0].locations[0];
+    expect(location.physicalLocation).toBeUndefined();
+    expect(location.logicalLocations?.[0]).toEqual({
+      kind: 'package',
+      fullyQualifiedName: 'raect',
+    });
+  });
+
+  test('an ordinary audit scan of a real root manifest keeps its physical location', () => {
+    // The falsifiable half: the suppression has to key on the synthetic
+    // question, not on the path spelling, or every real finding at the
+    // repository root would lose its location too.
+    const sarif = parse(scanResult([finding({ manifestPath: 'package.json' })], { mode: 'audit' }));
+    expect(sarif.runs[0].results[0].locations[0].physicalLocation?.artifactLocation.uri).toBe(
+      'package.json'
+    );
+  });
 });

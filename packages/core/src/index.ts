@@ -32,7 +32,7 @@
 // path reaching directly into another package's directory on disk. Verified
 // by running the script test suite (scripts/tests/*.test.mjs, which import
 // core this same relative-path way) after "exports" was added: unaffected.
-export { checkSingle, scan } from './scan.js';
+export { checkSingle, scan, CHECK_SINGLE_DIAGNOSTIC_CODE } from './scan.js';
 export type { ScanResult } from './scan.js';
 export type { ScanMode } from './git-source.js';
 export { FAIL_ON_LEVELS, loadConfig } from './config.js';

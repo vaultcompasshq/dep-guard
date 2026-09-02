@@ -593,8 +593,18 @@ const SYNTHETIC_SPECIFIER = '0.0.0';
 // clean"; this is the same courtesy for checkSingle's structural gap, so
 // a caller can tell "checkSingle found nothing" apart from "checkSingle
 // found nothing AND could only look at three of six rules".
+// Exported because it is the only reliable way, from outside, to tell a
+// checkSingle result from an ordinary audit scan: both report mode
+// 'audit', and checkSingle's fabricated manifestPath is the literal
+// "package.json", which a real root-manifest finding also carries. The
+// CLI's SARIF renderer needs that distinction to avoid pointing a
+// physical location at a file the finding has nothing to do with, and
+// importing the constant is how it gets it without a second copy of the
+// string that could drift from this one.
+export const CHECK_SINGLE_DIAGNOSTIC_CODE = 'check-single-name-only';
+
 const NAME_ONLY_DIAGNOSTIC: Diagnostic = {
-  code: 'check-single-name-only',
+  code: CHECK_SINGLE_DIAGNOSTIC_CODE,
   message:
     'checkSingle only evaluates the name-based checks (existence, typosquat, and the ' +
     'dependency-confusion internal-name rule); lockfile-tamper, install-script, and ' +

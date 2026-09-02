@@ -28,9 +28,24 @@
 //    consumer side and leaks a local directory layout into an artifact
 //    that gets uploaded. Findings already carry repository-root-relative
 //    paths (docs/INVARIANTS.md, "Path spellings have one source"), so this
-//    normalises rather than recomputes: a leading "./" is dropped and
-//    backslashes become forward slashes, both of which would otherwise
-//    reach the consumer as a different file.
+//    normalises rather than recomputes: a leading "./" is dropped,
+//    backslashes become forward slashes, and BOTH spellings of an
+//    absolute path are stripped -- a leading "/" and a Windows drive
+//    prefix like "C:/". The drive prefix is the one that was missed
+//    first time: it is just as absolute as a leading slash, and stripping
+//    only the slash left it to reach an uploaded artifact intact.
+//
+//  - No physical location at all for a `dep-guard check` result. That
+//    command answers "is this name safe to add", a question with no file
+//    behind it, so core fabricates a "package.json" manifestPath for it.
+//    Emitting a physical location for that would annotate the consumer's
+//    REAL root manifest with a finding about a package that is not in it.
+//    A missing location is honest; a fabricated one is worse than none,
+//    and it is indistinguishable from a true one once uploaded, exactly
+//    like a guessed line number. The discriminator is core's own
+//    CHECK_SINGLE_DIAGNOSTIC_CODE rather than the path spelling, because
+//    a real audit-mode finding at the repository root carries that same
+//    literal path and must keep its location.
 //
 //  - A region is emitted ONLY when a real line number is known, and no
 //    rule produces one today. An invented startLine annotates an unrelated
@@ -39,7 +54,7 @@
 //    reader is written now so the day a rule does record a line, nothing
 //    has to change here but the rule.
 
-import { isBlocking } from '@vaultcompass/dep-guard-core';
+import { CHECK_SINGLE_DIAGNOSTIC_CODE, isBlocking } from '@vaultcompass/dep-guard-core';
 import type { Finding, RuleId, ScanResult, Severity } from '@vaultcompass/dep-guard-core';
 
 export const SARIF_RULE_NAMESPACE = 'dep-guard';
@@ -81,6 +96,11 @@ const SARIF_LEVELS: Record<Severity, 'error' | 'warning' | 'note'> = {
 
 function toUri(manifestPath: string): string {
   let uri = manifestPath.split('\\').join('/');
+  // A Windows drive prefix is absolute exactly as a leading slash is, and
+  // stripping only the slash left "C:/project/package.json" intact.
+  // Removed before the slash loop below so "C:/x" reduces the whole way
+  // rather than to "/x".
+  uri = uri.replace(/^[A-Za-z]:\/*/, '');
   while (uri.startsWith('./')) {
     uri = uri.slice(2);
   }
@@ -105,13 +125,24 @@ function readStartLine(details: Record<string, unknown> | undefined): number | u
   return raw;
 }
 
-function toResult(finding: Finding, failOn: ScanResult['run']['failOn']): unknown {
+function toResult(
+  finding: Finding,
+  failOn: ScanResult['run']['failOn'],
+  syntheticAnchor: boolean
+): unknown {
   const startLine = readStartLine(finding.details);
   const physicalLocation: Record<string, unknown> = {
     artifactLocation: { uri: toUri(finding.manifestPath), uriBaseId: '%SRCROOT%' },
   };
   if (startLine !== undefined) {
     physicalLocation.region = { startLine };
+  }
+
+  const location: Record<string, unknown> = {
+    logicalLocations: [{ kind: 'package', fullyQualifiedName: finding.packageName }],
+  };
+  if (!syntheticAnchor) {
+    location.physicalLocation = physicalLocation;
   }
 
   return {
@@ -128,12 +159,7 @@ function toResult(finding: Finding, failOn: ScanResult['run']['failOn']): unknow
       details: finding.details ?? {},
     },
     partialFingerprints: { [SARIF_FINGERPRINT_KEY]: finding.fingerprint },
-    locations: [
-      {
-        logicalLocations: [{ kind: 'package', fullyQualifiedName: finding.packageName }],
-        physicalLocation,
-      },
-    ],
+    locations: [location],
   };
 }
 
@@ -150,6 +176,14 @@ export function renderSarif(result: ScanResult, version: string): string {
   // report. A consumer that lists a tool's rules should see dep-guard's
   // whole rule set rather than a set that changes shape depending on what
   // the last scan found.
+  // A checkSingle result, whose manifestPath is fabricated. Detected by
+  // core's own diagnostic code rather than by the path spelling, since a
+  // genuine audit-mode finding at the repository root carries the same
+  // literal "package.json" and must keep its physical location.
+  const syntheticAnchor = result.run.diagnostics.some(
+    (diagnostic) => diagnostic.code === CHECK_SINGLE_DIAGNOSTIC_CODE
+  );
+
   const rules = (Object.keys(RULE_DESCRIPTIONS) as RuleId[]).map((ruleId) => ({
     id: `${SARIF_RULE_NAMESPACE}/${ruleId}`,
     name: ruleId,
@@ -162,7 +196,9 @@ export function renderSarif(result: ScanResult, version: string): string {
     runs: [
       {
         tool: { driver: { name: 'dep-guard', version, informationUri: 'https://github.com/vaultcompasshq/dep-guard', rules } },
-        results: result.findings.map((finding) => toResult(finding, result.run.failOn)),
+        results: result.findings.map((finding) =>
+          toResult(finding, result.run.failOn, syntheticAnchor)
+        ),
       },
     ],
   };

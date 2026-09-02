@@ -227,7 +227,7 @@ The mapping, which is stable and shared across this family's gates:
 | `properties.details` | the finding's `details` bag, verbatim |
 | `partialFingerprints["dep-guard/v1"]` | the finding's existing fingerprint, unchanged |
 | `locations[].logicalLocations[]` | `kind: package`, `fullyQualifiedName` the package name |
-| `locations[].physicalLocation` | the manifest path, relative, under `%SRCROOT%` |
+| `locations[].physicalLocation` | the manifest path, relative, under `%SRCROOT%`; omitted for `dep-guard check`, which has no file behind it |
 
 Two of those are worth calling out. `properties.blocking` is dep-guard's
 own gate decision rather than something the consumer recomputes from the
