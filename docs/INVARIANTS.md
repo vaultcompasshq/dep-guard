@@ -115,7 +115,15 @@ the first when it means the second is blind to transitive entries and to
 any entry a decoy can hide behind, which is exactly how a repointed
 transitive tarball and a same-version decoy both used to scan clean. A fact
 reached by both walks is deduplicated on (manifest path, package name,
-signal), so a tampered direct dependency is still one finding.
+signal) for tamper and confusion, so a tampered direct dependency is
+still one finding. install-script.ts dedupes on (manifest path, package
+name) alone, without the signal -- deliberately, not an inconsistency:
+'added' and 'flag-acquired' are the only two signals that rule can ever
+raise for one package at one manifest path, and they are mutually
+exclusive outcomes of the same acquisition question, never two
+simultaneous facts about the same dependency the way tamper's signals can
+be, so there is nothing a third component of the key would ever need to
+keep apart.
 
 `kind` is `added` or `changed`, and never `removed`: dropping a dependency
 cannot introduce any of the risks this tool looks for. Which checks gate on
@@ -144,11 +152,20 @@ bumps into criticals whose message was backwards and which vanished if the
 two lockfile keys were swapped.
 
 Both selectors are therefore guesses under the same rule. A counterpart is
-narrowed from the strongest evidence down: an identical resolved URL, then
-a shared origin, then a matching install-script flag, and each step only
-applies when it leaves a candidate standing. A pairing that survives all of
-that with more than one candidate is a guess, and a guess may not
-manufacture a fact.
+narrowed from the strongest evidence down: a matching version, then an
+identical resolved URL, then a shared origin, then a matching
+install-script flag, and each step only applies when it leaves a candidate
+standing. The version rung is the one exception to "only applies when it
+leaves a candidate standing": it is the only rung that runs unconditionally
+(whenever the after entry has a version at all) rather than being gated on
+more than one candidate still being in play, so it is the one rung that can
+decide a pairing entirely on its own, with nothing else in the ladder ever
+getting a look at the remaining candidates. That matters beyond ordering --
+see "The narrowing ladder is the list that is still a description" below
+for the attacker-constructible edge this creates when a before side holds
+one hashed entry at one version and one hashless entry at another. A
+pairing that survives all of that with more than one candidate is a guess,
+and a guess may not manufacture a fact.
 
 What a guess costs, though, is narrower than it looks, and getting that
 wrong made the suppression attacker-constructible. Suppressing every
@@ -176,12 +193,21 @@ and others do not, because that one really would be a fact about which
 candidate was picked. Install-script follows the same rule: an acquisition
 when no candidate ran scripts, silence when one of them did.
 
-`delta-ambiguous-lock-entry` follows the suppression rather than the guess.
-It is raised when a comparison actually dropped something, and not
-otherwise -- which is what makes it mean something. Firing on every guess
-made it simultaneously the only honesty channel covering this hole and the
-noisiest note in the set, since a nested duplicate of any bumped package
-produces an undecidable pairing on nearly every routine refresh.
+`delta-ambiguous-lock-entry` has two producers, and they mean two different
+things under the same code. `selectEntry` (delta.ts) raises it directly,
+in `computeDelta`, on a pure SELECTION guess -- a dependency's specifier
+matches more than one lock entry under its name and the code cannot tell
+which one it resolves to -- with no comparison involved at all; that guess
+is reported whenever it survives (the whole point of `pickCounterpart`
+below is a second, separate guess about which BEFORE entry to compare
+against, and the two are not the same event). The other producer,
+`checks/tamper.ts`'s `certainFindings`, follows the suppression rather
+than the guess: it is raised only when a comparison actually dropped
+something, and not otherwise -- which is what makes IT mean something on
+its own terms. Firing that one on every guess made it simultaneously the
+only honesty channel covering this hole and the noisiest note in the set,
+since a nested duplicate of any bumped package produces an undecidable
+pairing on nearly every routine refresh.
 
 How that is decided is the part worth stating carefully, because the first
 answer to it was wrong in the way this file is most concerned with. The
@@ -247,8 +273,17 @@ which earlier entry applies and the entry should be treated as suspect.
 
 High rather than critical is the honest severity: a critical asserts the
 tampering happened, and this cannot assert that. One escalation per
-undecidable entry, however many verdicts went undecided, because they are
-one admission. Drops carrying nothing above high stay diagnostic-only --
+(manifest path, package name), however many verdicts went undecided across
+however many lock entry changes under that name, because they are one
+admission -- not one per undecidable entry, which is a level too fine:
+`certainFindings` runs once per changed lock entry and could in principle
+push more than one `ambiguous-critical` escalation for one package at one
+manifest path, but `report()`'s own dedupe (manifest path, package name,
+signal) collapses them, since the signal this escalation carries is the
+constant `AMBIGUOUS_CRITICAL_SIGNAL` every time. The direction is the safe
+one: a reader could in principle undercount how many entries went
+undecided from a single admission, never overcount how many are suspect.
+Drops carrying nothing above high stay diagnostic-only --
 install-script's suppressed acquisition is the case, and making an
 unattributable high block would put a note on every lockfile with a nested
 duplicate back into the gate. The blocking decision stays in findings, where
@@ -355,8 +390,19 @@ both of those messages carried their own copy of the list, both copies were
 written when there were six signals, and neither learned about
 `tarball-repointed` or `resolution-unreadable` when those were added to the
 check. Both messages are now built from the one declaration, and every
-`details.signal` is produced through a helper typed against it, so a signal
-absent from the list does not compile and cannot go unnamed.
+comparison-derived `details.signal` -- the eight named just above -- is
+produced through a helper typed against that declaration, so one of THOSE
+absent from the list does not compile and cannot go unnamed. Two signals
+in `checks/tamper.ts` are deliberate exceptions, raw strings rather than
+values from that typed helper, because they are not comparison-derived
+signals at all: `AMBIGUOUS_CRITICAL_SIGNAL` (`ambiguous-critical`, tamper.ts
+around line 682) names the dropped-verdict escalation described in "What a
+dropped verdict costs" above, not one of the eight; and the git-source and
+url-source signal (a template string, tamper.ts around line 720) is built
+from the specifier's protocol and host, which are not fixed members of any
+declared list to type against. Both are outside the "coverage lost across
+the board" guarantee this paragraph is about, because neither is a
+comparison signal that could go missing from a `tamper-signals.ts` update.
 
 A diagnostic about ONE entry says which comparisons did not run for that
 entry, which is a different and narrower sentence:
@@ -521,8 +567,10 @@ silence is indistinguishable from a clean result. That is why a missing
 lockfile, an unparsed lockfile format, a binary lockfile, pnpm's absent
 install-script flag, audit mode's unreachable tamper comparisons,
 `checkSingle`'s reduced coverage, an unparseable npmrc pin, an unreadable
-resolved URL, an ambiguous lock entry selection, an unmatched ignore entry
-and findings dropped by a matched one all have codes. Adding a code is the cheapest possible fix for
+resolved URL, an ambiguous lock entry selection, an unmatched ignore entry,
+a workspace directory the walk could not read, a resolved path escaping
+the repository root, a symlink chain that cycles back on itself, and
+findings dropped by a matched one all have codes. Adding a code is the cheapest possible fix for
 a gap, and a gap with no code is a bug even when the code that has the gap
 is correct.
 
@@ -534,9 +582,17 @@ Current diagnostic codes: `audit-anchor-differs`,
 `lockfile-format-manifest-only`, `lockfile-missing`,
 `manifest-alias-empty`, `npm-lockfile-invalid-entry`, `npm-lockfile-v1`,
 `npmrc-pin-unparseable`, `online-check-unreachable`,
-`pnpm-lockfile-invalid-entry`,
-`pnpm-no-install-script-flag`, `tamper-resolution-unreadable`,
+`path-outside-root`, `pnpm-lockfile-invalid-entry`,
+`pnpm-no-install-script-flag`, `symlink-cycle`,
+`tamper-resolution-unreadable`, `workspace-dir-unreadable`,
 `workspace-duplicate-directory`, `workspace-glob-unsupported`.
+
+This list is hand-maintained, not compile-checked -- `Diagnostic.code` is
+typed `string`, so a new code compiles and runs without ever being added
+here. It has to be re-verified against the code (grep git-source.ts and
+the checks for every string literal assigned to a diagnostic's `code`)
+whenever a code is added, rather than trusted as current because it is
+checked in.
 
 ## Failing closed, and the error codes that do it
 
@@ -795,7 +851,19 @@ steps, so every release builds its own corpus fresh from
 `packages/core/package.json`'s `files` array lists `data` alongside `dist`
 for exactly this reason, and `scripts/tests/core-package-files.test.mjs`
 guards against that entry ever being dropped again, since nothing else in
-the suite would catch its removal.
+`pnpm test`'s suite would catch its removal. That test proves only that
+the string `"data"` is present in the `"files"` array, though -- it cannot
+prove npm actually packs the directory it names. The check that proves
+that is `scripts/check-corpus-packed.mjs`, wired into release.yml right
+after the shippability gate: it packs `packages/core` the same way the
+publish step will (`npm pack --dry-run --json`) and reads the listing
+back, so it is the one gate that actually observes the corpus reach a
+tarball rather than inferring it from a string being present in a JSON
+array. It is not part of `pnpm test` and does not run in CI outside a
+release, which makes it easy to mistake for a redundant duplicate of the
+test above and delete while tidying the workflow -- it is not: an agent
+or reviewer who cannot picture how the two differ should re-read this
+paragraph before removing either one.
 
 That step has to run after `pnpm test`, never before, in the same job.
 `packages/cli/tests/cli.test.ts`'s "a first run with no corpus built yet"
