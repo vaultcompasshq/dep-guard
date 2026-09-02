@@ -837,6 +837,37 @@ would have loaded exactly as if it were a legitimate pre-versioning
 artifact; the gate is what makes that scenario unreachable for anything
 this project actually publishes.
 
+## core and cli publish in lockstep, and a burned version is never re-released
+
+`packages/core` and `packages/cli` always move to a new version together,
+even when only one of them changed. `.github/workflows/release.yml`
+asserts this before publish (see its "Assert core and cli versions match
+each other, and the tag if there is one" step) and refuses to continue if
+they disagree.
+
+The reason is `pnpm`'s own publish behavior, not caution for its own
+sake: `packages/cli/package.json` depends on core via `workspace:*`, and
+`pnpm` rewrites that to an EXACT version pin -- not a range -- at pack
+time, pinned to whatever core's version is at that moment. A cli
+published without a matching core bump pins the OLD core, and a fix that
+only touched core silently does not ship to anyone who installs cli at
+its new version: npm resolves cli's dependency to the pinned old core
+version regardless of what core's latest version is, and there is no
+range for a later core patch to satisfy. Lockstep versioning is what
+keeps that pin meaningful.
+
+The corollary is that a version number, once published, is never
+reused, broken or not: npm does not allow re-publishing an existing
+version under any circumstance, so there is no version number a
+corrective re-release could target even if this project wanted one. A
+release that goes out broken is fixed by a new version, bumped in both
+packages together, exactly like any other change -- not by finding a way
+to overwrite the old one. See the comment on the publish loop's
+already-on-registry skip in release.yml for the failure mode this
+prevents: that skip exists to make a partial-release re-run safe, and it
+must never be asked to make a corrective re-release of an existing
+version look safe too, because there is no version left for it to target.
+
 ## A published corpus is built in the release job, never committed, and a release gate demands what the reader tolerates
 
 `packages/core/data/corpus` (the path `DEFAULT_CORPUS_DIR` in scan.ts

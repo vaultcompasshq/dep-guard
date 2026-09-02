@@ -163,6 +163,85 @@ jobs:
 
         echo "Version check passed: core=${CORE_VERSION} cli=${CLI_VERSION} ref_type=${GITHUB_REF_TYPE} ref_name=${GITHUB_REF_NAME:-<none>}"
 
+    # This is the only pre-publish step that executes the shipped artifact
+    # in the shipped layout -- every gate above this point checks the
+    # corpus on disk, the packed tarball's file listing, or package.json's
+    # metadata, but none of them actually installs the packages the way a
+    # real user would and runs the resulting binary. It exists because a
+    # previous audit had to verify that layout by hand.
+    #
+    # A real corpus already exists at packages/core/data/corpus at this
+    # point in the job (built several steps above and verified shippable
+    # and packed), so packing core below includes it -- that is the point:
+    # this exercises the SAME corpus the gates above just verified, not a
+    # stand-in. (A throwaway-clone verification done before this step was
+    # written used a small hand-written corpus instead, to avoid a real
+    # registry walk; that is a property of the verification, not of this
+    # step, which always runs against whatever corpus this job actually
+    # built.)
+    #
+    # Mechanics verified by hand in that throwaway clone: "pnpm pack
+    # --pack-destination" rewrites cli's "workspace:*" dependency on core
+    # to an exact version pin, the same rewrite "pnpm publish" performs, so
+    # installing both tarballs in ONE "npm install" invocation resolves
+    # the local pin correctly -- no separate install-core-first step and
+    # no registry lookup needed.
+    - name: Install the packed tarballs and run the shipped binary
+      run: |
+        set -euo pipefail
+        PACK_DIR="$(mktemp -d)"
+        pnpm --dir packages/core pack --pack-destination "${PACK_DIR}"
+        pnpm --dir packages/cli pack --pack-destination "${PACK_DIR}"
+
+        INSTALL_DIR="$(mktemp -d)"
+        npm init -y --prefix "${INSTALL_DIR}" >/dev/null
+        npm install --prefix "${INSTALL_DIR}" \
+          "${PACK_DIR}"/vaultcompass-dep-guard-core-*.tgz \
+          "${PACK_DIR}"/vaultcompass-dep-guard-*.tgz
+
+        BIN="${INSTALL_DIR}/node_modules/.bin/dep-guard"
+
+        # No --corpus-dir anywhere below: the whole point is to resolve the
+        # corpus at its default path inside the installed package, exactly
+        # as a real user's install would.
+        set +e
+        "${BIN}" check react --format json > "${INSTALL_DIR}/known.json"
+        KNOWN_EC=$?
+        "${BIN}" check totally-made-up-hallucinated-xyz123 --format json > "${INSTALL_DIR}/unknown.json"
+        UNKNOWN_EC=$?
+        VERSION_OUT="$("${BIN}" --version)"
+        VERSION_EC=$?
+        set -e
+
+        if [[ "${KNOWN_EC}" -ne 0 ]]; then
+          echo "::error::Expected 'dep-guard check react' to exit 0 from the packed tarball install. Got exit ${KNOWN_EC}."
+          cat "${INSTALL_DIR}/known.json" || true
+          exit 1
+        fi
+
+        node -e "
+          const fs = require('fs');
+          if (${UNKNOWN_EC} === 0) {
+            console.error('Expected dep-guard check <hallucinated-name> to exit non-zero from the packed tarball install.');
+            process.exit(1);
+          }
+          const j = JSON.parse(fs.readFileSync('${INSTALL_DIR}/unknown.json', 'utf8'));
+          const hasUnknown = (j.findings || []).some((f) => f.ruleId === 'unknown-package');
+          if (!hasUnknown) {
+            console.error('dep-guard check <hallucinated-name> exited non-zero but carried no unknown-package finding.');
+            console.error(fs.readFileSync('${INSTALL_DIR}/unknown.json', 'utf8'));
+            process.exit(1);
+          }
+        "
+
+        EXPECTED_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+        if [[ "${VERSION_EC}" -ne 0 || "${VERSION_OUT}" != "${EXPECTED_VERSION}" ]]; then
+          echo "::error::Expected 'dep-guard --version' to print ${EXPECTED_VERSION} from the packed tarball install, got '${VERSION_OUT}' (exit ${VERSION_EC})."
+          exit 1
+        fi
+
+        echo "Install-and-run gate passed: react known, a hallucinated name unknown, --version prints ${EXPECTED_VERSION}."
+
     # npm Trusted Publishing (OIDC): no NPM_TOKEN, auth via id-token: write
     # plus a trusted publisher configured per @vaultcompass/* package.
     # Requires npm CLI >= 11.5.1 (Node >= 22.14.0). Pin major 11 - npm@12

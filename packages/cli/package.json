@@ -24,6 +24,9 @@
   "bin": {
     "dep-guard": "dist/cli.js"
   },
+  "exports": {
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist"
   ],
