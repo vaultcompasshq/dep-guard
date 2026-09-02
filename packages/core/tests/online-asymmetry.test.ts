@@ -13,16 +13,30 @@ function typosquatFinding(overrides: Partial<Finding> = {}): Omit<Finding, 'fing
   };
 }
 
-function fakeDeps(counts: Record<string, number>) {
+// `noRecordNames` models a confirmed "npm answered, no download history"
+// name (registry-client.ts's DownloadCountsResult.noRecord) -- distinct
+// from a name that is simply absent from `counts` and not listed here,
+// which models an unresolved absence: present in neither counts nor
+// noRecord. This check does not know or care what upstream cause
+// produces that absence (registry-client.ts resolves an ordinary
+// single-name 404 into noRecord or throws before it ever reaches here --
+// see its own DownloadCountsResult doc comment -- so in production this
+// state means a defensive, malformed-response-shaped gap); the check's
+// contract is simply that an unresolved name is left alone, regardless of
+// why it is unresolved.
+function fakeDeps(counts: Record<string, number>, noRecordNames: string[] = []) {
   return {
     fetchWeeklyDownloads: async (names: string[]) => {
-      const map = new Map<string, number>();
+      const countsMap = new Map<string, number>();
+      const noRecord = new Set<string>();
       for (const name of names) {
         if (name in counts) {
-          map.set(name, counts[name]);
+          countsMap.set(name, counts[name]);
+        } else if (noRecordNames.includes(name)) {
+          noRecord.add(name);
         }
       }
-      return map;
+      return { counts: countsMap, noRecord };
     },
   };
 }
@@ -47,8 +61,31 @@ describe('applyTyposquatAsymmetry', () => {
     expect(findings[0].severity).toBe('low');
   });
 
-  test('leaves a finding alone when the API has no data for it', async () => {
+  test('escalates a finding when the API confirms it has no download record for it at all', async () => {
+    // A name in noRecord means the API answered successfully and
+    // explicitly confirmed it has no download record for this exact name
+    // -- the archetypal case for a freshly-registered squat, and a
+    // stronger signal than a low count, not a reason to skip it. This
+    // replaces a prior version of this test that asserted the opposite
+    // (leaving the finding alone on a name simply missing from the
+    // response), which encoded the zero-download-blindness bug: a name
+    // with no record at all was the one case the check could never fire
+    // on.
     const findings = [typosquatFinding({ packageName: 'no-data-pkg' })];
+    const diagnostics: Diagnostic[] = [];
+    await applyTyposquatAsymmetry(findings, fakeDeps({}, ['no-data-pkg']), diagnostics);
+    expect(findings[0].severity).toBe('high');
+    expect(findings[0].details).toMatchObject({ onlineWeeklyDownloads: 0 });
+  });
+
+  test('leaves a finding at its offline severity behind an unresolved absence', async () => {
+    // Present in neither counts nor noRecord: genuinely unknown, not a
+    // confirmed zero, regardless of what upstream cause produced the
+    // absence (see the fakeDeps comment above). Must not escalate:
+    // trusting an unresolved absence as a signal would let a broken
+    // downloads fetch silently escalate every low typosquat match to high
+    // instead of surfacing as online-check-unreachable.
+    const findings = [typosquatFinding({ packageName: 'ambiguous-pkg' })];
     const diagnostics: Diagnostic[] = [];
     await applyTyposquatAsymmetry(findings, fakeDeps({}), diagnostics);
     expect(findings[0].severity).toBe('low');
@@ -88,7 +125,7 @@ describe('applyTyposquatAsymmetry', () => {
     const deps = {
       fetchWeeklyDownloads: async () => {
         called = true;
-        return new Map<string, number>();
+        return { counts: new Map<string, number>(), noRecord: new Set<string>() };
       },
     };
     await applyTyposquatAsymmetry([], deps, []);

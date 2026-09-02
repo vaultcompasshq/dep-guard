@@ -23,6 +23,7 @@ import { applyTyposquatAsymmetry } from './online/asymmetry.js';
 import { findRegisteredSquats } from './online/registered-squat.js';
 import { defaultCachePath, loadCache } from './online/cache.js';
 import { fetchPackument, fetchWeeklyDownloads } from './online/registry-client.js';
+import type { DownloadCountsResult } from './online/registry-client.js';
 
 // Every check runs against one shared corpus + config + delta, in a fixed
 // order (RuleId's own declaration order in types.ts) so a scan's finding
@@ -213,27 +214,66 @@ const CREATED_TTL_MS: number | null = null; // a package's creation date never c
 // roughly matching the per-request budget SCAN_TIMEOUT_MS already sets.
 const SCAN_BACKOFF_CAP_MS = 8_000;
 
-async function cachedFetchWeeklyDownloads(names: string[]): Promise<Map<string, number>> {
+async function cachedFetchWeeklyDownloads(names: string[]): Promise<DownloadCountsResult> {
   const store = sharedCache();
-  const result = new Map<string, number>();
+  const counts = new Map<string, number>();
   const misses: string[] = [];
   for (const name of names) {
     const hit = store.get(`downloads:${name}`);
     if (typeof hit === 'number') {
-      result.set(name, hit);
+      counts.set(name, hit);
     } else {
       misses.push(name);
     }
   }
   if (misses.length > 0) {
     const fetched = await fetchWeeklyDownloads(misses, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
-    for (const [name, count] of fetched) {
-      result.set(name, count);
+    for (const [name, count] of fetched.counts) {
+      counts.set(name, count);
       store.set(`downloads:${name}`, count, DOWNLOADS_TTL_MS);
     }
+    // A confirmed no-record answer (registry-client.ts's DownloadCountsResult
+    // -- npm answered and explicitly said it has no download history for
+    // this name) is a real, timely fact about npm's rolling weekly window,
+    // not a gap in what we know, so it is cached and expires exactly like a
+    // real count: DOWNLOADS_TTL_MS, not withheld the way cachedFetchPackument
+    // withholds a missing creation date below. Once cached as 0, it is
+    // deliberately indistinguishable from an actual zero-download week --
+    // that is the resolved answer, not a placeholder for one.
+    //
+    // Guarded on `!counts.has(name)`: fetched.counts is authoritative and
+    // must never be overwritten by fetched.noRecord. readDownloadCounts
+    // now intersects noRecord with what was actually requested, so this
+    // should not fire against npm's real behavior -- but a malformed
+    // downloads response is exactly the case a fetch layer has to be
+    // defensive about, not trusting, and the cost of getting this wrong is
+    // a real count silently replaced by a fabricated 0 that then persists
+    // in the cache for a full day.
+    for (const name of fetched.noRecord) {
+      if (counts.has(name)) {
+        continue;
+      }
+      counts.set(name, 0);
+      store.set(`downloads:${name}`, 0, DOWNLOADS_TTL_MS);
+    }
+    // Anything neither counted nor confirmed no-record is left out of
+    // both the cache and the returned counts: unresolved, not a signal
+    // either way. In production this is rare -- registry-client.ts's own
+    // sentinel probe (see probeDownloadsApiHealth) resolves a single-name
+    // 404 (scoped or unscoped) into a confirmed `noRecord` entry before
+    // it ever reaches here, or makes the whole fetchWeeklyDownloads call
+    // throw (caught above, per-name results discarded, an
+    // online-check-unreachable diagnostic raised by the check instead);
+    // a name landing here at all means the upstream fetch had a
+    // defensive, malformed-bulk-response-shaped gap, not an unresolved
+    // 404. Returning an always-empty noRecord here is correct, not a
+    // shortcut -- every name this function could confirm as no-record has
+    // already been folded into `counts` above, so by the time a caller
+    // sees this result, a name in `counts` may be a real count OR a
+    // resolved zero, and a name in neither is still unresolved.
   }
   store.save();
-  return result;
+  return { counts, noRecord: new Set() };
 }
 
 async function cachedFetchPackument(name: string): Promise<{ createdAt: string | null } | null> {

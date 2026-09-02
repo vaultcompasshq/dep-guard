@@ -15,12 +15,13 @@
 // not a permanent constant -- refine it via the dogfood harness's --online
 // mode.
 
+import type { DownloadCountsResult } from './registry-client.js';
 import type { Diagnostic, Finding } from '../types.js';
 
 export const ASYMMETRY_DOWNLOAD_FLOOR = 2_000;
 
 export interface AsymmetryDeps {
-  fetchWeeklyDownloads(names: string[]): Promise<Map<string, number>>;
+  fetchWeeklyDownloads(names: string[]): Promise<DownloadCountsResult>;
 }
 
 export async function applyTyposquatAsymmetry(
@@ -33,9 +34,9 @@ export async function applyTyposquatAsymmetry(
     return;
   }
 
-  let counts: Map<string, number>;
+  let downloadsResult: DownloadCountsResult;
   try {
-    counts = await deps.fetchWeeklyDownloads(candidates.map((f) => f.packageName));
+    downloadsResult = await deps.fetchWeeklyDownloads(candidates.map((f) => f.packageName));
   } catch (err) {
     diagnostics.push({
       code: 'online-check-unreachable',
@@ -47,8 +48,38 @@ export async function applyTyposquatAsymmetry(
   }
 
   for (const finding of candidates) {
-    const downloads = counts.get(finding.packageName);
-    if (downloads === undefined || downloads >= ASYMMETRY_DOWNLOAD_FLOOR) {
+    // Three states, not two -- see DownloadCountsResult in
+    // registry-client.ts. A real count is used as-is. A name in
+    // `noRecord` means the downloads fetch confirmed it has no download
+    // history for this exact name -- either a null entry in a bulk
+    // response, or a single-name 404 that registry-client.ts's own
+    // sentinel probe confirmed was genuine rather than a symptom of a
+    // broken downloadsApi -- a stronger unpopularity signal than a low
+    // recorded count, so it is treated as zero rather than left at the
+    // offline severity. A name in neither is unresolved -- as a matter of
+    // what this function could establish it reaches here only if the
+    // upstream fetch had a defensive, malformed-response-shaped gap,
+    // since a single-name 404 is resolved (into `noRecord`) or turned
+    // into a thrown, diagnosed failure before it would ever otherwise
+    // land here -- and is left alone exactly as it would have been before
+    // this fix -- an unresolved absence is not evidence the candidate is
+    // unpopular, regardless of which upstream implementation produced it.
+    // In the actual production wiring (scan.ts's
+    // cachedFetchWeeklyDownloads), `noRecord` always arrives here empty:
+    // the cache wrapper has already folded any confirmed no-record answer
+    // into `counts` as a literal 0 before this function ever sees it, so
+    // this branch is exercised by this file's own tests, not by a real
+    // scan.
+    const fromCounts = downloadsResult.counts.get(finding.packageName);
+    let downloads: number;
+    if (fromCounts !== undefined) {
+      downloads = fromCounts;
+    } else if (downloadsResult.noRecord.has(finding.packageName)) {
+      downloads = 0;
+    } else {
+      continue;
+    }
+    if (downloads >= ASYMMETRY_DOWNLOAD_FLOOR) {
       continue;
     }
     finding.severity = 'high';
