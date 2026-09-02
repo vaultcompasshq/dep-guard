@@ -73,11 +73,11 @@ extremely popular target -- see below.
 Off by default, permanently -- this tool reads manifests and lockfiles
 offline by design, and network calls do not belong in a hook or an MCP
 propose-time check that has to answer fast. Turn `--online` on for CI or a
-scheduled audit, where the latency cost is irrelevant, either via the flag
-or `.dep-guard.json`'s `"online": true`. Note that `.dep-guard.json`'s
-`"online": true` applies to every invocation, including pre-commit hooks,
-so a latency-sensitive setup may prefer passing `--online` only in CI
-rather than turning it on for every commit.
+scheduled audit, where the latency cost is irrelevant. The flag turns them
+on for one run; `"online": true` in `.dep-guard.json` turns them on for
+every invocation, pre-commit hooks included, which is why a
+latency-sensitive setup is usually better off passing `--online` in CI
+alone.
 
 Two checks, both backed by npm's public downloads and registry metadata
 APIs, both degrading to the offline result with a diagnostic on any network
@@ -111,8 +111,8 @@ dep-guard check <name> --corpus-dir <dir>      # is this one safe to add
 `--format json` prints a single result object on stdout with diagnostics on
 stderr, so a consumer can parse stdout alone.
 
-Exit codes are the contract: **0** clean, **1** findings at or above the
-threshold, **2** something went wrong. A gate that cannot read its own
+Exit codes are the contract: 0 clean, 1 findings at or above the threshold,
+2 something went wrong. A gate that cannot read its own
 inputs fails closed rather than reporting clean.
 
 Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
