@@ -36,14 +36,20 @@ jobs:
     # Runs before checkout on purpose: GITHUB_REF and github.event_name are
     # populated from the trigger itself, not from anything in the tree, so
     # this needs nothing checked out to decide. workflow_dispatch has no
-    # branch restriction of its own (unlike the tag-push trigger, which can
-    # only ever fire from whatever ref the tag points at), so a manual run
-    # started from any other branch would build and publish THAT branch's
-    # code under the version its package.json files happen to carry -- an
-    # unreviewed, un-tagged publish. An explicit failing step is used
-    # instead of a job-level "if:" so a maintainer who fat-fingers the
-    # branch dropdown gets a loud, legible error naming the ref, rather
-    # than a run that silently reports "skipped" with no explanation.
+    # branch restriction of its own, so a manual run started from any other
+    # branch would build and publish THAT branch's code under the version
+    # its package.json files happen to carry -- an unreviewed, un-tagged
+    # publish. An explicit failing step is used instead of a job-level "if:"
+    # so a maintainer who fat-fingers the branch dropdown gets a loud,
+    # legible error naming the ref, rather than a run that silently reports
+    # "skipped" with no explanation.
+    #
+    # The tag-push trigger is NOT inherently restricted to main the way the
+    # comment here used to imply: "git tag v0.1.0 <any-commit> && git push
+    # --tags" fires this workflow from any commit, on or off main, with a
+    # real tag and matching GitHub Release. See the ancestry check in
+    # "Assert core and cli versions match" below for how the tag path
+    # guards against that.
     - name: Refuse workflow_dispatch from anywhere but main
       if: github.event_name == 'workflow_dispatch'
       run: |
@@ -133,7 +139,7 @@ jobs:
     # describing a publish that never actually matched the tag. Checking
     # BEFORE publish, not after, is the entire point of this step.
     #
-    # Two assertions, both fatal:
+    # Three assertions, all fatal:
     #   1. core and cli versions must be EQUAL. The two packages are
     #      published in lockstep on purpose -- see the comment on the
     #      publish loop below for why a cli release without a matching
@@ -142,14 +148,31 @@ jobs:
     #      version. workflow_dispatch has no tag at all (GITHUB_REF_TYPE
     #      is "branch"), so this half only applies to a tag push, and the
     #      dispatch path is covered instead by the ref guard above.
+    #   3. when this run is tag-triggered, the tagged commit must be an
+    #      ancestor of origin/main. "git tag v0.1.0 <any-commit> && git push
+    #      --tags" fires this workflow from any commit, on or off main; a
+    #      tag on a side branch would otherwise walk straight into an OIDC
+    #      trusted publish around branch protection, with a real tag and a
+    #      matching GitHub Release to show for it.
     - name: Assert core and cli versions match each other, and the tag if there is one
       run: |
         set -euo pipefail
         CORE_VERSION="$(node -p "require('./packages/core/package.json').version")"
         CLI_VERSION="$(node -p "require('./packages/cli/package.json').version")"
 
+        # GITHUB_REF_NAME is always set by Actions (a branch name on
+        # workflow_dispatch, a tag name on a tag push), so a ${VAR:-fallback}
+        # here would never actually trigger -- a dispatch run would read
+        # "tag is main", which is not even true (a dispatch run has no tag
+        # at all). Read GITHUB_REF_TYPE instead of guessing from emptiness.
+        if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+          REF_DESCRIPTION="tag ${GITHUB_REF_NAME}"
+        else
+          REF_DESCRIPTION="branch ${GITHUB_REF_NAME} (not a tag push)"
+        fi
+
         if [[ "${CORE_VERSION}" != "${CLI_VERSION}" ]]; then
-          echo "::error::Version lockstep broken: packages/core is at ${CORE_VERSION}, packages/cli is at ${CLI_VERSION}, tag is ${GITHUB_REF_NAME:-<none, not a tag push>}. core and cli must always carry the same version. Refusing to publish."
+          echo "::error::Version lockstep broken: packages/core is at ${CORE_VERSION}, packages/cli is at ${CLI_VERSION}, ${REF_DESCRIPTION}. core and cli must always carry the same version. Refusing to publish."
           exit 1
         fi
 
@@ -159,9 +182,28 @@ jobs:
             echo "::error::Tag mismatch: pushed tag is ${GITHUB_REF_NAME}, but packages/core and packages/cli are both at version ${CORE_VERSION} (expected tag ${EXPECTED_TAG}). A mistyped tag would otherwise publish the wrong version irreversibly and describe it in a GitHub Release as though it matched. Refusing to publish."
             exit 1
           fi
+
+          # The checkout step above uses actions/checkout's default
+          # fetch-depth (1), so this job's working copy holds only the
+          # tagged commit itself, with no history connecting it to
+          # origin/main and no origin/main ref at all yet. Unshallow first
+          # (only when the repo actually is shallow -- calling --unshallow
+          # on a complete repo is a hard error, and nothing above this step
+          # promises which one this checkout is), then fetch main by name
+          # into an explicit local ref, since a tag-triggered checkout
+          # never sets one up on its own.
+          if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+            git fetch --unshallow origin
+          fi
+          git fetch origin main:refs/remotes/origin/main
+
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not an ancestor of origin/main. A tag pushed at a commit off main would otherwise walk straight into an OIDC trusted publish around branch protection. Refusing to publish."
+            exit 1
+          fi
         fi
 
-        echo "Version check passed: core=${CORE_VERSION} cli=${CLI_VERSION} ref_type=${GITHUB_REF_TYPE} ref_name=${GITHUB_REF_NAME:-<none>}"
+        echo "Version check passed: core=${CORE_VERSION} cli=${CLI_VERSION} ref_type=${GITHUB_REF_TYPE} ref_name=${GITHUB_REF_NAME}"
 
     # This is the only pre-publish step that executes the shipped artifact
     # in the shipped layout -- every gate above this point checks the
@@ -193,11 +235,26 @@ jobs:
         pnpm --dir packages/core pack --pack-destination "${PACK_DIR}"
         pnpm --dir packages/cli pack --pack-destination "${PACK_DIR}"
 
+        # Exact filenames, computed from the versions the assert step above
+        # already validated, not a glob: "vaultcompass-dep-guard-*.tgz"
+        # also matches "vaultcompass-dep-guard-core-*.tgz" (npm dedupes the
+        # resulting duplicate argument today, harmlessly, but a release
+        # gate should never depend on that rather than on naming its inputs
+        # exactly).
+        CORE_VERSION="$(node -p "require('./packages/core/package.json').version")"
+        CLI_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+        CORE_TARBALL="${PACK_DIR}/vaultcompass-dep-guard-core-${CORE_VERSION}.tgz"
+        CLI_TARBALL="${PACK_DIR}/vaultcompass-dep-guard-${CLI_VERSION}.tgz"
+
         INSTALL_DIR="$(mktemp -d)"
-        npm init -y --prefix "${INSTALL_DIR}" >/dev/null
-        npm install --prefix "${INSTALL_DIR}" \
-          "${PACK_DIR}"/vaultcompass-dep-guard-core-*.tgz \
-          "${PACK_DIR}"/vaultcompass-dep-guard-*.tgz
+        # "npm install --prefix" creates its own package.json in
+        # INSTALL_DIR the first time it runs there, so no separate init
+        # step is needed. "npm init -y --prefix" must NOT be used for this
+        # -- npm init ignores --prefix entirely and templates into
+        # process.cwd() instead, so it silently writes/normalizes a
+        # package.json in THIS CHECKOUT'S ROOT mid-release rather than in
+        # INSTALL_DIR, which is never what this step wants.
+        npm install --prefix "${INSTALL_DIR}" "${CORE_TARBALL}" "${CLI_TARBALL}"
 
         BIN="${INSTALL_DIR}/node_modules/.bin/dep-guard"
 
