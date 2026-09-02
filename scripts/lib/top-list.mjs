@@ -201,7 +201,12 @@ export async function measureDownloads({
   for (const batch of splitDownloadBatches(unscoped, DOWNLOADS_BATCH_SIZE)) {
     const url = `${downloadsApi}/downloads/point/last-week/${batch.join(',')}`;
     const payload = await fetchImpl(url, fetchOptions);
-    const answered = readDownloadCounts(payload, batch);
+    // readDownloadCounts returns { counts, noRecord } (core's shape); this
+    // module has only ever needed the numeric counts, so noRecord is
+    // discarded here -- a name absent from `counts` is already recorded
+    // as unanswered (null) below, whether that is because npm confirmed
+    // no record or because the response simply did not mention it.
+    const answered = readDownloadCounts(payload, batch).counts;
     for (const name of batch) {
       // null rather than undefined: a name the API answered nothing for is
       // recorded as asked-and-unanswered, so a resumed run does not ask
@@ -232,7 +237,7 @@ export async function measureDownloads({
       // already spent an hour.
       payload = null;
     }
-    const answered = payload === null ? new Map() : readDownloadCounts(payload, [name]);
+    const answered = payload === null ? new Map() : readDownloadCounts(payload, [name]).counts;
     record(name, answered.has(name) ? answered.get(name) : null);
     done += 1;
     sinceCheckpoint += 1;

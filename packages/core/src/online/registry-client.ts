@@ -6,10 +6,12 @@
 // fast and degrade rather than hang, per docs/INVARIANTS.md's rule that
 // online checks are the one deliberate exception to failing closed -- a
 // network problem degrades to the offline result with a diagnostic, never
-// blocks. scripts/lib/registry.mjs is refactored in a later task to import
-// this instead of maintaining a second implementation, the same shape as
-// the corpus builder already imports BloomFilter from the built core
-// rather than reimplementing it.
+// blocks. scripts/lib/registry.mjs now imports fetchJson, DOWNLOADS_BATCH_SIZE
+// and readDownloadCounts from here instead of maintaining second copies,
+// the same shape as the corpus builder already imports BloomFilter from
+// the built core rather than reimplementing it. splitDownloadBatches stays
+// duplicated in scripts/lib/registry.mjs on purpose -- see the comment
+// there -- because this file keeps its own copy private.
 
 export const USER_AGENT = 'dep-guard (+https://github.com/vaultcompasshq/dep-guard)';
 export const DEFAULT_DOWNLOADS_API = 'https://api.npmjs.org';
@@ -177,7 +179,7 @@ export interface DownloadCountsResult {
   noRecord: Set<string>;
 }
 
-function readDownloadCounts(payload: unknown, requested: string[]): DownloadCountsResult {
+export function readDownloadCounts(payload: unknown, requested: string[]): DownloadCountsResult {
   const counts = new Map<string, number>();
   const noRecord = new Set<string>();
   if (payload === null || typeof payload !== 'object') {

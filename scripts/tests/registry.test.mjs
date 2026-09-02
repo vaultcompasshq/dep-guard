@@ -207,8 +207,13 @@ describe('splitDownloadBatches', () => {
 });
 
 describe('readDownloadCounts', () => {
+  // readDownloadCounts is now imported from core's built output (see the
+  // comment above the import above) rather than a second, script-local
+  // implementation, so this suite is exercising core's function through
+  // this file's own re-export -- and its return shape follows core's:
+  // { counts, noRecord }, not a bare Map.
   it('reads a bulk response', () => {
-    const counts = readDownloadCounts(
+    const { counts } = readDownloadCounts(
       { react: { downloads: 10 }, vue: { downloads: 4 }, unheard: null },
       ['react', 'vue', 'unheard']
     );
@@ -219,7 +224,21 @@ describe('readDownloadCounts', () => {
   });
 
   it('reads the single-name response shape, which is the record itself', () => {
-    const counts = readDownloadCounts({ downloads: 99, package: '@babel/core' }, ['@babel/core']);
+    const { counts } = readDownloadCounts({ downloads: 99, package: '@babel/core' }, ['@babel/core']);
     expect(counts.get('@babel/core')).toBe(99);
+  });
+
+  // The fix this consolidation carries into this script: the old
+  // script-local copy read every key Object.entries(payload) offered,
+  // with no check against what was actually requested. A response key
+  // outside the requested batch must never be reported, whatever the
+  // server put in the body.
+  it('never reports a name that was not in the requested batch', () => {
+    const { counts, noRecord } = readDownloadCounts(
+      { react: { downloads: 10 }, 'not-requested': { downloads: 999 } },
+      ['react']
+    );
+    expect([...counts.keys()]).toEqual(['react']);
+    expect(noRecord.has('not-requested')).toBe(false);
   });
 });
