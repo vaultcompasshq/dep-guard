@@ -1,0 +1,234 @@
+name: dep-guard
+description: Scan dependency changes for supply-chain risk and upload the result as SARIF. Requires a prior actions/checkout of your repository.
+author: Vault & Compass LLC
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  version:
+    description: |
+      npm dist-tag or semver for @vaultcompass/dep-guard. Validated against
+      `^(latest|next|beta|[0-9A-Za-z.+-]{1,64})$` so an attacker-controlled
+      workflow input cannot inject an npm tag or a shell fragment.
+    required: false
+    default: latest
+  path:
+    description: |
+      Path to scan, relative to the workspace root. Must be 1..256 characters
+      of `[A-Za-z0-9._/-]` and must not contain `..`, so it cannot escape
+      GITHUB_WORKSPACE. (The charset is checked with `+` plus a separate
+      length guard, never `{1,256}`: BSD regex sets RE_DUP_MAX to 255, so
+      `{1,256}` fails to compile on macOS and rejects every path including
+      `.`.)
+    required: false
+    default: .
+  online:
+    description: |
+      Set to `true` to enable the registry-backed checks (unknown-package
+      resolution, popularity asymmetry, registered-squat). Requires network
+      access from the runner. Closed enum: `true` or `false`.
+    required: false
+    default: 'false'
+  fail-on:
+    description: |
+      Severity threshold that fails the run: critical, high, medium, low, or
+      none. Closed enum, validated against the same list dep-guard itself
+      accepts. Left unset, dep-guard uses its own default (medium) or
+      whatever .dep-guard.json configures.
+    required: false
+    default: ''
+  sarif-output:
+    description: |
+      Where to write the SARIF file, relative to the workspace root. Same
+      path rules as `path`.
+    required: false
+    default: dep-guard-results.sarif
+  upload-sarif:
+    description: |
+      Set to `false` to write the SARIF file without uploading it, for a
+      repository without code scanning enabled (uploading there fails the
+      job with a permissions error that has nothing to do with the scan).
+    required: false
+    default: 'true'
+
+outputs:
+  results-file:
+    description: Absolute path to the written SARIF file
+    value: ${{ steps.run.outputs.results_file }}
+  exit-code:
+    description: dep-guard's own exit code (0 clean, 1 blocking findings, 2 could not run)
+    value: ${{ steps.run.outputs.exit_code }}
+
+runs:
+  using: composite
+  steps:
+    # Consumers must run actions/checkout on their repository BEFORE this action.
+
+    - name: Setup Node.js
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      with:
+        node-version: '22'
+
+    # Every input is validated before it can reach a shell.
+    #
+    # The reason this is a step of its own rather than inline guards in the
+    # run script: GitHub substitutes `${{ inputs.* }}` into the script text
+    # BEFORE the shell ever parses it, so no amount of quoting in the script
+    # body can contain a hostile value. Values are passed through `env:`
+    # instead, which the shell expands at runtime, and validated there.
+    - name: Validate inputs
+      shell: bash
+      env:
+        DG_VERSION: ${{ inputs.version }}
+        DG_PATH: ${{ inputs.path }}
+        DG_ONLINE: ${{ inputs.online }}
+        DG_FAIL_ON: ${{ inputs.fail-on }}
+        DG_SARIF_OUTPUT: ${{ inputs.sarif-output }}
+        DG_UPLOAD: ${{ inputs.upload-sarif }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! "${DG_VERSION}" =~ ^(latest|next|beta|[0-9A-Za-z.+-]{1,64})$ ]]; then
+          printf '::error::dep-guard: invalid `version` input: %q\n' "${DG_VERSION}"
+          printf '::error::Allowed: latest | next | beta | semver-like (1..64 chars of [0-9A-Za-z.+-])\n'
+          exit 1
+        fi
+
+        case "${DG_ONLINE}" in
+          true|false) ;;
+          *)
+            printf '::error::dep-guard: invalid `online` input: %q\n' "${DG_ONLINE}"
+            printf '::error::Allowed: true | false\n'
+            exit 1
+            ;;
+        esac
+
+        case "${DG_UPLOAD}" in
+          true|false) ;;
+          *)
+            printf '::error::dep-guard: invalid `upload-sarif` input: %q\n' "${DG_UPLOAD}"
+            printf '::error::Allowed: true | false\n'
+            exit 1
+            ;;
+        esac
+
+        # Empty means "do not pass --fail-on at all", so dep-guard's own
+        # default or the repository's .dep-guard.json decides. Any other
+        # value has to be one dep-guard accepts, checked here rather than
+        # left to fail deeper in with a less obvious message.
+        case "${DG_FAIL_ON}" in
+          ''|critical|high|medium|low|none) ;;
+          *)
+            printf '::error::dep-guard: invalid `fail-on` input: %q\n' "${DG_FAIL_ON}"
+            printf '::error::Allowed: critical | high | medium | low | none\n'
+            exit 1
+            ;;
+        esac
+
+        # path / sarif-output: relative, inside the workspace. No `..`
+        # segments, no leading `/`.
+        #
+        # The charset check uses `+` and a separate length guard, NOT
+        # `{1,256}`: macOS bash uses a BSD regex engine with RE_DUP_MAX 255,
+        # where `{1,256}` fails to compile and the match then rejects every
+        # value, including the default `.`. scripts/tests/action-path-validation.test.mjs
+        # keeps that regression from coming back.
+        validate_path() {
+          local name="$1"
+          local value="$2"
+          if [[ ! "${value}" =~ ^[A-Za-z0-9._/-]+$ ]] || (( ${#value} > 256 )); then
+            printf '::error::dep-guard: invalid `%s` input: %q\n' "${name}" "${value}"
+            printf '::error::Allowed: 1..256 chars of [A-Za-z0-9._/-]\n'
+            exit 1
+          fi
+          if [[ "${value}" == *".."* ]]; then
+            printf '::error::dep-guard: `%s` must not contain `..`: %q\n' "${name}" "${value}"
+            exit 1
+          fi
+          if [[ "${value}" == /* ]]; then
+            printf '::error::dep-guard: `%s` must be relative to the workspace: %q\n' "${name}" "${value}"
+            exit 1
+          fi
+        }
+
+        validate_path "path" "${DG_PATH}"
+        validate_path "sarif-output" "${DG_SARIF_OUTPUT}"
+
+    - name: Run dep-guard
+      id: run
+      shell: bash
+      env:
+        DG_VERSION: ${{ inputs.version }}
+        DG_PATH: ${{ inputs.path }}
+        DG_ONLINE: ${{ inputs.online }}
+        DG_FAIL_ON: ${{ inputs.fail-on }}
+        DG_SARIF_OUTPUT: ${{ inputs.sarif-output }}
+      run: |
+        set -uo pipefail
+
+        ROOT="${GITHUB_WORKSPACE}"
+        OUT="${ROOT}/${DG_SARIF_OUTPUT}"
+        mkdir -p "$(dirname "${OUT}")"
+
+        ARGS=(scan "${DG_PATH}" --format sarif)
+        if [[ "${DG_ONLINE}" == "true" ]]; then
+          ARGS+=(--online)
+        else
+          # Explicit rather than merely omitted: a repository whose
+          # .dep-guard.json sets "online": true would otherwise make
+          # network requests from a workflow that did not ask for them.
+          ARGS+=(--no-online)
+        fi
+        if [[ -n "${DG_FAIL_ON}" ]]; then
+          ARGS+=(--fail-on "${DG_FAIL_ON}")
+        fi
+
+        # SARIF goes to stdout and nothing else does, so this redirects
+        # rather than tees: a `tee` of a text banner into a SARIF file is
+        # how a sibling action in this family broke its own upload. There
+        # is no `--` between the package spec and `scan` for the same
+        # family reason: npx forwards it into argv, and commander then
+        # treats it as end-of-options and ignores --format.
+        cd "${ROOT}"
+        npx --yes "@vaultcompass/dep-guard@${DG_VERSION}" "${ARGS[@]}" > "${OUT}"
+        SCAN_STATUS=$?
+
+        echo "results_file=${OUT}" >> "${GITHUB_OUTPUT}"
+        echo "exit_code=${SCAN_STATUS}" >> "${GITHUB_OUTPUT}"
+
+        # Deliberately exits 0 here, whatever dep-guard said. The upload
+        # step below has to run even for a scan that found blocking
+        # findings -- that is the case whose SARIF matters most -- and the
+        # real exit code is re-raised in the last step, after the upload.
+        exit 0
+
+    - name: Upload SARIF
+      if: ${{ inputs.upload-sarif == 'true' }}
+      uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+      with:
+        sarif_file: ${{ steps.run.outputs.results_file }}
+        category: dep-guard
+
+    # The gate, re-raised after the upload so a failing scan still gets its
+    # findings into code scanning. Passes dep-guard's own exit code through
+    # rather than collapsing every non-zero to 1: 2 means dep-guard could
+    # not run its checks at all, which is a different fact from "there are
+    # blocking findings" and must not be reported as one. This is the same
+    # rule the generated pre-commit hook follows.
+    - name: Report dep-guard result
+      shell: bash
+      env:
+        DG_EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+      run: |
+        set -euo pipefail
+        if [[ "${DG_EXIT_CODE}" == "0" ]]; then
+          echo "dep-guard: no blocking findings."
+          exit 0
+        fi
+        if [[ "${DG_EXIT_CODE}" == "2" ]]; then
+          printf '::error::dep-guard could not complete its checks (exit 2). This is not a clean scan.\n'
+        else
+          printf '::error::dep-guard found blocking findings (exit %s).\n' "${DG_EXIT_CODE}"
+        fi
+        exit "${DG_EXIT_CODE}"

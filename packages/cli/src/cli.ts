@@ -11,6 +11,7 @@ import { Command, CommanderError } from 'commander';
 import { checkSingle, DepGuardError, FAIL_ON_LEVELS, scan } from '@vaultcompass/dep-guard-core';
 import type { FailOn, ScanMode, ScanResult } from '@vaultcompass/dep-guard-core';
 import { renderDiagnosticLine, renderText, sanitizeText } from './output-text.js';
+import { renderSarif } from './output-sarif.js';
 import { HOOK_MANAGERS, initCommand } from './init.js';
 import type { HookManager } from './init.js';
 
@@ -50,7 +51,9 @@ const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string };
 // is the "fails closed on garbage but says nothing useful" behavior this
 // validation exists to catch before it ever reaches core.
 
-type OutputFormat = 'json' | 'text';
+type OutputFormat = 'json' | 'text' | 'sarif';
+
+const OUTPUT_FORMATS: readonly OutputFormat[] = ['text', 'json', 'sarif'];
 
 // Both commands take the same pair of online flags, declared once so the
 // two can never drift into describing the same switch differently.
@@ -106,10 +109,12 @@ function parseManager(value: string | undefined): HookManager | undefined {
 }
 
 function parseFormat(value: string): OutputFormat {
-  if (value !== 'json' && value !== 'text') {
-    throw new CliUsageError(`--format must be "json" or "text" (got "${value}")`);
+  if (!(OUTPUT_FORMATS as readonly string[]).includes(value)) {
+    throw new CliUsageError(
+      `--format must be one of ${OUTPUT_FORMATS.map((f) => `"${f}"`).join(', ')} (got "${value}")`
+    );
   }
-  return value;
+  return value as OutputFormat;
 }
 
 interface ScanCliOptions {
@@ -157,8 +162,19 @@ function resolveMode(options: ScanCliOptions): ScanMode {
 // inline as part of the one human-facing report on stdout. This split is
 // deliberate, not an inconsistency to "fix" into one stream or the other.
 function emit(result: ScanResult, format: OutputFormat): void {
-  if (format === 'json') {
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (format === 'json' || format === 'sarif') {
+    // SARIF joins JSON on the machine-readable side of this split for the
+    // same reason and with the same consequence: stdout is one parseable
+    // document and nothing else, so it can be redirected straight into a
+    // file an uploader consumes. Diagnostics still have to reach a human,
+    // so they go to stderr. SARIF has no place to put them that a code
+    // scanning consumer would surface -- a diagnostic is explicitly not a
+    // finding (docs/INVARIANTS.md, "Diagnostics never change the exit
+    // code"), and turning one into a SARIF result to make it visible
+    // would be inventing a finding for something the engine said it could
+    // not judge.
+    const body = format === 'json' ? JSON.stringify(result) : renderSarif(result, pkg.version);
+    process.stdout.write(`${body}\n`);
     for (const diagnostic of result.run.diagnostics) {
       process.stderr.write(`${renderDiagnosticLine(diagnostic)}\n`);
     }
@@ -221,7 +237,7 @@ function buildProgram(): Command {
     .argument('[path]', 'repository or directory to scan', '.')
     .option('--staged', 'compare the git index against HEAD')
     .option('--base <ref>', 'compare the working tree against a git ref')
-    .option('--format <format>', 'output format: json or text', 'text')
+    .option('--format <format>', 'output format: text, json, or sarif', 'text')
     .option(
       '--fail-on <level>',
       'severity threshold that fails the run: critical, high, medium, low, or none'
@@ -253,7 +269,7 @@ function buildProgram(): Command {
     .command('check')
     .description('Check whether a single package name is safe to add')
     .argument('<name>', 'package name to check')
-    .option('--format <format>', 'output format: json or text', 'text')
+    .option('--format <format>', 'output format: text, json, or sarif', 'text')
     .option(
       '--fail-on <level>',
       'severity threshold that fails the run: critical, high, medium, low, or none'
