@@ -33,6 +33,26 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
 
     steps:
+    # Runs before checkout on purpose: GITHUB_REF and github.event_name are
+    # populated from the trigger itself, not from anything in the tree, so
+    # this needs nothing checked out to decide. workflow_dispatch has no
+    # branch restriction of its own (unlike the tag-push trigger, which can
+    # only ever fire from whatever ref the tag points at), so a manual run
+    # started from any other branch would build and publish THAT branch's
+    # code under the version its package.json files happen to carry -- an
+    # unreviewed, un-tagged publish. An explicit failing step is used
+    # instead of a job-level "if:" so a maintainer who fat-fingers the
+    # branch dropdown gets a loud, legible error naming the ref, rather
+    # than a run that silently reports "skipped" with no explanation.
+    - name: Refuse workflow_dispatch from anywhere but main
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        set -euo pipefail
+        if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+          echo "::error::Manual workflow_dispatch run from '${GITHUB_REF}', not 'refs/heads/main'. A manual dispatch from any other branch would build and publish that branch's code. Re-run from main, or push a 'v*' tag instead."
+          exit 1
+        fi
+
     - name: Checkout code
       uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -104,6 +124,45 @@ jobs:
     - name: Check the corpus reaches the packed tarball
       run: node scripts/check-corpus-packed.mjs
 
+    # Everything above this point can fail and be re-run harmlessly; this
+    # step exists because everything below it cannot. Tag resolution used
+    # to happen AFTER "Publish to npm" (see "Resolve release tag" below),
+    # so a mistyped tag published whatever version core and cli's
+    # package.json files happened to carry -- irreversibly, since a
+    # publish cannot be taken back -- and then produced a GitHub Release
+    # describing a publish that never actually matched the tag. Checking
+    # BEFORE publish, not after, is the entire point of this step.
+    #
+    # Two assertions, both fatal:
+    #   1. core and cli versions must be EQUAL. The two packages are
+    #      published in lockstep on purpose -- see the comment on the
+    #      publish loop below for why a cli release without a matching
+    #      core bump is not a smaller mistake, it is a silent one.
+    #   2. when this run is tag-triggered, the tag must read "v" + that
+    #      version. workflow_dispatch has no tag at all (GITHUB_REF_TYPE
+    #      is "branch"), so this half only applies to a tag push, and the
+    #      dispatch path is covered instead by the ref guard above.
+    - name: Assert core and cli versions match each other, and the tag if there is one
+      run: |
+        set -euo pipefail
+        CORE_VERSION="$(node -p "require('./packages/core/package.json').version")"
+        CLI_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+
+        if [[ "${CORE_VERSION}" != "${CLI_VERSION}" ]]; then
+          echo "::error::Version lockstep broken: packages/core is at ${CORE_VERSION}, packages/cli is at ${CLI_VERSION}, tag is ${GITHUB_REF_NAME:-<none, not a tag push>}. core and cli must always carry the same version. Refusing to publish."
+          exit 1
+        fi
+
+        if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+          EXPECTED_TAG="v${CORE_VERSION}"
+          if [[ "${GITHUB_REF_NAME}" != "${EXPECTED_TAG}" ]]; then
+            echo "::error::Tag mismatch: pushed tag is ${GITHUB_REF_NAME}, but packages/core and packages/cli are both at version ${CORE_VERSION} (expected tag ${EXPECTED_TAG}). A mistyped tag would otherwise publish the wrong version irreversibly and describe it in a GitHub Release as though it matched. Refusing to publish."
+            exit 1
+          fi
+        fi
+
+        echo "Version check passed: core=${CORE_VERSION} cli=${CLI_VERSION} ref_type=${GITHUB_REF_TYPE} ref_name=${GITHUB_REF_NAME:-<none>}"
+
     # npm Trusted Publishing (OIDC): no NPM_TOKEN, auth via id-token: write
     # plus a trusted publisher configured per @vaultcompass/* package.
     # Requires npm CLI >= 11.5.1 (Node >= 22.14.0). Pin major 11 - npm@12
@@ -118,6 +177,17 @@ jobs:
     # partway through. Skips a package already on the registry at its
     # current version, so a failed mid-release can be re-run without
     # erroring on a duplicate version.
+    #
+    # That skip is correct for exactly one situation -- re-running a
+    # release that failed partway, where the packages already published
+    # are done and only the rest need to happen -- and is a silent no-op
+    # for a different one it must never be asked to handle: a corrective
+    # re-release of a version that already went out broken. npm does not
+    # allow re-publishing a version once it exists, broken or not, so
+    # there is no version number this skip can be told to overwrite; the
+    # only way to ship a fix is a NEW version, bumped in both packages
+    # together (see the lockstep assertion above). A burned version number
+    # is never re-released -- it is superseded by the next one.
     - name: Publish to npm
       run: |
         set -euo pipefail
