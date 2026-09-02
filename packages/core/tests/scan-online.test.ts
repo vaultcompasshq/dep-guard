@@ -416,13 +416,53 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
       corpusDir: FIXTURE_CORPUS,
       online: true,
     });
-    expect(online.findings.some((f) => f.ruleId === 'unknown-package')).toBe(false);
-    // The exit code follows the stood-down state: nothing else in this
-    // scan blocks, so the run that was failing now passes. Asserting the
-    // finding is gone without asserting this would leave the gate free to
-    // keep blocking on a finding it no longer reports.
+    // The finding SURVIVES, downgraded to low. The corpus really is stale
+    // about this name and that is worth saying; what changes is that it
+    // no longer blocks.
+    const downgraded = online.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(downgraded).toBeDefined();
+    expect(downgraded?.severity).toBe('low');
+    expect(downgraded?.details).toMatchObject({ onlineResolution: 'registry-present' });
+    // The exit code is the behaviour a user actually feels: low sits below
+    // the default medium gate, so the run that was failing now passes
+    // without the finding having been thrown away.
     expect(online.exitCode).toBe(0);
     expect(online.run.blockingMatches).toBe(0);
+    // And it is still in the report, so a JSON or SARIF consumer can see
+    // that dep-guard looked at this name and what it concluded.
+    expect(online.findings.length).toBe(offline.findings.length);
+  });
+
+  test('a downgraded finding keeps the fingerprint the offline scan gave it', async () => {
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: '2020-01-01T00:00:00.000Z',
+      latestVersion: '3.0.0',
+      latestPublishedAt: '2026-08-01T00:00:00.000Z',
+      deprecated: false,
+      unpublished: false,
+      securityHolder: false,
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const offline = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: false,
+    });
+    const online = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    const offlineFinding = offline.findings.find((f) => f.ruleId === 'unknown-package');
+    const onlineFinding = online.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(onlineFinding?.severity).toBe('low');
+    expect(onlineFinding?.fingerprint).toBe(offlineFinding?.fingerprint);
   });
 
   test('standing unknown-package down leaves the typosquat finding for the same name', async () => {
@@ -453,7 +493,7 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
       online: true,
     });
 
-    expect(result.findings.some((f) => f.ruleId === 'unknown-package')).toBe(false);
+    expect(result.findings.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('low');
     const typosquat = result.findings.find((f) => f.ruleId === 'typosquat');
     expect(typosquat).toBeDefined();
     expect(typosquat?.severity).toBe('low');

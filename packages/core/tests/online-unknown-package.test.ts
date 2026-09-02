@@ -94,7 +94,7 @@ const SECURITY_HOLDER = {
 };
 
 describe('resolveUnknownPackages', () => {
-  test('a packument that exists stands the finding down', async () => {
+  test('a packument that exists downgrades the finding to low rather than removing it', async () => {
     const diagnostics: Diagnostic[] = [];
     const findings = [unknownPackageFinding('published-last-tuesday')];
 
@@ -106,14 +106,48 @@ describe('resolveUnknownPackages', () => {
       freshDeadline()
     );
 
-    expect(result.some((f) => f.ruleId === 'unknown-package')).toBe(false);
+    const finding = result.find((f) => f.ruleId === 'unknown-package');
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('low');
+    expect(finding?.details).toMatchObject({ onlineResolution: 'registry-present' });
+    expect(finding?.message).toContain('registry');
     expect(diagnostics).toHaveLength(0);
   });
 
-  test('standing an unknown-package finding down leaves every other rule alone', async () => {
-    // The whole point of standing down rather than suppressing: the name
-    // existing on npm says nothing about whether it is a squat. A
-    // typosquat finding for the SAME package name must survive intact.
+  test('online resolution never removes a finding, whatever the registry says', async () => {
+    // The standing rule for the whole subsystem. Every branch here has to
+    // return the same number of findings it was handed: the offline
+    // checks establish what is reported, and the network only adjusts how
+    // loudly. Driven over every reachable answer rather than one, because
+    // a single branch that removed would be invisible in a test of the
+    // others.
+    const answers = [
+      REAL_PACKAGE,
+      TOMBSTONE,
+      SECURITY_HOLDER,
+      { latestVersion: null, unpublished: false, securityHolder: false },
+      null,
+    ];
+    for (const answer of answers) {
+      const findings = [unknownPackageFinding('some-name'), typosquatFinding('some-name')];
+      const result = await resolveUnknownPackages(
+        findings,
+        makeContext(),
+        { fetchPackument: async () => answer },
+        [],
+        freshDeadline()
+      );
+      expect([answer, result]).toHaveLength(2);
+      expect([answer, result.map((f) => f.ruleId).sort()]).toEqual([
+        answer,
+        ['typosquat', 'unknown-package'],
+      ]);
+    }
+  });
+
+  test('downgrading leaves every other rule alone', async () => {
+    // The name existing on npm says nothing about whether it is a squat.
+    // A typosquat finding for the SAME package name must survive intact.
     const findings = [
       unknownPackageFinding('raect'),
       typosquatFinding('raect'),
@@ -127,10 +161,31 @@ describe('resolveUnknownPackages', () => {
       freshDeadline()
     );
 
-    expect(result.some((f) => f.ruleId === 'unknown-package')).toBe(false);
+    expect(result.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('low');
     const typosquat = result.find((f) => f.ruleId === 'typosquat');
     expect(typosquat).toBeDefined();
     expect(typosquat?.severity).toBe('low');
+    expect(typosquat?.message).toContain('resembles');
+  });
+
+  test('a downgrade does not change the finding fingerprint either', async () => {
+    // Same contract as the escalation. Severity is not hashed, so a
+    // baseline recorded offline still matches after an online run
+    // downgrades the finding.
+    const before = unknownPackageFinding('published-last-tuesday');
+    const beforeFingerprint = fingerprintFinding(before);
+
+    const result = await resolveUnknownPackages(
+      [before],
+      makeContext(),
+      { fetchPackument: async () => REAL_PACKAGE },
+      [],
+      freshDeadline()
+    );
+
+    const after = result.find((f) => f.ruleId === 'unknown-package');
+    expect(after?.severity).toBe('low');
+    expect(fingerprintFinding(after as Omit<Finding, 'fingerprint'>)).toBe(beforeFingerprint);
   });
 
   test('a 404 escalates the finding to critical and says the registry confirmed it', async () => {
@@ -409,11 +464,10 @@ describe('resolveUnknownPackages', () => {
     expect(result.filter((f) => f.severity === 'critical')).toHaveLength(2);
   });
 
-  test('the returned list never grows, and never loses a non-unknown-package finding', async () => {
-    // The standing rule for the whole online subsystem: degrading may
-    // never remove a finding the offline checks established. This is the
-    // one online step that removes findings at all, so it has to be
-    // provably surgical about which.
+  test('no other rule severity is touched, in either direction', async () => {
+    // This step adjusts exactly one rule's severity. A finding from any
+    // other rule must come out with the severity the offline check gave
+    // it, whatever the registry said about the package name they share.
     const findings = [
       unknownPackageFinding('exists-now'),
       typosquatFinding('exists-now'),
@@ -428,6 +482,13 @@ describe('resolveUnknownPackages', () => {
       freshDeadline()
     );
 
-    expect(result.map((f) => f.ruleId).sort()).toEqual(['install-script', 'typosquat']);
+    expect(result.map((f) => f.ruleId).sort()).toEqual([
+      'install-script',
+      'typosquat',
+      'unknown-package',
+    ]);
+    expect(result.find((f) => f.ruleId === 'install-script')?.severity).toBe('high');
+    expect(result.find((f) => f.ruleId === 'typosquat')?.severity).toBe('low');
+    expect(result.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('low');
   });
 });

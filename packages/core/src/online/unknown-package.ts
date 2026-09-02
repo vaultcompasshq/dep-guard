@@ -16,16 +16,32 @@
 // constrained by docs/INVARIANTS.md's degrade rule rather than chosen
 // freely:
 //
-//  - The packument exists. The name is real, so the corpus was merely
-//    stale about it, and the finding stands DOWN -- it is removed from the
-//    results. This is the one place in the whole online subsystem that
-//    removes a finding, and it is allowed only because what it removes is
-//    an assertion the registry has just directly contradicted. It removes
-//    nothing else: whether the name is SUSPICIOUS is the typosquat and
-//    registered-squat rules' question, both of which still run over the
-//    same name and neither of which is touched here. "It exists" and "it
-//    is safe" are different sentences, and only the first one is being
-//    made.
+//  - The packument exists, with a real published version and no
+//    tombstone or security-holder marker. The name is real, so the corpus
+//    was merely stale about it, and the finding is DOWNGRADED to low. It
+//    is not removed. Low sits below the default medium gate, so the
+//    practical thing a user feels -- the commit is no longer blocked --
+//    is the same either way, but the finding stays in the JSON and SARIF
+//    reports, where it says that dep-guard looked at this name and what
+//    it concluded. Removing it would have made "the corpus is stale about
+//    this package" indistinguishable from "there was nothing to say", and
+//    a reader auditing a report cannot tell a check that ran and cleared
+//    a name from a check that never ran at all.
+//
+//    What the downgrade asserts is narrow: the name exists. Whether it is
+//    SUSPICIOUS is the typosquat and registered-squat rules' question,
+//    both of which still run over the same name and neither of which is
+//    touched here. "It exists" and "it is safe" are different sentences,
+//    and only the first one is being made.
+//
+//    Nothing in this file removes a finding. That is the invariant the
+//    whole online subsystem is held to (docs/INVARIANTS.md): the offline
+//    checks decide WHAT is reported and the network only ever adjusts how
+//    loudly. It is worth stating as a property of the code rather than of
+//    each branch, because a single branch that removed would be invisible
+//    in a test of the others -- so there is a test that drives every
+//    reachable registry answer and asserts the list comes back the same
+//    length every time.
 //
 //  - The packument 404s. npm has no such name at all, which is strictly
 //    stronger evidence than absence from a dated corpus: the innocent
@@ -99,6 +115,7 @@ const NOT_PRESENT_REASONS: Record<'tombstone' | 'security-holder' | 'no-usable-v
 // ways the question can fail to be settled -- there is deliberately no
 // value for "resolved, exists", because that finding no longer exists.
 type OnlineResolution =
+  | 'registry-present'
   | 'registry-absent'
   | 'unreachable'
   | 'deadline-exceeded'
@@ -132,6 +149,20 @@ function recordResolution(
     details.onlineResolutionReason = reason;
   }
   finding.details = details;
+}
+
+function registryPresentMessage(name: string, corpusBuiltAt: unknown): string {
+  const corpusNote =
+    typeof corpusBuiltAt === 'string' && corpusBuiltAt.length > 0
+      ? ` built ${corpusBuiltAt}`
+      : '';
+  return (
+    `"${name}" is not in the known-package corpus${corpusNote}, but the npm registry ` +
+    'confirms the name exists and has a published version, so the corpus simply predates ' +
+    'this package. Reported at low severity rather than dropped: existing on npm is not ' +
+    'the same as being the package you meant, and the typosquat and registered-squat rules ' +
+    'judge that separately.'
+  );
 }
 
 function registryAbsentMessage(name: string, corpusBuiltAt: unknown): string {
@@ -188,7 +219,6 @@ export async function resolveUnknownPackages(
     }
   }
 
-  const stoodDown = new Set<Omit<Finding, 'fingerprint'>>();
   let skippedByDeadline = 0;
 
   for (const [name, group] of byName) {
@@ -253,9 +283,13 @@ export async function resolveUnknownPackages(
         continue;
       }
 
-      // The name is real. The corpus was stale, not the manifest.
+      // The name is real. The corpus was stale, not the manifest. The
+      // finding is DOWNGRADED, not removed: see the note above on why
+      // this subsystem never takes a finding away.
       for (const finding of group) {
-        stoodDown.add(finding);
+        finding.severity = 'low';
+        finding.message = registryPresentMessage(name, finding.details?.corpusBuiltAt);
+        recordResolution(finding, 'registry-present');
       }
       continue;
     }
@@ -274,10 +308,10 @@ export async function resolveUnknownPackages(
     });
   }
 
-  // Filtered rather than spliced, and filtered by object identity against
-  // a set this function built, so nothing but a finding this function
-  // itself resolved as present can ever be dropped. Every other finding in
-  // the list -- including a typosquat finding for the very same package
-  // name -- passes through untouched.
-  return stoodDown.size === 0 ? findings : findings.filter((f) => !stoodDown.has(f));
+  // The same list that came in, always. Nothing is filtered, because
+  // nothing here removes a finding: every branch above either adjusts a
+  // severity and a message in place or leaves the finding untouched.
+  // Returning `findings` rather than a copy is what makes that checkable
+  // by reading this one line.
+  return findings;
 }

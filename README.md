@@ -89,19 +89,28 @@ failure rather than blocking:
 - **Unknown package resolution.** The offline unknown-package rule answers
   from a corpus built on one dated registry walk, so every package
   published after that walk reads as unknown to that release, forever.
-  `--online` asks the registry directly. If the name exists, the
-  unknown-package finding stands down: it claimed the name was not on the
-  registry, and the registry just said otherwise. Standing it down is not
-  a clean bill of health and does not touch any other rule -- typosquat
-  and registered-squat still judge whether the name is *suspicious*, which
-  is the question that actually matters. If the registry answers 404, the
-  finding escalates from `high` to `critical`, because the innocent
-  explanation the offline message offers ("published after that date") has
-  just been ruled out. Anything else -- a timeout, a server error, a spent
+  `--online` asks the registry directly. If the name really exists, the
+  unknown-package finding is **downgraded to `low`** rather than removed:
+  `low` is below the default gate, so it stops blocking, but it stays in
+  the report so you can still see that dep-guard looked at the name and
+  what it concluded. That matters for one case in particular: a name
+  registered after the corpus walk but more than thirty days ago falls
+  outside registered-squat's age window, so this `low` finding is the only
+  thing dep-guard says about it. The downgrade asserts only that the name
+  exists; typosquat and registered-squat still judge whether it is
+  *suspicious*, which is the question that actually matters. If the
+  registry answers 404, the finding escalates from `high` to `critical`,
+  because the innocent explanation the offline message offers ("published
+  after that date") has just been ruled out. A 200 is not automatically
+  taken as existence: a name whose versions have all been unpublished, or
+  one npm has seized and replaced with a `0.0.1-security` placeholder,
+  keeps its `high` finding, since npm taking a name over is not evidence
+  the name is safe. Anything else -- a timeout, a server error, a spent
   budget -- leaves the finding exactly as the offline scan made it, still
   blocking, with the reason recorded in its `details`. A network failure
-  never means fewer findings. Names in your configured `internalScopes` or
-  `internalPrefixes` are never sent to the registry at all.
+  never means fewer or quieter findings. Names in your configured
+  `internalScopes` or `internalPrefixes` are never sent to the registry at
+  all.
 - **Typosquat popularity asymmetry.** Escalates a non-alias-list typosquat
   match from `low` to `high` when the candidate's own weekly downloads sit
   below a measured floor of two thousand downloads in the last week --
