@@ -3,9 +3,12 @@
 Blocks risky dependencies at the moment they are added -- before install,
 before commit, before CI.
 
-**Status: pre-release.** The engine and CLI work and are covered by 1038
-tests, but the package name corpus is not built yet, so `--corpus-dir` is
-required and nothing is published to npm. See [Building a corpus](#building-a-corpus).
+**Status: published.** [`@vaultcompass/dep-guard`](https://www.npmjs.com/package/@vaultcompass/dep-guard)
+is on npm, covered by 1038 tests, and works out of the box: the package
+name corpus ships inside
+[`@vaultcompass/dep-guard-core`](https://www.npmjs.com/package/@vaultcompass/dep-guard-core),
+so a scan needs no `--corpus-dir` and no setup. Building your own corpus
+stays possible; see [Building a corpus](#building-a-corpus).
 
 ## Why
 
@@ -145,10 +148,13 @@ only of wildcards are rejected for that reason.
 ## Building a corpus
 
 The corpus is a bloom filter over known npm package names, a popularity
-list, and a list of confusion pairs. It is not bundled yet. Until it is,
-`packages/core/fixtures/corpus` holds a small development corpus that is
-useful for trying the CLI out and useless for real work -- it knows fifty
-package names.
+list, and a list of confusion pairs. A freshly built one ships inside the
+published core package, so nothing here is required for normal use --
+this section is for building your own, either to point `--corpus-dir` at
+something newer than the last release's walk or to work on the corpus
+machinery itself. `packages/core/fixtures/corpus` holds a small
+development corpus useful for tests and useless for real work -- it knows
+fifty package names.
 
 `scripts/build-corpus.mjs` walks the public registry replica for the names
 and reads the popularity list from `scripts/data/top-packages.txt`, which is
