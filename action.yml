@@ -165,7 +165,23 @@ runs:
         DG_FAIL_ON: ${{ inputs.fail-on }}
         DG_SARIF_OUTPUT: ${{ inputs.sarif-output }}
       run: |
-        set -uo pipefail
+        # NOT "set -uo pipefail". GitHub invokes a composite bash step as
+        # `bash --noprofile --norc -eo pipefail {0}`, so errexit is
+        # ALREADY ON before this script's first line. `set -uo pipefail`
+        # adds -u and re-states pipefail but does nothing to clear -e, so
+        # the shell aborted at the npx line the moment dep-guard exited
+        # non-zero -- the entire interesting case -- and never reached the
+        # status capture below. GITHUB_OUTPUT stayed empty, the upload
+        # step had no file to upload, and findings were silently never
+        # reported. Errexit is turned off explicitly around the call
+        # instead, the same way vault-guard's action does it.
+        # scripts/tests/action-run-script.test.mjs runs this very block
+        # under those exact flags with a failing stub.
+        #
+        # So no `set` line here re-states the shell's mode. Errexit is
+        # cleared narrowly, around the one command that is EXPECTED to
+        # exit non-zero, and restored immediately afterwards, so every
+        # other line in this script still fails the step if it breaks.
 
         ROOT="${GITHUB_WORKSPACE}"
         OUT="${ROOT}/${DG_SARIF_OUTPUT}"
@@ -191,8 +207,10 @@ runs:
         # family reason: npx forwards it into argv, and commander then
         # treats it as end-of-options and ignores --format.
         cd "${ROOT}"
+        set +e
         npx --yes "@vaultcompass/dep-guard@${DG_VERSION}" "${ARGS[@]}" > "${OUT}"
         SCAN_STATUS=$?
+        set -e
 
         echo "results_file=${OUT}" >> "${GITHUB_OUTPUT}"
         echo "exit_code=${SCAN_STATUS}" >> "${GITHUB_OUTPUT}"
@@ -203,8 +221,13 @@ runs:
         # real exit code is re-raised in the last step, after the upload.
         exit 0
 
+    # always(), so a failure anywhere above still gets whatever SARIF was
+    # produced into code scanning. Guarded on results_file being non-empty
+    # because the run step may not have got far enough to set it, and
+    # upload-sarif given an empty path fails with an error about the
+    # upload rather than about the scan, burying the real cause.
     - name: Upload SARIF
-      if: ${{ inputs.upload-sarif == 'true' }}
+      if: ${{ always() && inputs.upload-sarif == 'true' && steps.run.outputs.results_file != '' }}
       uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
       with:
         sarif_file: ${{ steps.run.outputs.results_file }}
@@ -217,11 +240,23 @@ runs:
     # blocking findings" and must not be reported as one. This is the same
     # rule the generated pre-commit hook follows.
     - name: Report dep-guard result
+      if: ${{ always() }}
       shell: bash
       env:
         DG_EXIT_CODE: ${{ steps.run.outputs.exit_code }}
       run: |
-        set -euo pipefail
+        set -uo pipefail
+
+        # Empty means the run step never got far enough to record a code:
+        # an input failed validation, or the step itself died. That is not
+        # a clean scan and must not be reported as one, so it fails here
+        # rather than passing through a bare `exit ""`, which bash rejects
+        # as a bad argument and which would then exit 1 for a reason that
+        # has nothing to do with the scan.
+        if [[ -z "${DG_EXIT_CODE}" ]]; then
+          printf '::error::dep-guard did not run to completion, so no result was recorded. See the earlier steps.\n'
+          exit 1
+        fi
         if [[ "${DG_EXIT_CODE}" == "0" ]]; then
           echo "dep-guard: no blocking findings."
           exit 0
