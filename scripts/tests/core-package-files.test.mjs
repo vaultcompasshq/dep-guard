@@ -40,6 +40,33 @@ describe('packages/core/package.json packaging', () => {
   });
 });
 
+// packages/core/src/index.ts documents package.json's "exports" field as
+// the enforced boundary of this package's public API at 0.1.0 -- exactly
+// "." (types before default) and "./package.json", nothing else. Nothing
+// enforced that claim before this test: a hand-edit to package.json could
+// delete the field, add a key, or reorder types/default ahead of or behind
+// default, and nothing in this suite would catch it. Object.keys() on a
+// value parsed from JSON preserves source key order, so this pins order as
+// well as membership -- both are compared with toEqual against a fixed
+// array, so ANY of those three edits fails one of the two exports tests
+// below.
+describe('exports map (published API surface, pinned exactly)', () => {
+  it('core: exposes exactly "." and "./package.json", with "types" ordered before "default" in "."', () => {
+    const pkg = JSON.parse(readFileSync(CORE_PACKAGE_JSON_PATH, 'utf8'));
+    expect(Object.keys(pkg.exports)).toEqual(['.', './package.json']);
+    expect(Object.keys(pkg.exports['.'])).toEqual(['types', 'default']);
+    expect(pkg.exports['.'].types).toBe('./dist/index.d.ts');
+    expect(pkg.exports['.'].default).toBe('./dist/index.js');
+    expect(pkg.exports['./package.json']).toBe('./package.json');
+  });
+
+  it('cli: exposes exactly "./package.json" -- no "." entry, so the bare package specifier resolves nothing', () => {
+    const pkg = JSON.parse(readFileSync(CLI_PACKAGE_JSON_PATH, 'utf8'));
+    expect(Object.keys(pkg.exports)).toEqual(['./package.json']);
+    expect(pkg.exports['./package.json']).toBe('./package.json');
+  });
+});
+
 describe('published-package metadata (core and cli)', () => {
   for (const [label, pkgPath] of [
     ['core', CORE_PACKAGE_JSON_PATH],

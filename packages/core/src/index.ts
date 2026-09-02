@@ -16,8 +16,12 @@
 // Widening this later (adding another export, or an explicit deep path) is
 // backward compatible; narrowing it after something outside this repo
 // depends on a deep import is not, so this file is where that surface is
-// decided and where it is enforced -- add to it deliberately, not by
-// accident.
+// decided. It is enforced separately, in
+// scripts/tests/core-package-files.test.mjs's "exports map" describe
+// block, which pins both packages' package.json "exports" fields exactly
+// (membership and key order) -- deleting a key, adding one, or reordering
+// "types" ahead of or behind "default" fails that test. Edit this file and
+// that test together, deliberately, not by accident.
 //
 // This does NOT affect this repository's own build/release scripts, which
 // import core by relative FILE PATH into the dist output
