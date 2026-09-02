@@ -33,7 +33,6 @@
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
-  existsSync,
   mkdirSync,
   readFileSync,
   statSync,
@@ -93,6 +92,13 @@ ${HOOK_BODY}`;
 // Husky 9 runs .husky/pre-commit directly and no longer needs the
 // _/husky.sh preamble, but a repository still on husky 8 does, and
 // sourcing it when it exists is harmless on both.
+//
+// Note for anyone reading a husky 8 repository's output: husky 8's
+// _/husky.sh echoes the failing command and its exit code itself, so a
+// blocked commit there prints dep-guard's own message and husky's on top
+// of it. That is husky's behaviour rather than something this hook can
+// suppress without breaking husky 8's own error reporting, and it is
+// cosmetic; it was reviewed and deliberately left alone.
 const HUSKY_HOOK = `#!/usr/bin/env sh
 # dep-guard pre-commit hook. ${MANAGED_HOOK_MARKER}
 # Installed by "dep-guard init". Remove this file to uninstall.
@@ -163,58 +169,85 @@ export interface InitResult {
   hookPath: string;
 }
 
-function isGitRepo(cwd: string): boolean {
-  return existsSync(path.join(cwd, '.git'));
-}
-
-// Resolves where git will actually look for hooks, honouring
-// core.hooksPath. A repository that has moved its hooks directory (husky
-// 9 does exactly this, and so do several monorepo setups) is precisely
-// the repository where writing to .git/hooks produces a file git never
-// reads: the gate reports itself installed and never runs. A relative
-// core.hooksPath resolves against the .git directory, per git's own
-// documentation, not against the working directory.
-function effectiveHooksDir(cwd: string): string {
-  let gitDir: string;
+function gitOutput(cwd: string, args: string[]): string | null {
   try {
-    gitDir = path.resolve(
-      cwd,
-      execFileSync('git', ['rev-parse', '--git-dir'], {
-        cwd,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim()
-    );
-  } catch {
-    return path.join(cwd, '.git', 'hooks');
-  }
-
-  let hooksPath = '';
-  try {
-    hooksPath = execFileSync('git', ['config', '--get', 'core.hooksPath'], {
+    return execFileSync('git', args, {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
   } catch {
-    hooksPath = '';
+    return null;
   }
-
-  if (hooksPath.length === 0) {
-    return path.join(gitDir, 'hooks');
-  }
-  return path.isAbsolute(hooksPath) ? hooksPath : path.join(gitDir, hooksPath);
 }
 
-/** Absolute path of the file the given manager's hook lives in. */
+/**
+ * The working-tree root, or null when cwd is not inside a repository.
+ *
+ * Asked of git rather than probed for a `.git` entry, so that init works
+ * from a subdirectory: `packages/app` has no `.git` of its own, and a
+ * plain existsSync check told anyone running init from there that their
+ * repository was not a repository. It also gets a worktree or a submodule
+ * right, where `.git` is a file rather than a directory.
+ */
+function repoRoot(cwd: string): string | null {
+  return gitOutput(cwd, ['rev-parse', '--show-toplevel']);
+}
+
+// Resolves where git will actually look for hooks, honouring
+// core.hooksPath. A repository that has moved its hooks directory (husky
+// 9 does exactly this, setting core.hooksPath to .husky/_) is precisely
+// the repository where writing to .git/hooks produces a file git never
+// reads: the gate reports itself installed and never runs.
+//
+// A RELATIVE core.hooksPath resolves against the WORKING-TREE ROOT, not
+// against the .git directory. This code resolved it against the .git
+// directory until a review caught it, and the test that was supposed to
+// cover the case asserted the same wrong location, so the two agreed with
+// each other and neither was checked against git. Verified by experiment
+// rather than by re-reading the documentation that was misread the first
+// time: with core.hooksPath=.husky/_ and an executable hook planted at
+// BOTH .husky/_/pre-commit and .git/.husky/_/pre-commit, a commit runs
+// the former. tests/init.test.ts pins it the same way, by driving a real
+// commit and observing whether the hook actually blocked it, because that
+// is the only assertion here that cannot be wrong in the same direction
+// as the code.
+function effectiveHooksDir(cwd: string): string {
+  const root = repoRoot(cwd);
+  const gitDir = gitOutput(cwd, ['rev-parse', '--git-dir']);
+  if (root === null || gitDir === null) {
+    return path.join(cwd, '.git', 'hooks');
+  }
+
+  const hooksPath = gitOutput(cwd, ['config', '--get', 'core.hooksPath']) ?? '';
+
+  // With no core.hooksPath set, hooks live in the git directory, which is
+  // NOT the working-tree root: for a linked worktree or a submodule it is
+  // somewhere else entirely, so this one keeps resolving against gitDir.
+  if (hooksPath.length === 0) {
+    return path.join(path.resolve(cwd, gitDir), 'hooks');
+  }
+  return path.isAbsolute(hooksPath) ? hooksPath : path.join(root, hooksPath);
+}
+
+/**
+ * Absolute path of the file the given manager's hook lives in.
+ *
+ * Every manager-owned file is anchored at the working-tree ROOT rather
+ * than at whatever directory init was invoked from. `.husky/pre-commit`,
+ * `lefthook-local.yml` and `.pre-commit-config.yaml` are all
+ * repository-root files by their own tools' conventions, so running init
+ * from `packages/app` must not scatter a second set of them there.
+ */
 export function hookArtifactFor(cwd: string, manager: HookManager): string {
+  const root = repoRoot(cwd) ?? cwd;
   switch (manager) {
     case 'husky':
-      return path.join(cwd, '.husky', 'pre-commit');
+      return path.join(root, '.husky', 'pre-commit');
     case 'lefthook':
-      return path.join(cwd, 'lefthook-local.yml');
+      return path.join(root, 'lefthook-local.yml');
     case 'precommit':
-      return path.join(cwd, '.pre-commit-config.yaml');
+      return path.join(root, '.pre-commit-config.yaml');
     case 'native':
     default:
       return path.join(effectiveHooksDir(cwd), 'pre-commit');
@@ -287,7 +320,8 @@ export function planInit(options: InitOptions = {}): InitResult {
     hookPath: '',
   };
 
-  if (!isGitRepo(cwd)) {
+  const root = repoRoot(cwd);
+  if (root === null) {
     conflicts.push({
       path: '.git',
       reason: 'not-a-git-repository',
@@ -297,7 +331,10 @@ export function planInit(options: InitOptions = {}): InitResult {
   }
 
   const hookPath = hookArtifactFor(cwd, manager);
-  const relPath = path.relative(cwd, hookPath).split(path.sep).join('/');
+  // Reported relative to the repository ROOT, not to cwd: init run from a
+  // subdirectory would otherwise print a path full of "../.." segments
+  // for a file that has a perfectly ordinary name from the root.
+  const relPath = path.relative(root, hookPath).split(path.sep).join('/');
   const existing = readIfExists(hookPath);
 
   if (existing !== undefined && existing.includes(MANAGED_HOOK_MARKER)) {

@@ -110,14 +110,99 @@ describe('dep-guard init: the native hook', () => {
     // repository where writing to .git/hooks produces a file git never
     // reads, so the gate is installed, reported as installed, and never
     // runs.
+    //
+    // git resolves a RELATIVE core.hooksPath against the working-tree
+    // root, not against the .git directory. This test asserted the .git
+    // location until a review caught it, which meant the test and the
+    // code were wrong together and agreed with each other.
     const dir = initRepo();
     execFileSync('git', ['config', 'core.hooksPath', 'my-hooks'], { cwd: dir });
 
     const result = install(dir);
 
     expect(result.ok).toBe(true);
-    expect(existsSync(path.join(dir, '.git', 'my-hooks', 'pre-commit'))).toBe(true);
+    expect(existsSync(path.join(dir, 'my-hooks', 'pre-commit'))).toBe(true);
+    expect(existsSync(path.join(dir, '.git', 'my-hooks', 'pre-commit'))).toBe(false);
     expect(existsSync(nativeHookPath(dir))).toBe(false);
+  });
+
+  test('an absolute core.hooksPath is used as given', () => {
+    const dir = initRepo();
+    const hooksDir = mkdtempSync(path.join(tmpdir(), 'depguard-abs-hooks-'));
+    execFileSync('git', ['config', 'core.hooksPath', hooksDir], { cwd: dir });
+
+    const result = install(dir);
+
+    expect(result.ok).toBe(true);
+    expect(existsSync(path.join(hooksDir, 'pre-commit'))).toBe(true);
+  });
+
+  test('installs where git actually runs it: the hook fires on a real commit', () => {
+    // The reviewer's proof, reproduced. With core.hooksPath set the way
+    // husky 9 sets it, init reported success while writing to a path git
+    // never consults, so the gate silently did not exist. No amount of
+    // path assertion is as convincing as making git run the thing, so
+    // this drives a real commit and reads back what executed.
+    const dir = initRepo();
+    execFileSync('git', ['config', 'core.hooksPath', '.husky/_'], { cwd: dir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'test'], { cwd: dir });
+
+    const result = install(dir);
+    expect(result.ok).toBe(true);
+    expect(existsSync(path.join(dir, '.husky', '_', 'pre-commit'))).toBe(true);
+    expect(existsSync(path.join(dir, '.git', '.husky', '_', 'pre-commit'))).toBe(false);
+
+    // A stub dep-guard that exits non-zero. If the installed hook is the
+    // one git runs, the commit is refused; if init wrote somewhere git
+    // does not look, the commit succeeds and the gate was never there.
+    const binDir = makeStubBin(1);
+    writeFileSync(path.join(dir, 'a.txt'), 'hello');
+    execFileSync('git', ['add', '-A'], { cwd: dir });
+
+    let committed = true;
+    try {
+      execFileSync('git', ['commit', '-q', '-m', 'should be blocked'], {
+        cwd: dir,
+        env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}` },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch {
+      committed = false;
+    }
+
+    expect(committed).toBe(false);
+  });
+
+  test('refuses an existing husky-style hook at a relative core.hooksPath', () => {
+    // The other half of resolving to the wrong place: a foreign hook that
+    // really is where git looks was invisible, so init would have happily
+    // reported success beside somebody else's working setup.
+    const dir = initRepo();
+    execFileSync('git', ['config', 'core.hooksPath', '.husky/_'], { cwd: dir });
+    const foreign = '#!/bin/sh\n. "$(dirname "$0")/husky.sh"\necho existing husky hook\n';
+    mkdirSync(path.join(dir, '.husky', '_'), { recursive: true });
+    writeFileSync(path.join(dir, '.husky', '_', 'pre-commit'), foreign);
+
+    const result = install(dir);
+
+    expect(result.ok).toBe(false);
+    expect(result.conflicts.map((c) => c.reason)).toContain('foreign-hook');
+    expect(readFileSync(path.join(dir, '.husky', '_', 'pre-commit'), 'utf8')).toBe(foreign);
+  });
+
+  test('works when run from a subdirectory of the repository', () => {
+    // N3. A user running "dep-guard init" from packages/app would
+    // otherwise be told this is not a git repository, because only the
+    // repository root has a .git entry.
+    const dir = initRepo();
+    const sub = path.join(dir, 'packages', 'app');
+    mkdirSync(sub, { recursive: true });
+
+    const result = install(sub);
+
+    expect(result.ok).toBe(true);
+    expect(existsSync(nativeHookPath(dir))).toBe(true);
   });
 });
 
