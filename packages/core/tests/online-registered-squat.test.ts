@@ -4,6 +4,7 @@ import {
   REGISTERED_SQUAT_MAX_AGE_DAYS,
 } from '../src/online/registered-squat.js';
 import { fetchWeeklyDownloads } from '../src/online/registry-client.js';
+import { createOnlineDeadline } from '../src/online/deadline.js';
 import type { CheckContext, ResolvedConfig } from '../src/checks/types.js';
 import type { Corpus } from '../src/corpus.js';
 import type { DepChange } from '../src/delta.js';
@@ -97,6 +98,16 @@ function makeContext(changes: DepChange[]): CheckContext {
 const NOW = Date.parse('2026-08-16T00:00:00.000Z');
 const nowFn = () => NOW;
 
+// Every pre-existing test in this file predates the per-run online
+// deadline and is about something else entirely, so each one gets a
+// deadline that cannot expire. The deadline's own behaviour is tested
+// explicitly at the bottom of this file, and in online-deadline.test.ts.
+const NO_DEADLINE = createOnlineDeadline(Number.POSITIVE_INFINITY, () => 0);
+
+// Comfortably inside REGISTERED_SQUAT_MAX_AGE_DAYS of NOW, so a finding
+// turns on the test's own subject rather than on the age cutoff.
+const NEW_DATE = '2026-08-14T00:00:00.000Z';
+
 // `noRecordNames` models a confirmed "npm answered, no download history"
 // name (registry-client.ts's DownloadCountsResult.noRecord) -- distinct
 // from a name that is simply absent from `downloads` and not listed here,
@@ -142,6 +153,7 @@ describe('findRegisteredSquats', () => {
       ctx,
       fakeDeps({ 'react-codeshift': 4 }, { 'react-codeshift': '2026-08-01T00:00:00.000Z' }),
       ctx.diagnostics,
+      NO_DEADLINE,
       nowFn
     );
     expect(findings).toHaveLength(1);
@@ -162,6 +174,7 @@ describe('findRegisteredSquats', () => {
         { 'remark-man': '2026-08-01T00:00:00.000Z' }
       ),
       ctx.diagnostics,
+      NO_DEADLINE,
       nowFn
     );
     expect(findings).toEqual([]);
@@ -174,6 +187,7 @@ describe('findRegisteredSquats', () => {
       ctx,
       fakeDeps({ crossenv: 10 }, { crossenv: oldDate }),
       ctx.diagnostics,
+      NO_DEADLINE,
       nowFn
     );
     expect(findings).toEqual([]);
@@ -194,6 +208,7 @@ describe('findRegisteredSquats', () => {
         ['totally-made-up-hallucinated-xyz123']
       ),
       ctx.diagnostics,
+      NO_DEADLINE,
       nowFn
     );
     expect(findings).toHaveLength(1);
@@ -217,6 +232,7 @@ describe('findRegisteredSquats', () => {
       ctx,
       fakeDeps({}, { 'ambiguous-pkg': '2026-08-10T00:00:00.000Z' }),
       ctx.diagnostics,
+      NO_DEADLINE,
       nowFn
     );
     expect(findings).toEqual([]);
@@ -228,6 +244,7 @@ describe('findRegisteredSquats', () => {
       ctx,
       fakeDeps({ 'ghost-pkg': 1 }, {}),
       ctx.diagnostics,
+      NO_DEADLINE,
       nowFn
     );
     expect(findings).toEqual([]);
@@ -240,6 +257,7 @@ describe('findRegisteredSquats', () => {
       ctx,
       fakeDeps({ 'react-codeshift': 1 }, { 'react-codeshift': '2026-08-15T00:00:00.000Z' }),
       ctx.diagnostics,
+      NO_DEADLINE,
       nowFn
     );
     expect(findings).toEqual([]);
@@ -255,7 +273,7 @@ describe('findRegisteredSquats', () => {
       },
       fetchPackument: async () => null,
     };
-    const findings = await findRegisteredSquats(ctx, deps, ctx.diagnostics, nowFn);
+    const findings = await findRegisteredSquats(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
     expect(findings).toEqual([]);
     expect(called).toBe(false);
   });
@@ -269,7 +287,7 @@ describe('findRegisteredSquats', () => {
       },
       fetchPackument: async () => null,
     };
-    const findings = await findRegisteredSquats(ctx, deps, diagnostics, nowFn);
+    const findings = await findRegisteredSquats(ctx, deps, diagnostics, NO_DEADLINE, nowFn);
     expect(findings).toEqual([]);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe('online-check-unreachable');
@@ -293,12 +311,128 @@ describe('findRegisteredSquats', () => {
         return { createdAt: '2026-08-01T00:00:00.000Z' };
       },
     };
-    const findings = await findRegisteredSquats(ctx, deps, diagnostics, nowFn);
+    const findings = await findRegisteredSquats(ctx, deps, diagnostics, NO_DEADLINE, nowFn);
     expect(findings).toHaveLength(1);
     expect(findings[0].packageName).toBe('unused-imports');
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe('online-check-unreachable');
     expect(diagnostics[0].message).toContain('react-codeshift');
+  });
+
+  test('a name in a configured internal scope is never sent to either API', async () => {
+    // An internal package is absent from npm by design, so npm's answer
+    // about it is guaranteed to look exactly like a freshly-registered
+    // squat: no download history, and either no packument or a very young
+    // one. This check would therefore fire on every internal dependency
+    // in a repository that declares its scopes, which is both a wave of
+    // false positives and, worse, a private package name put on the wire
+    // to a public service. Neither API may be asked at all.
+    const ctx = makeContext([makeChange({ name: '@acme/internal-thing' })]);
+    ctx.config.internalScopes = ['@acme'];
+    const askedDownloads: string[][] = [];
+    const askedPackuments: string[] = [];
+    const deps = {
+      fetchWeeklyDownloads: async (names: string[]) => {
+        askedDownloads.push(names);
+        return { counts: new Map<string, number>(), noRecord: new Set(names) };
+      },
+      fetchPackument: async (name: string) => {
+        askedPackuments.push(name);
+        return { createdAt: NEW_DATE };
+      },
+    };
+
+    const findings = await findRegisteredSquats(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(findings).toEqual([]);
+    expect(askedDownloads).toEqual([]);
+    expect(askedPackuments).toEqual([]);
+  });
+
+  test('an internal prefix is honoured the same way a scope is, and a public sibling still runs', async () => {
+    // The falsifiable half: the filter has to remove the internal name
+    // and nothing else. A test that only asserted "internal name absent"
+    // would pass just as well against a filter that removed everything.
+    const ctx = makeContext([
+      makeChange({ name: 'acme-internal-thing' }),
+      makeChange({ name: 'public-fresh-thing' }),
+    ]);
+    ctx.config.internalPrefixes = ['acme-'];
+    const asked: string[][] = [];
+    const deps = {
+      fetchWeeklyDownloads: async (names: string[]) => {
+        asked.push(names);
+        return { counts: new Map(names.map((n) => [n, 1])), noRecord: new Set<string>() };
+      },
+      fetchPackument: async () => ({ createdAt: NEW_DATE }),
+    };
+
+    const findings = await findRegisteredSquats(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(asked).toEqual([['public-fresh-thing']]);
+    expect(findings.map((f) => f.packageName)).toEqual(['public-fresh-thing']);
+  });
+
+  test('a spent per-run deadline skips the whole check and records why', async () => {
+    const ctx = makeContext([makeChange({ name: 'react-codeshift' })]);
+    const diagnostics: Diagnostic[] = [];
+    let called = false;
+    const deps = {
+      fetchWeeklyDownloads: async () => {
+        called = true;
+        return { counts: new Map<string, number>(), noRecord: new Set<string>() };
+      },
+      fetchPackument: async () => ({ createdAt: NEW_DATE }),
+    };
+
+    const findings = await findRegisteredSquats(
+      ctx,
+      deps,
+      diagnostics,
+      createOnlineDeadline(0, () => 0),
+      nowFn
+    );
+
+    expect(called).toBe(false);
+    expect(findings).toEqual([]);
+    expect(diagnostics.some((d) => d.code === 'online-deadline-exceeded')).toBe(true);
+  });
+
+  test('a deadline spent during the per-name packument loop stops it and adds nothing more', async () => {
+    // The downloads fetch succeeds for both names and the clock runs out
+    // while the first packument is in flight. The second name must not be
+    // asked about, and -- the part that matters -- the check must not
+    // invent a finding for a name it never priced.
+    let now = 0;
+    const ctx = makeContext([
+      makeChange({ name: 'first-fresh-thing' }),
+      makeChange({ name: 'second-fresh-thing' }),
+    ]);
+    const diagnostics: Diagnostic[] = [];
+    const asked: string[] = [];
+    const deps = {
+      fetchWeeklyDownloads: async (names: string[]) => ({
+        counts: new Map(names.map((n) => [n, 1])),
+        noRecord: new Set<string>(),
+      }),
+      fetchPackument: async (name: string) => {
+        asked.push(name);
+        now = 10_000;
+        return { createdAt: NEW_DATE };
+      },
+    };
+
+    const findings = await findRegisteredSquats(
+      ctx,
+      deps,
+      diagnostics,
+      createOnlineDeadline(5_000, () => now),
+      nowFn
+    );
+
+    expect(asked).toEqual(['first-fresh-thing']);
+    expect(findings.map((f) => f.packageName)).toEqual(['first-fresh-thing']);
+    expect(diagnostics.some((d) => d.code === 'online-deadline-exceeded')).toBe(true);
   });
 });
 
@@ -332,7 +466,7 @@ describe('findRegisteredSquats, against the real fetchWeeklyDownloads', () => {
       // what drives the "recently created" check.
       fetchPackument: async () => ({ createdAt: '2026-08-10T00:00:00.000Z' }),
     };
-    const findings = await findRegisteredSquats(ctx, deps, ctx.diagnostics, nowFn);
+    const findings = await findRegisteredSquats(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({
       ruleId: 'registered-squat',
@@ -364,6 +498,7 @@ describe('findRegisteredSquats, against the real fetchWeeklyDownloads', () => {
         fetchPackument: async () => ({ createdAt: '2026-08-10T00:00:00.000Z' }),
       },
       soloCtx.diagnostics,
+      NO_DEADLINE,
       nowFn
     );
 
@@ -384,6 +519,7 @@ describe('findRegisteredSquats, against the real fetchWeeklyDownloads', () => {
         fetchPackument: async () => ({ createdAt: '2026-08-10T00:00:00.000Z' }),
       },
       pairedCtx.diagnostics,
+      NO_DEADLINE,
       nowFn
     );
 
@@ -416,7 +552,7 @@ describe('findRegisteredSquats, against the real fetchWeeklyDownloads', () => {
         fetchWeeklyDownloads(names, { fetchImpl, sleepImpl: noSleep, attempts: 1 }),
       fetchPackument: async () => ({ createdAt: '2026-08-10T00:00:00.000Z' }),
     };
-    const findings = await findRegisteredSquats(ctx, deps, diagnostics, nowFn);
+    const findings = await findRegisteredSquats(ctx, deps, diagnostics, NO_DEADLINE, nowFn);
     expect(findings).toEqual([]);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe('online-check-unreachable');
@@ -439,7 +575,7 @@ describe('findRegisteredSquats, against the real fetchWeeklyDownloads', () => {
         fetchWeeklyDownloads(names, { fetchImpl, sleepImpl: noSleep, attempts: 1 }),
       fetchPackument: async () => ({ createdAt: '2026-08-10T00:00:00.000Z' }),
     };
-    const findings = await findRegisteredSquats(ctx, deps, diagnostics, nowFn);
+    const findings = await findRegisteredSquats(ctx, deps, diagnostics, NO_DEADLINE, nowFn);
     expect(findings).toEqual([]);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe('online-check-unreachable');
@@ -457,7 +593,7 @@ describe('findRegisteredSquats, against the real fetchWeeklyDownloads', () => {
         fetchWeeklyDownloads(names, { fetchImpl, sleepImpl: noSleep, attempts: 1 }),
       fetchPackument: async () => ({ createdAt: '2026-08-10T00:00:00.000Z' }),
     };
-    const findings = await findRegisteredSquats(ctx, deps, diagnostics, nowFn);
+    const findings = await findRegisteredSquats(ctx, deps, diagnostics, NO_DEADLINE, nowFn);
     expect(findings).toEqual([]);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe('online-check-unreachable');

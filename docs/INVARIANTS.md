@@ -603,6 +603,7 @@ Current diagnostic codes: `audit-anchor-differs`,
 `lockfile-format-manifest-only`, `lockfile-missing`,
 `manifest-alias-empty`, `npm-lockfile-invalid-entry`, `npm-lockfile-v1`,
 `npmrc-pin-unparseable`, `online-check-unreachable`,
+`online-deadline-exceeded`,
 `path-outside-root`, `pnpm-lockfile-invalid-entry`,
 `pnpm-no-install-script-flag`, `symlink-cycle`,
 `tamper-resolution-unreadable`, `workspace-dir-unreadable`,
@@ -676,6 +677,10 @@ a whole subsystem rather than one code path.
 
 Degrading means the affected check contributes nothing it could not
 establish offline, and nothing it did establish is taken away. The
+one online step that removes a finding is described in "Standing a
+finding down is a different act from suppressing one" below, and it is
+an exception to the second half of that sentence rather than a
+counter-example to it. The
 typosquat popularity-asymmetry check either escalates a low-severity
 resemblance match to high, when the network confirmed the candidate is
 genuinely unpopular, or leaves it at the severity typosquatCheck already
@@ -759,17 +764,146 @@ forged low count, or a machine-global cache entry poisoned to a literal
 0, can cause a check to fire, or escalate, for a package that is
 genuinely fine; the cached 0 this fix writes for a confirmed no-record
 answer persists for the same 24 hours as any other cached count and is
-exactly as forgeable. What the online cache can never do, either
-direction, is remove or downgrade a finding the six OFFLINE checks
-already established: `applyTyposquatAsymmetry` only ever escalates a
-low to high or leaves it alone, `findRegisteredSquats` only ever adds a
-new finding or adds nothing, and neither touches an existing offline
-finding's severity or presence. So a corrupt or forged online cache can
-cost an extra fetch, a missed online-only escalation, or a spurious
-online-only finding -- never a name that the offline checks flagged
-reading as clean. It is loaded permissively on purpose: a cache file
+exactly as forgeable. This paragraph used to end with the flat claim that the
+online cache can never, in either direction, remove or downgrade a
+finding the OFFLINE checks already established, on the grounds that
+`applyTyposquatAsymmetry` only escalates or leaves alone and
+`findRegisteredSquats` only adds or adds nothing. That claim was true of
+those two checks and is no longer true of the subsystem, because
+`resolveUnknownPackages` (0.2.0) removes a finding when the registry
+says the name exists, and it asks through `cachedFetchPackument` like
+everything else. The claim is corrected rather than deleted because its
+reasoning still holds for the two checks it was written about; what
+changed is that a third check joined them with a different shape.
+
+So, precisely: a corrupt or forged online cache can cost an extra fetch,
+a missed online-only escalation, a spurious online-only finding, or --
+this is the new one -- a missing unknown-package finding, if a
+`created:<name>` entry is present for a name the registry would now 404
+on. `created:` entries never expire (CREATED_TTL_MS is null, because a
+real creation date never changes), so a name that genuinely existed when
+some earlier scan asked, and has since been unpublished, reads as
+present forever on that machine. The residual exposure is narrow in both
+directions and worth stating rather than waving at: for the finding to
+exist at all the name has to be absent from the corpus, so it has to
+have been published AFTER the corpus walk, and then unpublished, and
+then re-scanned on a machine that cached it in between. npm's own
+unpublish window makes that sequence rare, and an attacker who can write
+this cache file can already write anything else in the user's home
+directory. It is nonetheless a real widening of what a forged cache
+buys, it did not exist before 0.2.0, and a reader of this file is
+entitled to know that rather than to be told the old flat claim.
+
+It is loaded permissively on purpose: a cache file
 that fails to parse is discarded and rebuilt from an empty state, not a
 `DepGuardError`.
+
+## Standing a finding down is a different act from suppressing one
+
+`resolveUnknownPackages` (online/unknown-package.ts) is the only thing in
+this engine that removes a finding on the strength of a network answer,
+and the distinction that makes that admissible is worth stating, because
+the same code shape with a slightly different justification would be a
+quiet off switch of the kind `allow` and `ignorePaths` are both written
+to refuse.
+
+unknown-package asserts one specific thing: this name was not on the
+registry when the corpus was walked. That assertion carries a stated
+ambiguity in its own message -- hallucinated, or simply newer than the
+corpus -- and it is the ambiguity, not the name, that makes the finding
+decay. Every package published after a release's walk reads as unknown
+to that release forever, so the false-positive rate on the flagship
+BLOCKING check climbs continuously from the moment a release is cut, and
+before 0.2.0 the only remedy a user had was an `allow` entry per
+package: a permanent, rule-wide exemption bought to clear a finding that
+was wrong about one fact.
+
+A 200 from the registry contradicts that specific assertion and nothing
+else. So the finding is stood DOWN -- withdrawn, because what it claimed
+turned out to be false -- rather than suppressed, which is what
+`allow`, `ignorePaths` and the baseline do to findings that remain true.
+The difference is observable and load-bearing: standing down removes the
+one finding whose claim was refuted, and leaves every other rule's
+verdict on that same package name completely untouched. typosquat still
+reports the resemblance, registered-squat still prices the name's age
+and downloads, install-script and tamper never enter into it. "This name
+exists" and "this name is safe" are different sentences and only the
+first one is ever being made here.
+
+Three constraints follow, and none of them is optional:
+
+- Removal happens by object identity against a set the function itself
+  built, never by re-matching on rule id, package name or path. A filter
+  that re-derived which findings to drop could drop one this function
+  never resolved.
+- A 404 is not the mirror image of a 200 and must not be treated as one.
+  It refutes the innocent half of the ambiguity instead of the guilty
+  half, so it escalates to critical and rewrites the message to stop
+  offering "published after that date" as an explanation the registry
+  has just ruled out.
+- Every other outcome -- a timeout, a 5xx, a malformed response, a spent
+  per-run deadline -- leaves the finding exactly as the offline check
+  made it. Not downgraded, not removed, not annotated into something
+  weaker. A network that failed to answer is not an answer, and this is
+  the one place where reading it as one would turn a blocking check off.
+
+The escalation deliberately does not touch the fingerprint, and cannot:
+the four hashed components are the rule id, the package name, the
+manifest path and `details.signal`, and this function writes only
+`details.onlineResolution` and `details.onlineResolutionReason`, neither
+of which is hashed. A user who baselined an unknown-package finding
+offline must not see it return the first time they pass `--online`.
+
+## The online subsystem has one wall clock, and it is not the same as a request timeout
+
+`registry-client.ts` bounds a REQUEST: two attempts, five seconds each,
+plus whatever backoff cap the caller supplies. Nothing in that bounds a
+RUN. A modest delta carrying twenty new names, each resolving in a
+second or two, is a pre-commit hook that takes half a minute, and every
+per-request budget involved is being honoured perfectly while it
+happens. dep-guard runs per commit, so a latency budget that only holds
+per request is not a latency budget.
+
+`createOnlineDeadline` (online/deadline.ts) is therefore created once per
+scan, in `enrichOnline`, and shared by every online step. A step asks it
+before spending a request and stops when it is spent. What "stops" means
+is fixed by the degrade rule above and is deliberately identical to what
+a network failure means: the affected findings are left exactly as the
+offline checks made them, nothing is removed, nothing is downgraded, and
+the reason is recorded in an `online-deadline-exceeded` diagnostic rather
+than implied by silence. A spent deadline can therefore only ever cost a
+signal the scan would not have had offline either. It can never cost one
+it already has.
+
+The deadline is re-asked before every name in a per-name loop, not once
+at the top of a step. A single slow lookup can spend the whole budget, so
+a loop that legitimately started inside the budget can be outside it
+three names later, and a step that only checked on entry would run the
+remaining nineteen requests it had already decided to make. The two
+places this matters are `resolveUnknownPackages` and
+`findRegisteredSquats`'s packument loop.
+
+`applyTyposquatAsymmetry` is gated from OUTSIDE, in `enrichOnline`,
+rather than internally, and that asymmetry is deliberate rather than an
+oversight: it issues exactly one bulk request and has no per-name loop,
+so it has exactly one point at which it could stop, and that point is
+before it starts. Adding a deadline parameter to it would be a second
+copy of a decision with only one branch.
+
+The order the three steps run in is a priority decision about how the
+budget is spent, and it is written down because it looks arbitrary and is
+not. unknown-package resolution runs FIRST because it is the only step
+that can withdraw a false positive from the check that actually blocks,
+and the only one whose absence gets steadily worse as a release ages away
+from its corpus walk. The other two only ever add or escalate, so a
+budget spent before them costs a signal that would not have existed
+offline either; a budget spent before the first one leaves a user
+holding a blocking finding they have no way to clear.
+
+The budget is a constant (`DEFAULT_ONLINE_BUDGET_MS`, twenty seconds) and
+not a config key today. If it ever becomes one, it becomes a config key
+-- it does not become a second constant somewhere else that has to be
+kept in step with this one.
 
 ## The popularity list is a trust input, and it is sized for its own rule
 

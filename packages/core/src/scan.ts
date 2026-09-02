@@ -21,6 +21,12 @@ import { DepGuardError } from './types.js';
 import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
 import { applyTyposquatAsymmetry } from './online/asymmetry.js';
 import { findRegisteredSquats } from './online/registered-squat.js';
+import { resolveUnknownPackages } from './online/unknown-package.js';
+import {
+  ONLINE_DEADLINE_CODE,
+  createOnlineDeadline,
+  deadlineDiagnosticMessage,
+} from './online/deadline.js';
 import { defaultCachePath, loadCache } from './online/cache.js';
 import { fetchPackument, fetchWeeklyDownloads } from './online/registry-client.js';
 import type { DownloadCountsResult } from './online/registry-client.js';
@@ -300,21 +306,74 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
   return packument;
 }
 
+// The three online steps, in the order the run's one wall-clock budget is
+// spent on them. The order is a priority decision, not an accident:
+//
+//  1. unknown-package resolution, because it is the only step that can
+//     REMOVE a false positive from the flagship blocking check, and the
+//     only one whose absence gets steadily worse as a release ages away
+//     from its corpus walk. If the budget only stretches to one step, this
+//     is the one worth having.
+//  2. typosquat popularity asymmetry, which escalates an existing low.
+//  3. registered-squat, which adds a new medium.
+//
+// Steps 2 and 3 both only ever add or escalate, so a budget spent before
+// them costs a signal that would not have existed offline either. Step 1
+// is the one whose omission leaves a user with a blocking finding they
+// have no way to clear, which is why it goes first.
+//
+// Never throws, per docs/INVARIANTS.md: each step owns its own error
+// handling and turns a failure into a diagnostic, because --online
+// reaching a pre-commit hook must not let a flaky connection block a
+// commit.
 async function enrichOnline(
   rawFindings: Omit<Finding, 'fingerprint'>[],
   ctx: CheckContext
 ): Promise<Omit<Finding, 'fingerprint'>[]> {
-  await applyTyposquatAsymmetry(
+  const deadline = createOnlineDeadline();
+
+  const resolved = await resolveUnknownPackages(
     rawFindings,
-    { fetchWeeklyDownloads: cachedFetchWeeklyDownloads },
-    ctx.diagnostics
+    ctx,
+    { fetchPackument: cachedFetchPackument },
+    ctx.diagnostics,
+    deadline
   );
+
+  // applyTyposquatAsymmetry issues one bulk request and has no per-name
+  // loop, so it is gated here rather than internally: there is exactly one
+  // point at which it could stop, and that point is before it starts. Its
+  // candidates are counted the same way it counts them itself so the
+  // diagnostic names a real number.
+  const asymmetryCandidates = resolved.filter(
+    (f) => f.ruleId === 'typosquat' && f.severity === 'low'
+  ).length;
+  if (deadline.expired()) {
+    if (asymmetryCandidates > 0) {
+      ctx.diagnostics.push({
+        code: ONLINE_DEADLINE_CODE,
+        message: deadlineDiagnosticMessage(
+          'typosquat popularity asymmetry',
+          asymmetryCandidates,
+          deadline
+        ),
+      });
+    }
+  } else {
+    await applyTyposquatAsymmetry(
+      resolved,
+      { fetchWeeklyDownloads: cachedFetchWeeklyDownloads },
+      ctx.diagnostics
+    );
+  }
+
   const registeredSquats = await findRegisteredSquats(
     ctx,
     { fetchWeeklyDownloads: cachedFetchWeeklyDownloads, fetchPackument: cachedFetchPackument },
-    ctx.diagnostics
+    ctx.diagnostics,
+    deadline
   );
-  return [...rawFindings, ...registeredSquats];
+  return [...resolved, ...registeredSquats];
 }
 
 interface RunInfo {

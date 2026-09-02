@@ -50,6 +50,25 @@ const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string };
 
 type OutputFormat = 'json' | 'text';
 
+// Both commands take the same pair of online flags, declared once so the
+// two can never drift into describing the same switch differently.
+//
+// ORDER IS LOAD-BEARING, and the reason is a commander behaviour that
+// fails silently in the dangerous direction. Commander gives a `--no-x`
+// option a default value of `true` for `x` -- unless `--x` was declared
+// FIRST, in which case the pair leaves the value undefined until one of
+// them is actually passed. Undefined is exactly what core's resolveOnline
+// needs in order to let .dep-guard.json decide (scan.ts). Declaring
+// `--no-online` alone, or first, would make every plain `dep-guard scan`
+// start making network requests with no flag asked for and nothing in the
+// output saying so. `cli.test.ts` pins this with a test that runs the CLI
+// with no flags at all and asserts nothing online happened.
+const ONLINE_FLAG_DESCRIPTION =
+  'enable registry-backed checks: unknown-package resolution, popularity asymmetry, ' +
+  'and registered-squat detection (network required)';
+const NO_ONLINE_FLAG_DESCRIPTION =
+  'force the registry-backed checks off, overriding "online": true in .dep-guard.json';
+
 // A bad --format or --fail-on value, or an unusable combination of flags
 // (--staged with --base). Kept distinct from DepGuardError -- which only
 // core code throws -- so reportError can say "core rejected this" and
@@ -185,10 +204,8 @@ function buildProgram(): Command {
       'severity threshold that fails the run: critical, high, medium, low, or none'
     )
     .option('--corpus-dir <dir>', 'override the corpus directory')
-    .option(
-      '--online',
-      'enable registry-backed checks: popularity asymmetry and registered-squat detection (network required)'
-    )
+    .option('--online', ONLINE_FLAG_DESCRIPTION)
+    .option('--no-online', NO_ONLINE_FLAG_DESCRIPTION)
     .exitOverride()
     .action(async (targetPath: string, options: ScanCliOptions) => {
       try {
@@ -219,10 +236,8 @@ function buildProgram(): Command {
       'severity threshold that fails the run: critical, high, medium, low, or none'
     )
     .option('--corpus-dir <dir>', 'override the corpus directory')
-    .option(
-      '--online',
-      'enable registry-backed checks: popularity asymmetry and registered-squat detection (network required)'
-    )
+    .option('--online', ONLINE_FLAG_DESCRIPTION)
+    .option('--no-online', NO_ONLINE_FLAG_DESCRIPTION)
     .exitOverride()
     .action(async (name: string, options: CheckCliOptions) => {
       try {

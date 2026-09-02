@@ -551,6 +551,80 @@ describe('--online flag', () => {
   }, CLI_TIMEOUT_MS);
 });
 
+// A name no registry will ever carry. Every assertion below is written so
+// that it holds identically on a machine with a live network connection
+// and on one without: an offline run leaves an unknown-package finding at
+// 'high' with no onlineResolution detail, whereas EVERY online outcome for
+// this name differs from that (stood down, escalated to critical, or
+// marked unreachable). That is what makes these tests a real proof that
+// nothing online ran, rather than a test that merely passes because the
+// network happened to be absent.
+const NEVER_PUBLISHED = 'dep-guard-cli-test-name-that-will-never-exist-9f3a2b';
+
+describe('--no-online flag', () => {
+  test('overrides an online:true config, leaving the scan fully offline', async () => {
+    await write('.dep-guard.json', JSON.stringify({ online: true }));
+    await write('package.json', manifestJson({ [NEVER_PUBLISHED]: '^1.0.0' }));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['scan', '--no-online', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    expect(run.exitCode).not.toBe(2);
+    expect(run.stderr).not.toContain('unknown option');
+    const result = JSON.parse(run.stdout) as ScanResult;
+    const finding = result.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.details ?? {}).not.toHaveProperty('onlineResolution');
+    expect(result.run.diagnostics.some((d) => d.code === 'online-check-unreachable')).toBe(false);
+  }, CLI_TIMEOUT_MS);
+
+  test('declaring it does not silently turn online on by default', async () => {
+    // Commander makes a `--no-x` option default its value to true when
+    // `--x` is not also declared first. If that trap were live here, a
+    // plain `dep-guard scan` with no flags at all would start making
+    // network requests -- the exact opposite of the flag's purpose, and
+    // invisible until someone watched the traffic.
+    await write('package.json', manifestJson({ [NEVER_PUBLISHED]: '^1.0.0' }));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['scan', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    const result = JSON.parse(run.stdout) as ScanResult;
+    const finding = result.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.details ?? {}).not.toHaveProperty('onlineResolution');
+  }, CLI_TIMEOUT_MS);
+
+  test('is accepted on check as well', async () => {
+    await write('.dep-guard.json', JSON.stringify({ online: true }));
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['check', NEVER_PUBLISHED, '--no-online', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    expect(run.exitCode).not.toBe(2);
+    const result = JSON.parse(run.stdout) as ScanResult;
+    const finding = result.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.details ?? {}).not.toHaveProperty('onlineResolution');
+  }, CLI_TIMEOUT_MS);
+});
+
 describe('a first run with no corpus built yet', () => {
   test('omitting --corpus-dir produces an actionable message, not a bare internal path', async () => {
     // This test's whole premise is that core's default corpus path
