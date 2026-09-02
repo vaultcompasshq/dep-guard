@@ -25,6 +25,18 @@ if [[ "$CURRENT_BRANCH" != "main" ]]; then
   exit 1
 fi
 
+# A previous interrupted run can leave the corpus it built behind -- the
+# corpus build further down recreates it in a couple of minutes anyway
+# because the registry walk resumes from .corpus-work, but leaving the
+# stale directory in place trips this same script's own pnpm test twelve
+# minutes in, since that suite's precondition requires this path absent.
+if [[ -d "$ROOT/packages/core/data/corpus" ]]; then
+  echo "packages/core/data/corpus exists already. A previous run left it there, and the test suite requires this path to be absent."
+  echo "Fix: rm -rf ${ROOT}/packages/core/data/corpus"
+  echo "Then re-run this script."
+  exit 1
+fi
+
 echo "Logged in as: $(npm whoami)"
 cd "$ROOT"
 
@@ -123,6 +135,15 @@ echo "Install-and-run gate passed: react known, a hallucinated name unknown, --v
 # git-checks=false; that is a config dependency worth stating here rather
 # than inheriting invisibly.)
 for pkg in "packages/core" "packages/cli"; do
+  name="$(node -p "require('./${pkg}/package.json').name")"
+  ver="$(node -p "require('./${pkg}/package.json').version")"
+  # The 0.1.0 bootstrap was interrupted after core published, and the retry
+  # 403d on core ("cannot publish over previously published versions")
+  # instead of skipping ahead to cli -- check the registry before publishing.
+  if [[ "$(npm view "${name}@${ver}" version 2>/dev/null || true)" == "${ver}" ]]; then
+    echo "Skip ${name}@${ver} (already on registry)"
+    continue
+  fi
   echo ""
   echo "Publishing ${pkg}..."
   (cd "$ROOT/$pkg" && pnpm publish --access public --tag latest --publish-branch main)
@@ -138,7 +159,7 @@ Next on npmjs.com (each package -> Settings -> Trusted Publisher):
   Environment: (leave blank)
 
 Then tag the release:
-  git tag v0.1.0 && git push origin v0.1.0
+  git tag v0.1.1 && git push origin v0.1.1
 
 Unlike conductor's bootstrap, there is no delete-and-repush dance here:
 release.yml's publish step skips any version already on the registry, so

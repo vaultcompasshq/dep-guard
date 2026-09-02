@@ -1,6 +1,6 @@
 {
   "name": "@vaultcompass/dep-guard-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Offline dependency-risk engine: diffs a manifest/lockfile change and scores it for typosquats, lockfile tampering, install-script acquisition, and hallucinated package names.",
   "license": "MIT",
