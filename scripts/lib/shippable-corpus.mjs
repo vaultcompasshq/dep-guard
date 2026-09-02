@@ -11,8 +11,10 @@ import { BloomFilter } from '../../packages/core/dist/bloom.js';
 
 const REQUIRED_FILES = ['names.bloom', 'top.json', 'aliases.json', 'meta.json'];
 
-// A real registry walk is millions of names (4.25 million or so, per
-// docs/INVARIANTS.md). This floor is set high enough that a --max-names
+// A real registry walk is millions of names (4,274,632 in the walk that
+// produced the checked-in popularity list -- see the header of
+// scripts/data/top-packages.txt, not docs/INVARIANTS.md, which only ever
+// says "several million"). This floor is set high enough that a --max-names
 // slice -- corpus:slice defaults to 20000 -- can never pass it by accident;
 // it exists to catch "someone pointed this gate at a slice and forgot",
 // not to be a precisely-tuned threshold. It is applied to the WALKED
@@ -205,6 +207,97 @@ function assertBloomSizeMatchesMeta(dir, meta) {
   }
 }
 
+// The geometry cross-check above (assertBloomSizeMatchesMeta) proves only
+// that meta.json was not edited AFTER the filter was written: BloomFilter
+// .create sizes its bit array from count and fpRate ALONE, and insert()
+// only sets bits, so a filter created with the right geometry and
+// near-zero content -- the shape a truncated or misread name store
+// produces while the walk still self-reports complete -- passes that
+// check exactly as cleanly as a fully-populated one. 'react' still
+// resolves in that scenario too (assertLoadsAndResolvesKnownName above),
+// because collectExtras injects every top-list name regardless of what
+// the walk found. Neither check can tell an empty-but-correctly-sized
+// filter from a real one; this one can, because it looks at what the bit
+// array actually holds rather than how big it is.
+//
+// The physical fact this is built on: a bloom filter sized the way
+// BloomFilter.create sizes one (m and k chosen from n and a target
+// false-positive rate by the standard formulas) has an expected bit-fill
+// ratio, after n real inserts, of 1 - e^(-kn/m). Plugging in the optimal
+// k = (m/n) * ln(2) that BloomFilter.create computes gives kn/m = ln(2),
+// so the expected fill is 1 - e^(-ln 2) = 1 - 1/2 = exactly 0.5 --
+// independent of n and of the target false-positive rate, because both
+// are absorbed into m and k before this ratio is taken. A filter that
+// claims n but actually received a handful of inserts reads nowhere near
+// that: fill approaches 0 as the real insert count falls far below n.
+//
+// [0.25, 0.75] is deliberately generous around that ~0.5 expectation --
+// hashCount is rounded to the nearest integer (never exactly optimal),
+// and small-n filters see more variance -- but every real build measured
+// during development landed within a few hundredths of 0.5, while a
+// truncated-to-a-handful-of-names build reads within a few thousandths of
+// 0. There is no plausible real-content scenario that lands between those
+// two clusters and inside this range by accident.
+//
+// Reading the bits back out goes through the real BloomFilter.deserialize,
+// not a reimplementation of the header layout bloom.ts documents --
+// "derive, do not describe" (top of docs/INVARIANTS.md) applies to reading
+// a corpus artifact as much as to sizing one. bloom.ts types `bits` and
+// `bitCount` as private, but TypeScript's `private` erases to a plain
+// instance property in the compiled output this script already imports
+// BloomFilter from, so a deserialized filter's bits are genuinely
+// reachable here without hand-parsing the 10-byte header. If that ever
+// stops being true (a real JS `#private` field, a renamed property), the
+// property reads come back `undefined` and the guard below throws loudly
+// naming the file, rather than silently computing a fill ratio of zero
+// from nothing.
+const MIN_FILL_RATIO = 0.25;
+const MAX_FILL_RATIO = 0.75;
+
+function fillRatioOf(bloomPath) {
+  let buf;
+  try {
+    buf = readFileSync(bloomPath);
+  } catch (err) {
+    throw new Error(`refusing to ship ${bloomPath}: could not read the bloom file (${err.code ?? err.message})`);
+  }
+
+  const filter = BloomFilter.deserialize(buf);
+  const { bits, bitCount } = filter;
+  if (!(bits instanceof Uint8Array) || typeof bitCount !== 'number' || !Number.isFinite(bitCount) || bitCount < 1) {
+    throw new Error(
+      `refusing to ship ${bloomPath}: could not read bits/bitCount back off the deserialized ` +
+        'BloomFilter -- its internal shape may have changed (see the comment above fillRatioOf).'
+    );
+  }
+
+  let setBits = 0;
+  for (let i = 0; i < bitCount; i++) {
+    if ((bits[i >>> 3] & (1 << (i & 7))) !== 0) {
+      setBits++;
+    }
+  }
+  return setBits / bitCount;
+}
+
+function assertBloomFillRatioPlausible(dir) {
+  const bloomPath = path.join(dir, 'names.bloom');
+  const fill = fillRatioOf(bloomPath);
+  if (fill < MIN_FILL_RATIO || fill > MAX_FILL_RATIO) {
+    throw new Error(
+      `refusing to ship ${dir}: ${bloomPath}'s bit-fill ratio is ${fill.toFixed(4)}, outside the ` +
+        `plausible [${MIN_FILL_RATIO}, ${MAX_FILL_RATIO}] range for a filter sized the way ` +
+        'BloomFilter.create sizes one (expected fill near 0.5 when the claimed name count was ' +
+        'actually inserted -- see the comment above this check for the math). The geometry ' +
+        "check above this one cannot catch this: it only proves names.bloom's SIZE matches " +
+        'meta.nameCount and meta.fpRate, which BloomFilter.create derives without looking at ' +
+        'what was actually inserted, so a near-empty filter -- a truncated or misread name ' +
+        'store, with the walk still self-reporting complete -- passes it cleanly. This corpus ' +
+        'would flag every real dependency as unknown-package.'
+    );
+  }
+}
+
 function assertLoadsAndResolvesKnownName(dir) {
   let corpus;
   try {
@@ -249,6 +342,9 @@ function assertLoadsAndResolvesKnownName(dir) {
 //     name resolves as present in the bloom filter (catches corruption or
 //     substitution; does not by itself establish walk completeness -- the
 //     two checks above do that)
+//   - names.bloom's bit-fill ratio is plausible for a filter that actually
+//     received its claimed number of inserts (see assertBloomFillRatioPlausible
+//     above): the physical evidence that content, not just size, is there
 //
 // minWalkedNameCount is a parameter (default DEFAULT_MIN_NAME_COUNT)
 // precisely so a test can exercise both the accept and refuse sides of the
@@ -262,4 +358,5 @@ export function assertCorpusShippable(dir, minWalkedNameCount = DEFAULT_MIN_NAME
   assertWalkedNameCountAtLeast(dir, meta, minWalkedNameCount);
   assertBloomSizeMatchesMeta(dir, meta);
   assertLoadsAndResolvesKnownName(dir);
+  assertBloomFillRatioPlausible(dir);
 }

@@ -823,18 +823,37 @@ files exist, `meta.formatVersion` is PRESENT and is one of
 `SUPPORTED_CORPUS_FORMAT_VERSIONS` (imported from the built core, not
 restated -- see "derive, do not describe" at the top of this file),
 `meta.walkComplete` is PRESENT and is exactly the boolean `true`, the
-walked-name floor and bloom-size cross-check below both hold, and the
+walked-name floor and bloom-size cross-check below both hold, the
 directory loads through the real `loadCorpus` with a known-popular name
-(`react`) resolving as present in the bloom filter. That last check makes
-the gate additive to the reader's own checks rather than a replacement for
-them: a corpus this gate accepts still has to load the way a real scan
-would load it -- but it only catches a corrupted, truncated, or
-substituted bloom filter, not an incomplete walk, because `collectExtras`
-(scripts/build-corpus.mjs) injects every name on the top list into the
-filter regardless of what the walk found, and `react` is on that list; no
-other popular name would fare differently, since anything popular enough
-to be worth probing is on the same list. Walk completeness is what the two
-checks below establish, together with `walkComplete`.
+(`react`) resolving as present in the bloom filter, and its bit-fill ratio
+is plausible for a filter that actually received its claimed inserts. That
+known-name check makes the gate additive to the reader's own checks rather
+than a replacement for them: a corpus this gate accepts still has to load
+the way a real scan would load it -- but it only catches a corrupted,
+truncated, or substituted bloom filter, not an incomplete walk, because
+`collectExtras` (scripts/build-corpus.mjs) injects every name on the top
+list into the filter regardless of what the walk found, and `react` is on
+that list; no other popular name would fare differently, since anything
+popular enough to be worth probing is on the same list.
+
+None of the checks below establish walk completeness on their own, and it
+is worth being precise about what each one actually proves, because two of
+them were mistaken for proof of completeness before and the gap that left
+open is exactly what let a near-empty corpus pass every check but one.
+`walkComplete` and `meta.nameCount` are self-reported: they are what the
+builder claims about itself, and a hand-edited or stale `meta.json` can
+claim anything. The bloom-size cross-check below pins `meta.json` against
+`names.bloom` as they stood at build time -- it proves the two were not
+edited out of step with each other AFTER the filter was written, which
+rules out a mismatched hand-edit but says nothing about what was in the
+filter when it was written. A filter created with the right geometry and
+near-zero content -- a truncated or misread name store, with the walk
+still self-reporting complete -- passes every check described so far. The
+bit-fill-ratio check below the geometry check is what closes that: it
+reads the bit array itself and asks whether roughly the claimed number of
+names was actually inserted, which is the one thing in this list that is
+physical evidence of content rather than a self-report or a consistency
+check between two self-reports.
 
 `meta.nameCount` does not clear a bare floor. It clears the floor MINUS
 the names `top.json` and `aliases.json` inject into the filter regardless
@@ -844,7 +863,9 @@ else. A bare `nameCount >= floor` check could in principle be satisfied by
 an inflated top list alone, with the walk itself contributing almost
 nothing; subtracting the injected extras first closes that. The floor
 itself is unchanged (`DEFAULT_MIN_NAME_COUNT`, one million, against a real
-walk's several million names).
+walk's several million names). This is still a check on the SELF-REPORTED
+`nameCount`, though, not on the filter's actual contents -- see the
+bit-fill-ratio check below for the one that reads the artifact itself.
 
 `meta.json` is self-reported; `names.bloom` is a physical artifact on
 disk. The gate asserts they agree: the expected serialized size for
@@ -860,7 +881,32 @@ real one built with those same values would. Comparing that against
 `names.bloom`'s actual on-disk byte count is what stops a hand-edited or
 stale `meta.json` from claiming a walk that never happened: every field
 in it can read as a plausible type while the physical filter never grew to
-match, and only a comparison against the artifact itself catches that.
+match, and only a comparison against the artifact itself catches that. It
+proves meta and the filter agree; it does not prove either of them is
+telling the truth about what was walked, because `BloomFilter.create`
+sizes its bit array from `count` and `fpRate` alone and never from what is
+actually inserted -- a filter built with a huge claimed count and a single
+real insert has exactly the same on-disk size as one genuinely built from
+a huge walk.
+
+The bit-fill-ratio check (`assertBloomFillRatioPlausible` in
+scripts/lib/shippable-corpus.mjs) is the physical check the two checks
+above are not. A bloom filter sized the standard way (`m` and `k` chosen
+from `n` and a target false-positive rate) has an expected bit-fill ratio,
+after `n` real inserts, of `1 - e^(-kn/m)`, which the optimal
+`k = (m/n) * ln(2)` that `BloomFilter.create` computes drives to almost
+exactly 0.5, independent of `n` and of the target false-positive rate. A
+filter that claims `n` but received only a handful of real inserts reads
+nowhere near that -- fill approaches 0 as the real insert count falls far
+below the claim. The gate reads `names.bloom` back through the real
+`BloomFilter.deserialize` (not a reimplementation of the header layout
+bloom.ts documents -- `bits` and `bitCount` are typed private in bloom.ts,
+but TypeScript's `private` erases to a plain instance property in the
+compiled output the gate imports, so they are genuinely reachable without
+hand-parsing the header) and refuses anything outside `[0.25, 0.75]`,
+generous margin around the ~0.5 expectation. This is the check that
+answers the question the two above cannot: not "do meta and the filter
+agree", but "does the filter actually hold what it claims to".
 
 `scripts/tests/shippable-corpus.test.mjs` exercises both directions of
 every rule, including the two cases the reader tolerates and this gate does
