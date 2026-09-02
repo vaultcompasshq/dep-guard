@@ -11,6 +11,9 @@ import { Command, CommanderError } from 'commander';
 import { checkSingle, DepGuardError, FAIL_ON_LEVELS, scan } from '@vaultcompass/dep-guard-core';
 import type { FailOn, ScanMode, ScanResult } from '@vaultcompass/dep-guard-core';
 import { renderDiagnosticLine, renderText, sanitizeText } from './output-text.js';
+import { renderSarif } from './output-sarif.js';
+import { HOOK_MANAGERS, initCommand } from './init.js';
+import type { HookManager } from './init.js';
 
 // A pipe reader (head, less, a CI log collector that stops reading early)
 // closing its end mid-write is ordinary, not a bug in this tool -- but
@@ -48,7 +51,28 @@ const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string };
 // is the "fails closed on garbage but says nothing useful" behavior this
 // validation exists to catch before it ever reaches core.
 
-type OutputFormat = 'json' | 'text';
+type OutputFormat = 'json' | 'text' | 'sarif';
+
+const OUTPUT_FORMATS: readonly OutputFormat[] = ['text', 'json', 'sarif'];
+
+// Both commands take the same pair of online flags, declared once so the
+// two can never drift into describing the same switch differently.
+//
+// ORDER IS LOAD-BEARING, and the reason is a commander behaviour that
+// fails silently in the dangerous direction. Commander gives a `--no-x`
+// option a default value of `true` for `x` -- unless `--x` was declared
+// FIRST, in which case the pair leaves the value undefined until one of
+// them is actually passed. Undefined is exactly what core's resolveOnline
+// needs in order to let .dep-guard.json decide (scan.ts). Declaring
+// `--no-online` alone, or first, would make every plain `dep-guard scan`
+// start making network requests with no flag asked for and nothing in the
+// output saying so. `cli.test.ts` pins this with a test that runs the CLI
+// with no flags at all and asserts nothing online happened.
+const ONLINE_FLAG_DESCRIPTION =
+  'enable registry-backed checks: unknown-package resolution, popularity asymmetry, ' +
+  'and registered-squat detection (network required)';
+const NO_ONLINE_FLAG_DESCRIPTION =
+  'force the registry-backed checks off, overriding "online": true in .dep-guard.json';
 
 // A bad --format or --fail-on value, or an unusable combination of flags
 // (--staged with --base). Kept distinct from DepGuardError -- which only
@@ -69,11 +93,28 @@ function parseFailOn(value: string | undefined): FailOn | undefined {
   return value as FailOn;
 }
 
-function parseFormat(value: string): OutputFormat {
-  if (value !== 'json' && value !== 'text') {
-    throw new CliUsageError(`--format must be "json" or "text" (got "${value}")`);
+// Validated against init.ts's own list rather than a second copy of the
+// four names, so a manager added there cannot be silently unreachable
+// from the command line.
+function parseManager(value: string | undefined): HookManager | undefined {
+  if (value === undefined) {
+    return undefined;
   }
-  return value;
+  if (!(HOOK_MANAGERS as readonly string[]).includes(value)) {
+    throw new CliUsageError(
+      `--manager must be one of ${HOOK_MANAGERS.join(', ')} (got "${value}")`
+    );
+  }
+  return value as HookManager;
+}
+
+function parseFormat(value: string): OutputFormat {
+  if (!(OUTPUT_FORMATS as readonly string[]).includes(value)) {
+    throw new CliUsageError(
+      `--format must be one of ${OUTPUT_FORMATS.map((f) => `"${f}"`).join(', ')} (got "${value}")`
+    );
+  }
+  return value as OutputFormat;
 }
 
 interface ScanCliOptions {
@@ -90,6 +131,12 @@ interface CheckCliOptions {
   failOn?: string;
   corpusDir?: string;
   online?: boolean;
+}
+
+interface InitCliOptions {
+  manager?: string;
+  dryRun?: boolean;
+  json?: boolean;
 }
 
 function resolveMode(options: ScanCliOptions): ScanMode {
@@ -115,8 +162,19 @@ function resolveMode(options: ScanCliOptions): ScanMode {
 // inline as part of the one human-facing report on stdout. This split is
 // deliberate, not an inconsistency to "fix" into one stream or the other.
 function emit(result: ScanResult, format: OutputFormat): void {
-  if (format === 'json') {
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (format === 'json' || format === 'sarif') {
+    // SARIF joins JSON on the machine-readable side of this split for the
+    // same reason and with the same consequence: stdout is one parseable
+    // document and nothing else, so it can be redirected straight into a
+    // file an uploader consumes. Diagnostics still have to reach a human,
+    // so they go to stderr. SARIF has no place to put them that a code
+    // scanning consumer would surface -- a diagnostic is explicitly not a
+    // finding (docs/INVARIANTS.md, "Diagnostics never change the exit
+    // code"), and turning one into a SARIF result to make it visible
+    // would be inventing a finding for something the engine said it could
+    // not judge.
+    const body = format === 'json' ? JSON.stringify(result) : renderSarif(result, pkg.version);
+    process.stdout.write(`${body}\n`);
     for (const diagnostic of result.run.diagnostics) {
       process.stderr.write(`${renderDiagnosticLine(diagnostic)}\n`);
     }
@@ -179,16 +237,14 @@ function buildProgram(): Command {
     .argument('[path]', 'repository or directory to scan', '.')
     .option('--staged', 'compare the git index against HEAD')
     .option('--base <ref>', 'compare the working tree against a git ref')
-    .option('--format <format>', 'output format: json or text', 'text')
+    .option('--format <format>', 'output format: text, json, or sarif', 'text')
     .option(
       '--fail-on <level>',
       'severity threshold that fails the run: critical, high, medium, low, or none'
     )
     .option('--corpus-dir <dir>', 'override the corpus directory')
-    .option(
-      '--online',
-      'enable registry-backed checks: popularity asymmetry and registered-squat detection (network required)'
-    )
+    .option('--online', ONLINE_FLAG_DESCRIPTION)
+    .option('--no-online', NO_ONLINE_FLAG_DESCRIPTION)
     .exitOverride()
     .action(async (targetPath: string, options: ScanCliOptions) => {
       try {
@@ -213,16 +269,14 @@ function buildProgram(): Command {
     .command('check')
     .description('Check whether a single package name is safe to add')
     .argument('<name>', 'package name to check')
-    .option('--format <format>', 'output format: json or text', 'text')
+    .option('--format <format>', 'output format: text, json, or sarif', 'text')
     .option(
       '--fail-on <level>',
       'severity threshold that fails the run: critical, high, medium, low, or none'
     )
     .option('--corpus-dir <dir>', 'override the corpus directory')
-    .option(
-      '--online',
-      'enable registry-backed checks: popularity asymmetry and registered-squat detection (network required)'
-    )
+    .option('--online', ONLINE_FLAG_DESCRIPTION)
+    .option('--no-online', NO_ONLINE_FLAG_DESCRIPTION)
     .exitOverride()
     .action(async (name: string, options: CheckCliOptions) => {
       try {
@@ -239,6 +293,30 @@ function buildProgram(): Command {
         process.exitCode = result.exitCode;
       } catch (err) {
         reportError(err, options.corpusDir === undefined);
+      }
+    });
+
+  program
+    .command('init')
+    .description('Install the dep-guard pre-commit hook in this repository')
+    .option(
+      '--manager <manager>',
+      `hook manager to install for: ${HOOK_MANAGERS.join(', ')}`,
+      'native'
+    )
+    .option('--dry-run', 'print what would be written without writing anything')
+    .option('--json', 'print the result as JSON')
+    .exitOverride()
+    .action((options: InitCliOptions) => {
+      try {
+        process.exitCode = initCommand({
+          cwd: process.cwd(),
+          manager: parseManager(options.manager),
+          dryRun: options.dryRun,
+          json: options.json,
+        });
+      } catch (err) {
+        reportError(err);
       }
     });
 

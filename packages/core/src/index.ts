@@ -32,10 +32,18 @@
 // path reaching directly into another package's directory on disk. Verified
 // by running the script test suite (scripts/tests/*.test.mjs, which import
 // core this same relative-path way) after "exports" was added: unaffected.
-export { checkSingle, scan } from './scan.js';
+export { checkSingle, scan, CHECK_SINGLE_DIAGNOSTIC_CODE } from './scan.js';
 export type { ScanResult } from './scan.js';
 export type { ScanMode } from './git-source.js';
 export { FAIL_ON_LEVELS, loadConfig } from './config.js';
 export type { ResolvedConfig } from './config.js';
+// The gate's per-finding decision, exported for the CLI's SARIF renderer
+// (properties.blocking). Deliberately the same function evaluateGate is
+// built on rather than a description of it -- see the comment on
+// isBlocking in gate.ts. Widening "exports" this way is backward
+// compatible; see the note at the top of this file, and update
+// scripts/tests/core-package-files.test.mjs's exports-map assertions
+// together with any change to package.json's own "exports" field.
+export { isBlocking } from './gate.js';
 export { DepGuardError } from './types.js';
 export type { Diagnostic, FailOn, Finding, RuleId, Severity } from './types.js';

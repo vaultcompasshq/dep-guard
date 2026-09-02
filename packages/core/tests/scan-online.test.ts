@@ -124,6 +124,8 @@ describe('scan(): online enrichment', () => {
       latestVersion: '0.0.1',
       latestPublishedAt: new Date().toISOString(),
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -153,6 +155,8 @@ describe('scan(): online enrichment', () => {
       latestVersion: '0.0.1',
       latestPublishedAt: new Date().toISOString(),
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -180,6 +184,8 @@ describe('scan(): online enrichment', () => {
       latestVersion: '0.0.1',
       latestPublishedAt: new Date().toISOString(),
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -214,6 +220,8 @@ describe('scan(): online enrichment', () => {
       latestVersion: '0.0.1',
       latestPublishedAt: new Date().toISOString(),
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -339,11 +347,20 @@ describe('scan(): online enrichment', () => {
     // lookup's null had been cached, this second scan would read that
     // stale "created: null" back out of the cache instead of calling
     // fetchPackument again, and would stay silent forever.
-    fetchPackumentMock.mockResolvedValueOnce({
+    //
+    // mockResolvedValue rather than mockResolvedValueOnce: as of 0.2.0
+    // the unknown-package resolver asks the registry about this same name
+    // too, and runs first, so a one-shot mock would be consumed by that
+    // call and registered-squat would still see the default null. Both
+    // callers ask about one name and in production both get one answer,
+    // which is what this now models.
+    fetchPackumentMock.mockResolvedValue({
       createdAt: new Date().toISOString(),
       latestVersion: '0.0.1',
       latestPublishedAt: new Date().toISOString(),
       deprecated: false,
+      unpublished: false,
+      securityHolder: false,
     });
     const secondResult = await scan({
       repoRoot: dir,
@@ -352,5 +369,350 @@ describe('scan(): online enrichment', () => {
       online: true,
     });
     expect(secondResult.findings.some((f) => f.ruleId === 'registered-squat')).toBe(true);
+  });
+});
+
+// The unknown-package rule is the one --online could not touch before
+// 0.2.0, and it is the one that blocks. These tests exercise it through
+// the real scan() wiring (config, delta, the shared cache, the gate)
+// rather than against the resolver in isolation -- the unit tests in
+// online-unknown-package.test.ts cover the resolver's own branches.
+describe('scan(): --online resolves unknown-package against the registry', () => {
+  beforeEach(async () => {
+    fetchWeeklyDownloadsMock.mockReset();
+    fetchPackumentMock.mockReset();
+    fetchPackumentMock.mockResolvedValue(null);
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map(), noRecord: new Set() });
+    process.env.XDG_CACHE_HOME = mkdtempSync(path.join(tmpdir(), 'depguard-online-cache-'));
+    jest.resetModules();
+    ({ scan, checkSingle } = await import('../src/scan.js'));
+  });
+
+  test('a name the registry knows about stands its unknown-package finding down', async () => {
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: '2020-01-01T00:00:00.000Z',
+      latestVersion: '3.0.0',
+      latestPublishedAt: '2026-08-01T00:00:00.000Z',
+      deprecated: false,
+      unpublished: false,
+      securityHolder: false,
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const offline = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: false,
+    });
+    expect(offline.findings.some((f) => f.ruleId === 'unknown-package')).toBe(true);
+    expect(offline.exitCode).toBe(1);
+
+    const online = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+    // The finding SURVIVES, downgraded to low. The corpus really is stale
+    // about this name and that is worth saying; what changes is that it
+    // no longer blocks.
+    const downgraded = online.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(downgraded).toBeDefined();
+    expect(downgraded?.severity).toBe('low');
+    expect(downgraded?.details).toMatchObject({ onlineResolution: 'registry-present' });
+    // The exit code is the behaviour a user actually feels: low sits below
+    // the default medium gate, so the run that was failing now passes
+    // without the finding having been thrown away.
+    expect(online.exitCode).toBe(0);
+    expect(online.run.blockingMatches).toBe(0);
+    // And it is still in the report, so a JSON or SARIF consumer can see
+    // that dep-guard looked at this name and what it concluded.
+    expect(online.findings.length).toBe(offline.findings.length);
+  });
+
+  test('a downgraded finding keeps the fingerprint the offline scan gave it', async () => {
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: '2020-01-01T00:00:00.000Z',
+      latestVersion: '3.0.0',
+      latestPublishedAt: '2026-08-01T00:00:00.000Z',
+      deprecated: false,
+      unpublished: false,
+      securityHolder: false,
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const offline = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: false,
+    });
+    const online = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    const offlineFinding = offline.findings.find((f) => f.ruleId === 'unknown-package');
+    const onlineFinding = online.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(onlineFinding?.severity).toBe('low');
+    expect(onlineFinding?.fingerprint).toBe(offlineFinding?.fingerprint);
+  });
+
+  test('standing unknown-package down leaves the typosquat finding for the same name', async () => {
+    // "raect" trips both rules offline: it is absent from the fixture
+    // corpus (unknown-package, high) and resembles "react" (typosquat,
+    // low). A registry that knows the name settles the first question and
+    // says nothing at all about the second.
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: '2026-08-01T00:00:00.000Z',
+      latestVersion: '1.0.0',
+      latestPublishedAt: '2026-08-01T00:00:00.000Z',
+      deprecated: false,
+      unpublished: false,
+      securityHolder: false,
+    });
+    fetchWeeklyDownloadsMock.mockResolvedValue({
+      counts: new Map([['raect', 999_999]]),
+      noRecord: new Set(),
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { raect: '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    expect(result.findings.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('low');
+    const typosquat = result.findings.find((f) => f.ruleId === 'typosquat');
+    expect(typosquat).toBeDefined();
+    expect(typosquat?.severity).toBe('low');
+  });
+
+  test('a 404 escalates unknown-package to critical, and the gate follows', async () => {
+    fetchPackumentMock.mockResolvedValue(null);
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'definitely-not-a-real-package-xyz': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+      failOn: 'critical',
+    });
+
+    const finding = result.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('critical');
+    // failOn 'critical' is the falsifiable part: offline the finding is
+    // 'high' and would NOT block at this threshold, so a run that blocks
+    // here can only be blocking on the escalation.
+    expect(result.exitCode).toBe(1);
+    expect(result.run.blockingMatches).toBe(1);
+  });
+
+  test('the escalated finding keeps the fingerprint the offline scan gave it', async () => {
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'definitely-not-a-real-package-xyz': '^1.0.0' });
+
+    const offline = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: false,
+    });
+    const online = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    const offlineFinding = offline.findings.find((f) => f.ruleId === 'unknown-package');
+    const onlineFinding = online.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(onlineFinding?.severity).toBe('critical');
+    expect(onlineFinding?.fingerprint).toBe(offlineFinding?.fingerprint);
+  });
+
+  test('a registry failure leaves unknown-package exactly as the offline scan had it', async () => {
+    fetchPackumentMock.mockRejectedValue(new Error('ETIMEDOUT'));
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'some-unknown-thing': '^1.0.0' });
+
+    const offline = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: false,
+    });
+    const online = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    const offlineFinding = offline.findings.find((f) => f.ruleId === 'unknown-package');
+    const onlineFinding = online.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(onlineFinding?.severity).toBe(offlineFinding?.severity);
+    expect(onlineFinding?.message).toBe(offlineFinding?.message);
+    expect(online.exitCode).toBe(offline.exitCode);
+    expect(online.run.diagnostics.some((d) => d.code === 'online-check-unreachable')).toBe(true);
+    expect(onlineFinding?.details).toMatchObject({ onlineResolution: 'unreachable' });
+  });
+
+  test('a name in a configured internal scope is never asked about', async () => {
+    // internalScopes already keeps existenceCheck quiet about internal
+    // names, so this asserts the stronger property the online path owes:
+    // no request is made for the name at all, whatever any finding says.
+    const dir = initRepo();
+    writeFileSync(
+      path.join(dir, '.dep-guard.json'),
+      JSON.stringify({ internalScopes: ['@acme'] })
+    );
+    commitManifest(dir, {});
+    commitManifest(dir, { '@acme/private-thing': '^1.0.0' });
+
+    await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    for (const call of fetchPackumentMock.mock.calls) {
+      expect(call[0]).not.toBe('@acme/private-thing');
+    }
+    for (const call of fetchWeeklyDownloadsMock.mock.calls) {
+      expect(call[0]).not.toContain('@acme/private-thing');
+    }
+  });
+
+  test('offline output is unchanged by all of this, field for field', async () => {
+    // The whole online subsystem is additive. The strongest available
+    // statement of that is a comparison of a full offline ScanResult
+    // against itself across the change -- durationMs is the only field
+    // that legitimately moves between two runs, so it is the only one
+    // excluded.
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { raect: '^1.0.0', 'some-unknown-thing': '^1.0.0' });
+
+    const first = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: false,
+    });
+    const second = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: false,
+    });
+
+    expect(fetchPackumentMock).not.toHaveBeenCalled();
+    expect(fetchWeeklyDownloadsMock).not.toHaveBeenCalled();
+    const strip = (r: typeof first) => JSON.stringify({ ...r, run: { ...r.run, durationMs: 0 } });
+    expect(strip(second)).toBe(strip(first));
+    // No online detail ever reaches an offline finding's details bag.
+    for (const finding of first.findings) {
+      expect(finding.details ?? {}).not.toHaveProperty('onlineResolution');
+    }
+  });
+
+  test('a security-holding placeholder does not clear the finding, through the real wiring', async () => {
+    // The case that matters most: npm seizes a name precisely because it
+    // was malicious, and a 200 for a seized name used to read as "the
+    // package is fine" all the way through scan().
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: '2019-01-01T00:00:00.000Z',
+      latestVersion: '0.0.1-security',
+      latestPublishedAt: '2019-01-02T00:00:00.000Z',
+      deprecated: false,
+      unpublished: false,
+      securityHolder: true,
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'seized-name-xyz': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    const finding = result.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.details).toMatchObject({ onlineResolution: 'security-holder' });
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('existence is asked live every scan, never served from the created cache', async () => {
+    // The created: cache never expires and was written for a different
+    // question (registered-squat's age check). Serving this check from it
+    // would mean a name that existed when some earlier scan asked reads
+    // as present forever, including a name npm has since removed for
+    // security reasons. Two scans in one process share one cache, so a
+    // second scan reaching the network is the observable property.
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: '2020-01-01T00:00:00.000Z',
+      latestVersion: '1.0.0',
+      latestPublishedAt: '2020-01-01T00:00:00.000Z',
+      deprecated: false,
+      unpublished: false,
+      securityHolder: false,
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'cached-name-thing': '^1.0.0' });
+
+    const options = {
+      repoRoot: dir,
+      mode: { kind: 'base' as const, ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    };
+    await scan(options);
+    const callsAfterFirst = fetchPackumentMock.mock.calls.filter(
+      (c) => c[0] === 'cached-name-thing'
+    ).length;
+    await scan(options);
+    const callsAfterSecond = fetchPackumentMock.mock.calls.filter(
+      (c) => c[0] === 'cached-name-thing'
+    ).length;
+
+    expect(callsAfterFirst).toBeGreaterThan(0);
+    expect(callsAfterSecond).toBeGreaterThan(callsAfterFirst);
+  });
+
+  test('checkSingle resolves its unknown-package finding the same way scan() does', async () => {
+    fetchPackumentMock.mockResolvedValue(null);
+    const dir = initRepo();
+    commitManifest(dir, {});
+
+    const result = await checkSingle({
+      repoRoot: dir,
+      name: 'definitely-not-a-real-package-xyz',
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    expect(result.findings.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('critical');
   });
 });

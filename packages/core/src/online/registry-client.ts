@@ -394,22 +394,78 @@ export interface Packument {
   latestVersion: string | null;
   latestPublishedAt: string | null;
   deprecated: boolean;
+  // A 200 from the registry does not mean an installable package exists.
+  // These two say which kind of 200 it was, and they are computed HERE,
+  // once, against the raw body, rather than left for each caller to
+  // re-derive from a partial view of it -- a caller that only sees
+  // `createdAt` cannot tell any of these cases apart, which is exactly
+  // how the unknown-package check came to stand a finding down for a
+  // package npm had removed.
+  //
+  // `unpublished`: every version has been unpublished. npm keeps serving
+  // 200 for the name, with a `time.unpublished` record and no versions
+  // map at all.
+  unpublished: boolean;
+  // `securityHolder`: npm has taken the name over after a malware or
+  // typosquat report and replaced it with a placeholder. This is the
+  // single most important case for this tool to get right, because a name
+  // npm seized for security reasons is precisely a name a manifest should
+  // not be pointing at.
+  securityHolder: boolean;
 }
 
 interface RawPackument {
-  time?: Record<string, string>;
+  // `time` is a version-to-date map EXCEPT for the `unpublished` key,
+  // whose value is an object. Typed as unknown per entry so reading it
+  // has to check rather than assume.
+  time?: Record<string, unknown>;
   'dist-tags'?: { latest?: string };
-  versions?: Record<string, { deprecated?: string }>;
+  versions?: Record<string, { deprecated?: string; description?: string }>;
+  description?: string;
+}
+
+// npm's placeholder for a name it has seized. Two independent signals,
+// checked with OR rather than AND: not every holder carries the
+// `0.0.1-security` version (some sit at an ordinary version with only the
+// description rewritten), and a package could in principle carry the
+// version without the description. Either alone is enough to refuse to
+// call the name "present".
+const SECURITY_HOLDER_VERSION = /^0\.0\.\d+-security$/;
+const SECURITY_HOLDER_DESCRIPTION = 'security holding package';
+
+function isSecurityHolder(raw: RawPackument, latestVersion: string | null): boolean {
+  if (latestVersion !== null && SECURITY_HOLDER_VERSION.test(latestVersion)) {
+    return true;
+  }
+  // Matched as an exact (case-insensitive, trimmed) description rather
+  // than a substring: "helpers for security headers" or a package that
+  // merely mentions the phrase must not be mistaken for a seized name.
+  const descriptions = [
+    raw.description,
+    latestVersion !== null ? raw.versions?.[latestVersion]?.description : undefined,
+  ];
+  return descriptions.some(
+    (text) => typeof text === 'string' && text.trim().toLowerCase() === SECURITY_HOLDER_DESCRIPTION
+  );
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
 }
 
 function readPackument(payload: unknown): Packument {
   const raw = (payload ?? {}) as RawPackument;
   const latestVersion = raw['dist-tags']?.latest ?? null;
   return {
-    createdAt: raw.time?.created ?? null,
+    createdAt: readString(raw.time?.created),
     latestVersion,
-    latestPublishedAt: latestVersion !== null ? (raw.time?.[latestVersion] ?? null) : null,
+    latestPublishedAt: latestVersion !== null ? readString(raw.time?.[latestVersion]) : null,
     deprecated: latestVersion !== null ? Boolean(raw.versions?.[latestVersion]?.deprecated) : false,
+    // Presence of the key is the signal, whatever shape its value takes:
+    // npm writes an object here, but anything present under this key
+    // means the registry recorded an unpublish for this name.
+    unpublished: raw.time !== undefined && raw.time.unpublished !== undefined,
+    securityHolder: isSecurityHolder(raw, latestVersion),
   };
 }
 

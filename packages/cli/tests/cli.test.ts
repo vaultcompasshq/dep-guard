@@ -551,6 +551,195 @@ describe('--online flag', () => {
   }, CLI_TIMEOUT_MS);
 });
 
+// A name no registry will ever carry. Every assertion below is written so
+// that it holds identically on a machine with a live network connection
+// and on one without: an offline run leaves an unknown-package finding at
+// 'high' with no onlineResolution detail, whereas EVERY online outcome for
+// this name differs from that (stood down, escalated to critical, or
+// marked unreachable). That is what makes these tests a real proof that
+// nothing online ran, rather than a test that merely passes because the
+// network happened to be absent.
+const NEVER_PUBLISHED = 'dep-guard-cli-test-name-that-will-never-exist-9f3a2b';
+
+describe('--no-online flag', () => {
+  test('overrides an online:true config, leaving the scan fully offline', async () => {
+    await write('.dep-guard.json', JSON.stringify({ online: true }));
+    await write('package.json', manifestJson({ [NEVER_PUBLISHED]: '^1.0.0' }));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['scan', '--no-online', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    expect(run.exitCode).not.toBe(2);
+    expect(run.stderr).not.toContain('unknown option');
+    const result = JSON.parse(run.stdout) as ScanResult;
+    const finding = result.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.details ?? {}).not.toHaveProperty('onlineResolution');
+    expect(result.run.diagnostics.some((d) => d.code === 'online-check-unreachable')).toBe(false);
+  }, CLI_TIMEOUT_MS);
+
+  test('declaring it does not silently turn online on by default', async () => {
+    // Commander makes a `--no-x` option default its value to true when
+    // `--x` is not also declared first. If that trap were live here, a
+    // plain `dep-guard scan` with no flags at all would start making
+    // network requests -- the exact opposite of the flag's purpose, and
+    // invisible until someone watched the traffic.
+    await write('package.json', manifestJson({ [NEVER_PUBLISHED]: '^1.0.0' }));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['scan', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    const result = JSON.parse(run.stdout) as ScanResult;
+    const finding = result.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.details ?? {}).not.toHaveProperty('onlineResolution');
+  }, CLI_TIMEOUT_MS);
+
+  test('is accepted on check as well', async () => {
+    await write('.dep-guard.json', JSON.stringify({ online: true }));
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['check', NEVER_PUBLISHED, '--no-online', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    expect(run.exitCode).not.toBe(2);
+    const result = JSON.parse(run.stdout) as ScanResult;
+    const finding = result.findings.find((f) => f.ruleId === 'unknown-package');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.details ?? {}).not.toHaveProperty('onlineResolution');
+  }, CLI_TIMEOUT_MS);
+});
+
+describe('--format sarif, through the real binary', () => {
+  test('writes one parseable SARIF document to stdout and nothing else', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    await write('package.json', manifestJson({ [NEVER_PUBLISHED]: '^1.0.0' }));
+    await commitAll('second');
+
+    const run = await runCli(
+      ['scan', '--base', 'HEAD~1', '--format', 'sarif', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    // Exit 1: the unknown-package finding blocks at the default gate. The
+    // point is that SARIF output does not change the exit code, so an
+    // uploader step can still read it.
+    expect(run.exitCode).toBe(1);
+    const sarif = JSON.parse(run.stdout) as {
+      version: string;
+      runs: Array<{
+        tool: { driver: { name: string; version: string } };
+        results: Array<{ ruleId: string; level: string; partialFingerprints: Record<string, string> }>;
+      }>;
+    };
+    expect(sarif.version).toBe('2.1.0');
+    expect(sarif.runs[0].tool.driver.name).toBe('dep-guard');
+    // The version comes from the CLI's own package.json, so it must be a
+    // real version string rather than a placeholder.
+    expect(sarif.runs[0].tool.driver.version).toMatch(/^\d+\.\d+\.\d+/);
+    const result = sarif.runs[0].results.find((r) => r.ruleId === 'dep-guard/unknown-package');
+    expect(result).toBeDefined();
+    expect(result?.level).toBe('error');
+    expect(result?.partialFingerprints['dep-guard/v1']).toMatch(/^[0-9a-f]{64}$/);
+  }, CLI_TIMEOUT_MS);
+
+  test('the sarif fingerprint is the same one the json report carries', async () => {
+    // Two renderings of one scan must agree about a finding's identity.
+    // If SARIF ever hashed something of its own, an alert tracked by
+    // GitHub and a finding tracked by a dep-guard baseline would drift
+    // apart with nothing to notice.
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    await write('package.json', manifestJson({ [NEVER_PUBLISHED]: '^1.0.0' }));
+    await commitAll('second');
+
+    const json = await runCli(
+      ['scan', '--base', 'HEAD~1', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+    const sarif = await runCli(
+      ['scan', '--base', 'HEAD~1', '--format', 'sarif', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    const jsonResult = JSON.parse(json.stdout) as ScanResult;
+    const sarifDoc = JSON.parse(sarif.stdout) as {
+      runs: Array<{ results: Array<{ ruleId: string; partialFingerprints: Record<string, string> }> }>;
+    };
+    const expected = jsonResult.findings.find((f) => f.ruleId === 'unknown-package')?.fingerprint;
+    const actual = sarifDoc.runs[0].results.find(
+      (r) => r.ruleId === 'dep-guard/unknown-package'
+    )?.partialFingerprints['dep-guard/v1'];
+    expect(actual).toBe(expected);
+  }, CLI_TIMEOUT_MS);
+
+  test('an unrecognized format is still rejected with exit 2', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const run = await runCli(
+      ['scan', '--format', 'xml', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toContain('--format must be one of');
+  }, CLI_TIMEOUT_MS);
+});
+
+describe('the init command, through the real binary', () => {
+  // init's behaviour is covered in depth in init.test.ts, against the
+  // module directly. These two prove the command is actually reachable
+  // from the built binary and reports the exit codes it promises, which
+  // is the one thing a module-level test cannot show.
+  test('installs the hook and exits 0, and a re-run exits 0 without duplicating it', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const first = await runCli(['init'], repo);
+    expect(first.exitCode).toBe(0);
+    const hook = path.join(repo, '.git', 'hooks', 'pre-commit');
+    expect(existsSync(hook)).toBe(true);
+    const content = await readFile(hook, 'utf8');
+    expect(content).toContain('dep-guard scan --staged');
+
+    const second = await runCli(['init'], repo);
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain('already installed');
+    expect(await readFile(hook, 'utf8')).toBe(content);
+  }, CLI_TIMEOUT_MS);
+
+  test('--dry-run writes nothing, and a bad --manager exits 2', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const dry = await runCli(['init', '--dry-run'], repo);
+    expect(dry.exitCode).toBe(0);
+    expect(dry.stdout).toContain('dry run');
+    expect(existsSync(path.join(repo, '.git', 'hooks', 'pre-commit'))).toBe(false);
+
+    const bad = await runCli(['init', '--manager', 'nonsense'], repo);
+    expect(bad.exitCode).toBe(2);
+    expect(bad.stderr).toContain('--manager must be one of');
+  }, CLI_TIMEOUT_MS);
+});
+
 describe('a first run with no corpus built yet', () => {
   test('omitting --corpus-dir produces an actionable message, not a bare internal path', async () => {
     // This test's whole premise is that core's default corpus path

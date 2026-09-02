@@ -18,8 +18,11 @@
 
 import type { CheckContext } from '../checks/types.js';
 import { newRegistryNames } from '../checks/candidates.js';
+import { isInternalName } from '../checks/allow.js';
 import type { DownloadCountsResult } from './registry-client.js';
 import type { Diagnostic, Finding } from '../types.js';
+import type { OnlineDeadline } from './deadline.js';
+import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
 
 export const REGISTERED_SQUAT_DOWNLOAD_FLOOR = 50;
 export const REGISTERED_SQUAT_MAX_AGE_DAYS = 30;
@@ -41,10 +44,39 @@ export async function findRegisteredSquats(
   ctx: CheckContext,
   deps: RegisteredSquatDeps,
   diagnostics: Diagnostic[],
+  deadline: OnlineDeadline,
   now: () => number = Date.now
 ): Promise<Omit<Finding, 'fingerprint'>[]> {
-  const candidates = newRegistryNames(ctx);
+  // Internal names are filtered before anything is fetched, and the
+  // filtering is what matters rather than the finding it would have
+  // produced. An internal package is absent from the public registry by
+  // design, so npm's answer about one is guaranteed to look exactly like a
+  // freshly-registered squat -- no download history, and either no
+  // packument or a young one -- which would file this medium finding
+  // against every internal dependency in a repository that declares its
+  // scopes. The offline existence check has honoured internalScopes since
+  // it was written (checks/existence.ts) for the same reason; this check
+  // shipped without it, so the two disagreed about what a scope entry
+  // covers, which is precisely the drift isInternalName exists to prevent.
+  //
+  // The stronger reason is that the request itself is the problem: a
+  // private package name is not something this tool may put on the wire to
+  // a public service just to score a heuristic. That is why the filter is
+  // here, ahead of the fetch, rather than a severity adjustment applied to
+  // the finding afterwards.
+  const candidates = newRegistryNames(ctx).filter(
+    ({ registryName }) =>
+      !isInternalName(registryName, ctx.config.internalScopes, ctx.config.internalPrefixes)
+  );
   if (candidates.length === 0) {
+    return [];
+  }
+
+  if (deadline.expired()) {
+    diagnostics.push({
+      code: ONLINE_DEADLINE_CODE,
+      message: deadlineDiagnosticMessage('registered-squat', candidates.length, deadline),
+    });
     return [];
   }
 
@@ -62,6 +94,7 @@ export async function findRegisteredSquats(
   }
 
   const findings: Omit<Finding, 'fingerprint'>[] = [];
+  let skippedByDeadline = 0;
 
   for (const { change, registryName } of candidates) {
     // Three states, not two -- see DownloadCountsResult in
@@ -102,6 +135,18 @@ export async function findRegisteredSquats(
       continue;
     }
 
+    // Re-asked before every packument, not once at the top: this loop is
+    // one request per surviving candidate and is the unbounded part of the
+    // check, so a budget that was intact when the downloads batch went out
+    // can legitimately be spent partway through it. Skipping adds nothing,
+    // which is the same outcome a network failure produces here -- this
+    // check only ever adds findings, so "stop early" can never take one
+    // away.
+    if (deadline.expired()) {
+      skippedByDeadline += 1;
+      continue;
+    }
+
     let packument: { createdAt: string | null } | null;
     try {
       packument = await deps.fetchPackument(registryName);
@@ -138,6 +183,13 @@ export async function findRegisteredSquats(
         weeklyDownloads: downloads,
         createdDaysAgo: Math.floor(days),
       },
+    });
+  }
+
+  if (skippedByDeadline > 0) {
+    diagnostics.push({
+      code: ONLINE_DEADLINE_CODE,
+      message: deadlineDiagnosticMessage('registered-squat', skippedByDeadline, deadline),
     });
   }
 

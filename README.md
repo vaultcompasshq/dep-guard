@@ -4,7 +4,7 @@ Blocks risky dependencies at the moment they are added -- before install,
 before commit, before CI.
 
 **Status: published.** [`@vaultcompass/dep-guard`](https://www.npmjs.com/package/@vaultcompass/dep-guard)
-is on npm, covered by 1038 tests, and works out of the box: the package
+is on npm, covered by 1162 tests, and works out of the box: the package
 name corpus ships inside
 [`@vaultcompass/dep-guard-core`](https://www.npmjs.com/package/@vaultcompass/dep-guard-core),
 so a scan needs no `--corpus-dir` and no setup. Building your own corpus
@@ -28,8 +28,8 @@ scores it before anything is fetched.
 
 ## What it checks
 
-Six rules, all offline and deterministic (plus two optional online checks --
-see below):
+Six rules, all offline and deterministic (plus three optional online checks
+-- see below):
 
 - **Unknown package** -- a new name absent from a corpus of real npm package
   names. The hallucination signal.
@@ -82,10 +82,35 @@ every invocation, pre-commit hooks included, which is why a
 latency-sensitive setup is usually better off passing `--online` in CI
 alone.
 
-Two checks, both backed by npm's public downloads and registry metadata
-APIs, both degrading to the offline result with a diagnostic on any network
+Three checks, all backed by npm's public downloads and registry metadata
+APIs, all degrading to the offline result with a diagnostic on any network
 failure rather than blocking:
 
+- **Unknown package resolution.** The offline unknown-package rule answers
+  from a corpus built on one dated registry walk, so every package
+  published after that walk reads as unknown to that release, forever.
+  `--online` asks the registry directly. If the name really exists, the
+  unknown-package finding is **downgraded to `low`** rather than removed:
+  `low` is below the default gate, so it stops blocking, but it stays in
+  the report so you can still see that dep-guard looked at the name and
+  what it concluded. That matters for one case in particular: a name
+  registered after the corpus walk but more than thirty days ago falls
+  outside registered-squat's age window, so this `low` finding is the only
+  thing dep-guard says about it. The downgrade asserts only that the name
+  exists; typosquat and registered-squat still judge whether it is
+  *suspicious*, which is the question that actually matters. If the
+  registry answers 404, the finding escalates from `high` to `critical`,
+  because the innocent explanation the offline message offers ("published
+  after that date") has just been ruled out. A 200 is not automatically
+  taken as existence: a name whose versions have all been unpublished, or
+  one npm has seized and replaced with a `0.0.1-security` placeholder,
+  keeps its `high` finding, since npm taking a name over is not evidence
+  the name is safe. Anything else -- a timeout, a server error, a spent
+  budget -- leaves the finding exactly as the offline scan made it, still
+  blocking, with the reason recorded in its `details`. A network failure
+  never means fewer or quieter findings. Names in your configured
+  `internalScopes` or `internalPrefixes` are never sent to the registry at
+  all.
 - **Typosquat popularity asymmetry.** Escalates a non-alias-list typosquat
   match from `low` to `high` when the candidate's own weekly downloads sit
   below a measured floor of two thousand downloads in the last week --
@@ -102,6 +127,118 @@ failure rather than blocking:
   risk the offline existence check has: a legitimately brand-new package
   looks identical to a squat by age and downloads alone.
 
+All three share one wall-clock budget of twenty seconds per run, not per
+request. Once it is spent the remaining lookups are skipped, the affected
+findings keep exactly the result the offline checks gave them, and an
+`online-deadline-exceeded` diagnostic says how many were skipped. Without
+it, a repository adding twenty new names could stall a commit for
+half a minute while every individual request stayed comfortably inside
+its own timeout.
+
+`--no-online` forces the online checks off for one run, overriding
+`"online": true` in `.dep-guard.json`. That is the flag to reach for in a
+pre-commit hook or an air-gapped build in a repository whose committed
+config turns them on.
+
+## Installing the pre-commit hook (`dep-guard init`)
+
+```
+dep-guard init                        # .git/hooks/pre-commit
+dep-guard init --manager husky        # .husky/pre-commit
+dep-guard init --manager lefthook     # lefthook-local.yml
+dep-guard init --manager precommit    # .pre-commit-config.yaml
+dep-guard init --dry-run              # print what would be written
+```
+
+The hook runs `dep-guard scan --staged` on every commit. It is safe to
+re-run: a second `init` reports the hook is already installed and changes
+nothing. It never overwrites a hook it did not write -- if one is already
+there, init stops and tells you what to merge in by hand.
+
+The generated hook is deliberately **fail-closed**: if the `dep-guard`
+binary is not on `PATH`, the commit is blocked with a one-line message
+rather than waved through. A gate that switches itself off when the tool
+is missing is a gate an attacker turns off by making the tool missing. It
+also passes dep-guard's own exit code straight through, so exit 2 ("could
+not run the checks") stays distinguishable from exit 1 ("blocking
+findings"), which are different facts.
+
+Under `lefthook` and the `pre-commit` framework, those managers own the
+hook's exit code themselves. A non-zero dep-guard still blocks the commit,
+but the difference between its 1 and its 2 does not survive into the exit
+code the manager reports.
+
+**To uninstall,** delete the file init wrote -- the path is printed when
+it installs, and `--dry-run` will tell you again. For `lefthook` and
+`pre-commit`, delete the file or just remove the `dep-guard` stanza if you
+have added your own hooks to it. There is no `init --revert`; one file is
+not worth a command that could delete the wrong thing.
+
+## GitHub Action
+
+`action.yml` at the root of this repository is a composite action that
+runs dep-guard and uploads the result to GitHub code scanning as SARIF.
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+
+steps:
+  - uses: actions/checkout@v5
+  - uses: vaultcompasshq/dep-guard@v0.2.0
+    with:
+      path: .
+      online: 'true'
+      fail-on: high
+```
+
+Inputs: `path` (default `.`), `online` (`true`/`false`, default `false`),
+`fail-on` (`critical|high|medium|low|none`, unset means dep-guard's own
+default), plus `version` (the npm dist-tag or version to run, default
+`latest`), `sarif-output` (default `dep-guard-results.sarif`), and
+`upload-sarif` (set `false` to write the file without uploading it, for a
+repository that does not have code scanning enabled).
+
+The SARIF is uploaded *before* the run is failed, so a scan that found
+something still gets its findings into code scanning. `security-events:
+write` is required for the upload; `actions/checkout` must run first.
+
+## SARIF output (`--format sarif`)
+
+```
+dep-guard scan --staged --format sarif > dep-guard.sarif
+```
+
+Writes SARIF 2.1.0 to stdout and nothing else, so it can be redirected
+straight into a file an uploader consumes. Diagnostics go to stderr, the
+same split `--format json` uses.
+
+The mapping, which is stable and shared across this family's gates:
+
+| SARIF field | dep-guard value |
+|---|---|
+| `tool.driver.name` | `dep-guard` |
+| `tool.driver.version` | the installed CLI version |
+| `result.ruleId` | `dep-guard/<rule-id>` |
+| `result.level` | `error` for critical and high, `warning` for medium, `note` for low |
+| `properties.severity` | dep-guard's own severity word, unflattened |
+| `properties.blocking` | whether this finding blocks at the run's threshold |
+| `properties.details` | the finding's `details` bag, verbatim |
+| `partialFingerprints["dep-guard/v1"]` | the finding's existing fingerprint, unchanged |
+| `locations[].logicalLocations[]` | `kind: package`, `fullyQualifiedName` the package name |
+| `locations[].physicalLocation` | the manifest path, relative, under `%SRCROOT%`; omitted for `dep-guard check`, which has no file behind it |
+
+Two of those are worth calling out. `properties.blocking` is dep-guard's
+own gate decision rather than something the consumer recomputes from the
+level, because SARIF's four levels cannot express a four-severity scale
+plus a configurable threshold. And `partialFingerprints` reuses the
+fingerprint dep-guard already uses for baselining, so a GitHub alert and
+a dep-guard baseline entry track the same finding across commits instead
+of drifting apart. No region is emitted: dep-guard does not record which
+line of a manifest a dependency sits on, and a guessed line number is
+indistinguishable from a real one once uploaded.
+
 ## Usage
 
 ```
@@ -109,10 +246,13 @@ dep-guard scan --staged --corpus-dir <dir>     # what this commit adds
 dep-guard scan --base main --corpus-dir <dir>  # what this branch adds
 dep-guard scan --corpus-dir <dir>              # audit the whole tree
 dep-guard check <name> --corpus-dir <dir>      # is this one safe to add
+dep-guard init                                 # install the pre-commit hook
 ```
 
 `--format json` prints a single result object on stdout with diagnostics on
-stderr, so a consumer can parse stdout alone.
+stderr, so a consumer can parse stdout alone. `--format sarif` does the
+same with a SARIF 2.1.0 log; `--format text` (the default) is the
+human-readable report.
 
 Exit codes are the contract: 0 clean, 1 findings at or above the threshold,
 2 something went wrong. A gate that cannot read its own

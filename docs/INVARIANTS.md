@@ -603,6 +603,7 @@ Current diagnostic codes: `audit-anchor-differs`,
 `lockfile-format-manifest-only`, `lockfile-missing`,
 `manifest-alias-empty`, `npm-lockfile-invalid-entry`, `npm-lockfile-v1`,
 `npmrc-pin-unparseable`, `online-check-unreachable`,
+`online-deadline-exceeded`,
 `path-outside-root`, `pnpm-lockfile-invalid-entry`,
 `pnpm-no-install-script-flag`, `symlink-cycle`,
 `tamper-resolution-unreadable`, `workspace-dir-unreadable`,
@@ -676,6 +677,10 @@ a whole subsystem rather than one code path.
 
 Degrading means the affected check contributes nothing it could not
 establish offline, and nothing it did establish is taken away. The
+one online step that removes a finding is described in "Standing a
+finding down is a different act from suppressing one" below, and it is
+an exception to the second half of that sentence rather than a
+counter-example to it. The
 typosquat popularity-asymmetry check either escalates a low-severity
 resemblance match to high, when the network confirmed the candidate is
 genuinely unpopular, or leaves it at the severity typosquatCheck already
@@ -759,17 +764,208 @@ forged low count, or a machine-global cache entry poisoned to a literal
 0, can cause a check to fire, or escalate, for a package that is
 genuinely fine; the cached 0 this fix writes for a confirmed no-record
 answer persists for the same 24 hours as any other cached count and is
-exactly as forgeable. What the online cache can never do, either
-direction, is remove or downgrade a finding the six OFFLINE checks
-already established: `applyTyposquatAsymmetry` only ever escalates a
-low to high or leaves it alone, `findRegisteredSquats` only ever adds a
-new finding or adds nothing, and neither touches an existing offline
-finding's severity or presence. So a corrupt or forged online cache can
-cost an extra fetch, a missed online-only escalation, or a spurious
-online-only finding -- never a name that the offline checks flagged
-reading as clean. It is loaded permissively on purpose: a cache file
+exactly as forgeable. What the online CACHE can never do, in either
+direction, is remove or downgrade a finding the offline checks already
+established. `applyTyposquatAsymmetry` only escalates a low to high or
+leaves it alone, `findRegisteredSquats` only adds a finding or adds
+nothing, and `resolveUnknownPackages` -- the one check whose answer CAN
+lower a severity -- is deliberately not allowed to read this cache at
+all. So a corrupt or forged online cache can cost an extra fetch, a
+missed online-only escalation, or a spurious online-only finding, never a
+name the offline checks flagged reading as clean.
+
+That last exclusion is the load-bearing one and is easy to undo by
+accident, so the reasoning is recorded here rather than left in a
+comment. The cache holds `created:<name>` entries, written for
+registered-squat's AGE question, and they never expire (CREATED_TTL_MS is
+null, because a real creation date never changes). Serving
+`resolveUnknownPackages` from them would be wrong twice over. A creation
+date cannot answer the question that check actually asks -- it cannot
+tell a real package from an npm security-holding placeholder or from a
+name whose every version has been unpublished, which is the distinction
+the whole check turns on. And because the entries never expire, a name
+that existed when some earlier scan asked would read as present forever
+afterwards on that machine, including a name npm has since REMOVED for
+security reasons, which is exactly the case where a stale "it exists"
+does the most damage.
+
+The dominant removal path is npm's own security removal, not an author's
+unpublish, and that is the reason this cannot be dismissed as rare. An
+author-initiated unpublish is confined to npm's 72-hour window and is
+genuinely uncommon; a security takedown has no window at all, happens
+precisely to the malicious names this tool exists to catch, and happens
+AFTER the name has been published long enough to be worth taking down --
+which is to say, after the window in which a machine may well have
+cached it. An earlier draft of this section argued the exposure was rare
+by appealing to the unpublish window. That argument was wrong because it
+was reasoning about the wrong removal path, and it is recorded here as a
+mistake rather than quietly deleted, because the next person to think
+about caching this answer will reach for the same argument.
+
+So existence for the unknown-package downgrade goes to the network, or
+the finding is left alone. Never to the cache. The cache remains exactly
+as valid as it always was for registered-squat's age question, which is
+what it was built for.
+
+It is loaded permissively on purpose: a cache file
 that fails to parse is discarded and rebuilt from an empty state, not a
 `DepGuardError`.
+
+## Online resolution may downgrade a finding, and may never remove one
+
+`resolveUnknownPackages` (online/unknown-package.ts) is the only thing in
+this engine that LOWERS a severity on the strength of a network answer.
+It does not remove findings, and neither does anything else in the online
+subsystem. The offline checks decide WHAT is reported; the network only
+ever adjusts how loudly. That sentence is the invariant, and everything
+below is why it is drawn there rather than one step further.
+
+unknown-package asserts one specific thing: this name was not on the
+registry when the corpus was walked. That assertion carries a stated
+ambiguity in its own message -- hallucinated, or simply newer than the
+corpus -- and it is the ambiguity, not the name, that makes the finding
+decay. Every package published after a release's walk reads as unknown
+to that release forever, so the false-positive rate on the flagship
+BLOCKING check climbs continuously from the moment a release is cut, and
+before 0.2.0 the only remedy a user had was an `allow` entry per
+package: a permanent, rule-wide exemption bought to clear a finding that
+was wrong about one fact.
+
+A registry answer confirming the name exists contradicts that specific
+assertion and nothing else. The finding is therefore DOWNGRADED to `low`,
+which sits below the default `medium` gate, so the thing a user feels --
+the commit is no longer blocked -- is delivered in full. It is not
+removed.
+
+An earlier version of this design removed it, on the reasoning that a
+refuted claim should be withdrawn rather than merely quietened. The
+reasoning was fine and the conclusion was wrong, because it conflated
+"this finding should not block" with "this finding should not be
+reported". Removing it makes "the corpus is stale about this package"
+indistinguishable, in a JSON or SARIF report, from "there was nothing to
+say about this package" -- and a reader auditing a report cannot then
+tell a check that ran and cleared a name from a check that never ran at
+all. Keeping the finding at `low` says both things at once: the gate is
+satisfied, and here is what was actually established. It also keeps a
+name a human may still want to look at in front of them, which matters
+for the case in the next paragraph.
+
+That case is the reason `low` and not silence, and it is a genuine gap in
+coverage rather than a stylistic preference. A name REGISTERED after the
+corpus walk but older than `REGISTERED_SQUAT_MAX_AGE_DAYS` falls through
+registered-squat entirely -- that check only fires inside its age window
+-- while also being absent from the corpus and now confirmed to exist by
+the registry. For a name in that window, `--online` is NOT a superset of
+offline coverage, and this downgraded `low` finding is the only signal
+dep-guard emits about it at all. Removing the finding would close the
+only channel that mentions it. Anyone tempted to drop these findings, or
+to filter `low` out of a report by default, should read this paragraph
+first.
+
+The difference from suppression stays load-bearing. `allow`,
+`ignorePaths` and the baseline suppress findings that remain TRUE; this
+downgrades one whose specific claim was refuted, and it leaves every
+other rule's verdict on that same package name completely untouched.
+typosquat still reports the resemblance, registered-squat still prices
+the name's age and downloads, install-script and tamper never enter into
+it. "This name exists" and "this name is safe" are different sentences
+and only the first one is ever being made here.
+
+Four constraints follow, and none of them is optional:
+
+- Nothing in this file removes a finding, on any branch. The function
+  returns the same list it was handed. That is a property of the code
+  rather than of any one branch, because a single branch that removed
+  would be invisible in a test of the others, so there is a test that
+  drives every reachable registry answer and asserts the list comes back
+  the same length each time.
+- A 200 is not by itself proof the package exists. npm keeps answering
+  200 for a name whose every version has been unpublished, and for a name
+  it has SEIZED after a malware or typosquat report and replaced with a
+  `0.0.1-security` placeholder. The downgrade requires a real latest
+  version, no unpublish record, and no security-holder marker; anything
+  else leaves the finding untouched with its own reason recorded. The
+  seized-name case is the one that matters most, because npm took that
+  name over precisely BECAUSE it was malicious, and reading npm's seizure
+  of a name as evidence the name is fine inverts the signal completely.
+  The discriminator is computed once, in `registry-client.ts`, against
+  the raw body -- a caller handed only `createdAt` cannot tell any of
+  these apart, which is exactly how this bug got in.
+- A 404 is not the mirror image of a 200 and must not be treated as one.
+  It refutes the innocent half of the ambiguity instead of the guilty
+  half, so it escalates to critical and rewrites the message to stop
+  offering "published after that date" as an explanation the registry
+  has just ruled out.
+- Every other outcome -- a timeout, a 5xx, a malformed response, a spent
+  per-run deadline -- leaves the finding exactly as the offline check
+  made it. Not downgraded, not removed, not annotated into something
+  weaker. A network that failed to answer is not an answer, and this is
+  the one place where reading it as one would turn a blocking check off.
+
+Neither the downgrade nor the escalation touches the fingerprint, and
+neither can: the four hashed components are the rule id, the package
+name, the manifest path and `details.signal`, and this function writes
+only `details.onlineResolution` and `details.onlineResolutionReason`,
+neither of which is hashed. A user who baselined an unknown-package
+finding offline must not see it change identity the first time they pass
+`--online`. Both directions have a test.
+
+The existence question is asked LIVE and never served from the online
+cache. See the online-cache section above for why: the cache holds
+never-expiring creation dates written for a different question, and a
+stale "it exists" is most harmful for exactly the names npm has since
+removed.
+
+## The online subsystem has one wall clock, and it is not the same as a request timeout
+
+`registry-client.ts` bounds a REQUEST: two attempts, five seconds each,
+plus whatever backoff cap the caller supplies. Nothing in that bounds a
+RUN. A modest delta carrying twenty new names, each resolving in a
+second or two, is a pre-commit hook that takes half a minute, and every
+per-request budget involved is being honoured perfectly while it
+happens. dep-guard runs per commit, so a latency budget that only holds
+per request is not a latency budget.
+
+`createOnlineDeadline` (online/deadline.ts) is therefore created once per
+scan, in `enrichOnline`, and shared by every online step. A step asks it
+before spending a request and stops when it is spent. What "stops" means
+is fixed by the degrade rule above and is deliberately identical to what
+a network failure means: the affected findings are left exactly as the
+offline checks made them, nothing is removed, nothing is downgraded, and
+the reason is recorded in an `online-deadline-exceeded` diagnostic rather
+than implied by silence. A spent deadline can therefore only ever cost a
+signal the scan would not have had offline either. It can never cost one
+it already has.
+
+The deadline is re-asked before every name in a per-name loop, not once
+at the top of a step. A single slow lookup can spend the whole budget, so
+a loop that legitimately started inside the budget can be outside it
+three names later, and a step that only checked on entry would run the
+remaining nineteen requests it had already decided to make. The two
+places this matters are `resolveUnknownPackages` and
+`findRegisteredSquats`'s packument loop.
+
+`applyTyposquatAsymmetry` is gated from OUTSIDE, in `enrichOnline`,
+rather than internally, and that asymmetry is deliberate rather than an
+oversight: it issues exactly one bulk request and has no per-name loop,
+so it has exactly one point at which it could stop, and that point is
+before it starts. Adding a deadline parameter to it would be a second
+copy of a decision with only one branch.
+
+The order the three steps run in is a priority decision about how the
+budget is spent, and it is written down because it looks arbitrary and is
+not. unknown-package resolution runs FIRST because it is the only step
+that can withdraw a false positive from the check that actually blocks,
+and the only one whose absence gets steadily worse as a release ages away
+from its corpus walk. The other two only ever add or escalate, so a
+budget spent before them costs a signal that would not have existed
+offline either; a budget spent before the first one leaves a user
+holding a blocking finding they have no way to clear.
+
+The budget is a constant (`DEFAULT_ONLINE_BUDGET_MS`, twenty seconds) and
+not a config key today. If it ever becomes one, it becomes a config key
+-- it does not become a second constant somewhere else that has to be
+kept in step with this one.
 
 ## The popularity list is a trust input, and it is sized for its own rule
 

@@ -21,6 +21,12 @@ import { DepGuardError } from './types.js';
 import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
 import { applyTyposquatAsymmetry } from './online/asymmetry.js';
 import { findRegisteredSquats } from './online/registered-squat.js';
+import { resolveUnknownPackages } from './online/unknown-package.js';
+import {
+  ONLINE_DEADLINE_CODE,
+  createOnlineDeadline,
+  deadlineDiagnosticMessage,
+} from './online/deadline.js';
 import { defaultCachePath, loadCache } from './online/cache.js';
 import { fetchPackument, fetchWeeklyDownloads } from './online/registry-client.js';
 import type { DownloadCountsResult } from './online/registry-client.js';
@@ -300,21 +306,100 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
   return packument;
 }
 
+// The three online steps, in the order the run's one wall-clock budget is
+// spent on them. The order is a priority decision, not an accident:
+//
+//  1. unknown-package resolution, because it is the only step that can
+//     REMOVE a false positive from the flagship blocking check, and the
+//     only one whose absence gets steadily worse as a release ages away
+//     from its corpus walk. If the budget only stretches to one step, this
+//     is the one worth having.
+//  2. typosquat popularity asymmetry, which escalates an existing low.
+//  3. registered-squat, which adds a new medium.
+//
+// Steps 2 and 3 both only ever add or escalate, so a budget spent before
+// them costs a signal that would not have existed offline either. Step 1
+// is the one whose omission leaves a user with a blocking finding they
+// have no way to clear, which is why it goes first.
+//
+// Never throws, per docs/INVARIANTS.md: each step owns its own error
+// handling and turns a failure into a diagnostic, because --online
+// reaching a pre-commit hook must not let a flaky connection block a
+// commit.
+// Existence for the unknown-package check is asked LIVE, never served
+// from the shared cache, and the two reasons are independent.
+//
+// First, the cache cannot answer this question. It stores a `created:`
+// date, written for registered-squat's age question, and a date cannot
+// tell a real package from an npm security-holding placeholder or from a
+// name whose every version has been unpublished. Handing a cache hit to
+// this check is handing it a fact about a different question.
+//
+// Second, even a cache that did store presence would be the wrong input
+// here. `created:` entries never expire, so a name that existed when some
+// earlier scan asked would read as present forever afterwards on that
+// machine -- including a name npm has since removed for security reasons,
+// which is the single case where a stale "it exists" is most harmful.
+// Standing a blocking finding down, or downgrading it, is the one place
+// in this subsystem where a wrong answer costs coverage rather than
+// costing an extra signal, so it goes to the network or it leaves the
+// finding alone.
+//
+// The cache stays exactly as valid as it was for registered-squat's age
+// question, which is what it was written for: a real creation date does
+// not change.
+async function liveFetchPackument(name: string) {
+  return fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
+}
+
 async function enrichOnline(
   rawFindings: Omit<Finding, 'fingerprint'>[],
   ctx: CheckContext
 ): Promise<Omit<Finding, 'fingerprint'>[]> {
-  await applyTyposquatAsymmetry(
+  const deadline = createOnlineDeadline();
+
+  const resolved = await resolveUnknownPackages(
     rawFindings,
-    { fetchWeeklyDownloads: cachedFetchWeeklyDownloads },
-    ctx.diagnostics
+    ctx,
+    { fetchPackument: liveFetchPackument },
+    ctx.diagnostics,
+    deadline
   );
+
+  // applyTyposquatAsymmetry issues one bulk request and has no per-name
+  // loop, so it is gated here rather than internally: there is exactly one
+  // point at which it could stop, and that point is before it starts. Its
+  // candidates are counted the same way it counts them itself so the
+  // diagnostic names a real number.
+  const asymmetryCandidates = resolved.filter(
+    (f) => f.ruleId === 'typosquat' && f.severity === 'low'
+  ).length;
+  if (deadline.expired()) {
+    if (asymmetryCandidates > 0) {
+      ctx.diagnostics.push({
+        code: ONLINE_DEADLINE_CODE,
+        message: deadlineDiagnosticMessage(
+          'typosquat popularity asymmetry',
+          asymmetryCandidates,
+          deadline
+        ),
+      });
+    }
+  } else {
+    await applyTyposquatAsymmetry(
+      resolved,
+      { fetchWeeklyDownloads: cachedFetchWeeklyDownloads },
+      ctx.diagnostics
+    );
+  }
+
   const registeredSquats = await findRegisteredSquats(
     ctx,
     { fetchWeeklyDownloads: cachedFetchWeeklyDownloads, fetchPackument: cachedFetchPackument },
-    ctx.diagnostics
+    ctx.diagnostics,
+    deadline
   );
-  return [...rawFindings, ...registeredSquats];
+  return [...resolved, ...registeredSquats];
 }
 
 interface RunInfo {
@@ -508,8 +593,18 @@ const SYNTHETIC_SPECIFIER = '0.0.0';
 // clean"; this is the same courtesy for checkSingle's structural gap, so
 // a caller can tell "checkSingle found nothing" apart from "checkSingle
 // found nothing AND could only look at three of six rules".
+// Exported because it is the only reliable way, from outside, to tell a
+// checkSingle result from an ordinary audit scan: both report mode
+// 'audit', and checkSingle's fabricated manifestPath is the literal
+// "package.json", which a real root-manifest finding also carries. The
+// CLI's SARIF renderer needs that distinction to avoid pointing a
+// physical location at a file the finding has nothing to do with, and
+// importing the constant is how it gets it without a second copy of the
+// string that could drift from this one.
+export const CHECK_SINGLE_DIAGNOSTIC_CODE = 'check-single-name-only';
+
 const NAME_ONLY_DIAGNOSTIC: Diagnostic = {
-  code: 'check-single-name-only',
+  code: CHECK_SINGLE_DIAGNOSTIC_CODE,
   message:
     'checkSingle only evaluates the name-based checks (existence, typosquat, and the ' +
     'dependency-confusion internal-name rule); lockfile-tamper, install-script, and ' +
