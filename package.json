@@ -12,6 +12,7 @@
     "typecheck": "tsc -b packages/core packages/cli && tsc --noEmit -p tsconfig.test.json",
     "lint": "pnpm check:public-hygiene",
     "check:public-hygiene": "node scripts/check-public-hygiene.mjs",
+    "bootstrap:npm": "bash scripts/bootstrap-npm-packages.sh",
     "corpus:build": "node scripts/build-corpus.mjs",
     "corpus:refresh": "node scripts/build-corpus.mjs --refresh",
     "corpus:slice": "node scripts/build-corpus.mjs --max-names 20000",
