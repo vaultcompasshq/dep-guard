@@ -809,31 +809,40 @@ describe('the init command, through the real binary', () => {
     // --dry-run did not WRITE anything; a --dry-run that additionally read
     // the policy config or a lockfile, or shelled out beyond planInit's own
     // read-only git probing, would pass every assertion in this test as it
-    // stood before this one. This lists, in the exact order planInit and
-    // hookArtifactFor issue them for the default (native) manager, every
-    // git call a dry run legitimately makes: two redundant-but-harmless
-    // "rev-parse --show-toplevel" resolutions inside hookArtifactFor (one
-    // from its own unused `root` binding, one from effectiveHooksDir) on
-    // top of planInit's own initial one, then "rev-parse --git-dir" and
-    // "config --get core.hooksPath" from effectiveHooksDir working out
-    // where git will actually look for hooks. None of these write
-    // anything, read a lockfile, or read .dep-guard.json.
+    // stood before this one. A dry run may only ask git where it is and
+    // where it looks for hooks: "rev-parse --show-toplevel", "rev-parse
+    // --git-dir", and "config --get core.hooksPath". Those are the only
+    // three shapes planInit, hookArtifactFor, effectiveHooksDir, and the
+    // husky detection issue, in whatever number and order the code
+    // happens to need them. None of them write anything, read a lockfile,
+    // or read .dep-guard.json.
+    //
+    // This used to pin the exact call list in order. That broke the
+    // moment the husky-directory detection added more of the same
+    // read-only probes, in a release run, after two branches that each
+    // passed alone were merged. An allowlist keeps the property that
+    // matters (no call outside these three shapes) without turning every
+    // added read into a red release.
     //
     // Verified by injecting a mutation into planInit (init.ts) that called
     // gitOutput(cwd, ['add', '-A']) right after resolving `root`, simulating
     // a dry run that reaches into the working tree beyond what it needs:
-    // with the mutation in place this assertion failed (the recorded call
-    // list contained an unexpected "add -A" entry with 6 calls instead of
-    // 5), while the pre-existing existsSync checks above kept passing,
+    // with the mutation in place this assertion failed on the "add -A"
+    // entry, while the pre-existing existsSync checks above kept passing,
     // since the injected git call was not itself a write to the temp
     // directory. Reverted after confirming red.
-    expect(await readGitStubCalls(stub.logPath)).toEqual([
-      ['rev-parse', '--show-toplevel'],
-      ['rev-parse', '--show-toplevel'],
+    const gitCalls = await readGitStubCalls(stub.logPath);
+    const allowedReadOnlyCalls = [
       ['rev-parse', '--show-toplevel'],
       ['rev-parse', '--git-dir'],
       ['config', '--get', 'core.hooksPath'],
-    ]);
+    ];
+    const isAllowed = (call: string[]) =>
+      allowedReadOnlyCalls.some(
+        (allowed) => allowed.length === call.length && allowed.every((arg, i) => arg === call[i]),
+      );
+    expect(gitCalls.length).toBeGreaterThan(0);
+    expect(gitCalls.filter((call) => !isAllowed(call))).toEqual([]);
 
     const bad = await runCli(['init', '--manager', 'nonsense'], repo);
     expect(bad.exitCode).toBe(2);
