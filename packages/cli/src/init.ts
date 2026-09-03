@@ -31,14 +31,7 @@
 // neither bug is visible in the text.
 
 import { execFileSync } from 'node:child_process';
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 export type HookManager = 'native' | 'husky' | 'lefthook' | 'precommit';
@@ -247,43 +240,29 @@ function effectiveHooksDir(cwd: string): string {
 // is a two-line dispatcher that sources "./h", and "h" is what execs the
 // tracked file.
 //
-// Three independent signals, any one of which is enough to recognise
-// this shape. None of them requires husky to have actually run recently
-// -- a repository can be inspected right after a fresh clone, before its
+// The redirect fires on exactly one signal: the resolved hooks
+// directory's own shape, basename "_" under a directory named ".husky".
+// This is the shape alone, checked without touching the filesystem, so
+// it still fires against an empty or not-yet-regenerated directory, and
+// it requires no husky script to have actually run recently -- a
+// repository can be inspected right after a fresh clone, before its
 // "prepare" script has ever fired, and core.hooksPath is already set by
 // then (it is committed nowhere; husky sets it locally the first time it
-// runs, and it survives until something unsets it):
+// runs, and it survives until something unsets it).
 //
-//  1. The resolved hooks directory's basename is "_" under a directory
-//     named ".husky". This is the shape alone, checked without touching
-//     the filesystem, so it still fires against an empty or not-yet-
-//     regenerated directory.
-//  2. The generated "h" shim exists in that directory.
-//  3. The pre-commit file already there is husky's two-line dispatcher.
+// An earlier version of this function also treated the presence of a
+// file named "h", or a pre-commit file shaped like husky's two-line
+// dispatcher, as independently sufficient. Both produced real false
+// positives: a core.hooksPath=.githooks directory holding an unrelated
+// helper file that happened to be named "h", and a default
+// .git/hooks/pre-commit that happened to be two lines shaped like
+// husky's dispatcher. In both cases init redirected to .husky/pre-commit,
+// and the hook actually sitting at the location git reads was never
+// foreign-checked -- a real commit went through ungated. Content is
+// never enough on its own to establish this shape now; only the
+// directory's own name and position can.
 function isHuskyGeneratedHooksDir(hooksDir: string): boolean {
-  if (path.basename(hooksDir) === '_' && path.basename(path.dirname(hooksDir)) === '.husky') {
-    return true;
-  }
-  if (existsSync(path.join(hooksDir, 'h'))) {
-    return true;
-  }
-  const preCommit = readIfExists(path.join(hooksDir, 'pre-commit'));
-  return preCommit !== undefined && isHuskyDispatcherScript(preCommit);
-}
-
-// husky 9's generated dispatcher: a shebang line, then exactly one line
-// sourcing "$(dirname "$0")/h". Matched loosely, by shape rather than by
-// exact bytes, so a husky point release that reformats this file a little
-// is still recognised.
-function isHuskyDispatcherScript(content: string): boolean {
-  const lines = content
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  if (lines.length !== 2 || !lines[0].startsWith('#!')) {
-    return false;
-  }
-  return lines[1].includes('dirname') && /\/h"?$/.test(lines[1]);
+  return path.basename(hooksDir) === '_' && path.basename(path.dirname(hooksDir)) === '.husky';
 }
 
 interface NativeHookArtifact {

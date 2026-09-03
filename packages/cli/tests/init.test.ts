@@ -433,6 +433,74 @@ describe("dep-guard init: husky 9's generated hooks directory", () => {
   });
 });
 
+describe('dep-guard init: husky-shape detection is anchored to the directory, not to file names', () => {
+  // The redirect must fire on the resolved hooks directory's own shape
+  // (basename "_" under a directory named ".husky") and nothing else.
+  // Two real false positives motivate this: a helper file that happens
+  // to be named "h" in an unrelated hooks directory, and a default
+  // .git/hooks/pre-commit that happens to be shaped like husky's
+  // two-line dispatcher. Either one redirecting on its own means the
+  // hook actually sitting where git reads it is never foreign-checked,
+  // and a real commit can go through ungated.
+
+  test('a core.hooksPath directory that merely contains a file named "h" is not treated as husky', () => {
+    const dir = initRepo();
+    execFileSync('git', ['config', 'core.hooksPath', '.githooks'], { cwd: dir });
+    mkdirSync(path.join(dir, '.githooks'), { recursive: true });
+    // An unrelated helper file that happens to share husky's shim's name.
+    writeFileSync(path.join(dir, '.githooks', 'h'), '#!/bin/sh\necho unrelated helper\n');
+
+    const result = install(dir);
+
+    expect(result.ok).toBe(true);
+    expect(result.huskyManaged).toBe(false);
+    expect(result.hookPath).toBe(path.join(realpathSync(dir), '.githooks', 'pre-commit'));
+    expect(existsSync(path.join(dir, '.githooks', 'pre-commit'))).toBe(true);
+    expect(existsSync(path.join(dir, '.husky'))).toBe(false);
+  });
+
+  test('a default hooks directory whose pre-commit happens to look like a husky dispatcher is still foreign-checked at its real location', () => {
+    // Resolved up front (macOS symlinks /var into /private/var) so the
+    // relative conflict path this asserts on isn't thrown off by cwd and
+    // git's own resolved root disagreeing about spelling the same
+    // directory -- a cosmetic quirk of this test's tmpdir, unrelated to
+    // husky detection.
+    const dir = realpathSync(initRepo());
+    const dispatcherShaped = '#!/bin/sh\n. "$(dirname -- "$0")/h"\n';
+    mkdirSync(path.join(dir, '.git', 'hooks'), { recursive: true });
+    writeFileSync(nativeHookPath(dir), dispatcherShaped);
+
+    const result = install(dir);
+
+    expect(result.ok).toBe(false);
+    expect(result.huskyManaged).toBe(false);
+    expect(result.conflicts.map((c) => c.reason)).toContain('foreign-hook');
+    expect(result.conflicts.map((c) => c.path)).toEqual(['.git/hooks/pre-commit']);
+    expect(existsSync(path.join(dir, '.husky'))).toBe(false);
+    expect(readFileSync(nativeHookPath(dir), 'utf8')).toBe(dispatcherShaped);
+  });
+
+  test('a husky 8 layout resolves .husky/pre-commit via the native path, not the redirect', () => {
+    const dir = initRepo();
+    execFileSync('git', ['config', 'core.hooksPath', '.husky'], { cwd: dir });
+    mkdirSync(path.join(dir, '.husky', '_'), { recursive: true });
+    writeFileSync(path.join(dir, '.husky', '_', 'husky.sh'), '#!/bin/sh\n# husky 8 preamble\n');
+    const husky8Hook = '#!/bin/sh\n. "$(dirname "$0")/_/husky.sh"\necho existing husky 8 hook\n';
+    mkdirSync(path.dirname(path.join(dir, '.husky', 'pre-commit')), { recursive: true });
+    writeFileSync(path.join(dir, '.husky', 'pre-commit'), husky8Hook);
+
+    const result = install(dir);
+
+    expect(result.huskyManaged).toBe(false);
+    expect(result.hookPath).toBe(path.join(realpathSync(dir), '.husky', 'pre-commit'));
+    // The file that is already there is foreign (not written by
+    // dep-guard), so this still refuses rather than overwriting it --
+    // that part of the behaviour is unchanged by any of this.
+    expect(result.ok).toBe(false);
+    expect(result.conflicts.map((c) => c.reason)).toContain('foreign-hook');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The generated hook, actually executed.
 // ---------------------------------------------------------------------------
