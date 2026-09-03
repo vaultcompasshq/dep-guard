@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -133,6 +133,61 @@ function manyUnknownDeps(count: number): Record<string, string> {
     deps[`zz-epipe-test-dep-${i}`] = '1.0.0';
   }
   return deps;
+}
+
+// A stub "git" placed first on PATH so a test can prove a command never
+// shelled out, and not merely that it never wrote a file. The temp-dir-
+// stays-empty style of assertion used elsewhere in this file (existsSync
+// checks after a --dry-run or --help run) only catches a command that
+// writes; a command that reads the repository or shells out beyond what
+// it legitimately needs would sail through those unnoticed. This
+// intercepts every "git" invocation the CLI process (or anything it
+// spawns) makes, logs the exact argv as one JSON line per call, and then
+// execs the real git so the command under test keeps behaving correctly
+// -- init's own git rev-parse/config calls still need real answers.
+async function makeGitStub(): Promise<{ env: NodeJS.ProcessEnv; logPath: string }> {
+  const binDir = await makeTempDir('dep-guard-git-stub-bin-');
+  const logDir = await makeTempDir('dep-guard-git-stub-log-');
+  const logPath = path.join(logDir, 'calls.log');
+  const { stdout: realGitPathRaw } = await execFileAsync('which', ['git']);
+  const realGitPath = realGitPathRaw.trim();
+  const stubScript = [
+    '#!/usr/bin/env node',
+    'const fs = require("node:fs");',
+    'const { spawnSync } = require("node:child_process");',
+    'const args = process.argv.slice(2);',
+    'fs.appendFileSync(process.env.DEP_GUARD_GIT_STUB_LOG, JSON.stringify(args) + "\\n");',
+    'const result = spawnSync(process.env.DEP_GUARD_REAL_GIT, args, { stdio: "inherit" });',
+    'process.exit(result.status === null ? 1 : result.status);',
+    '',
+  ].join('\n');
+  const stubPath = path.join(binDir, 'git');
+  await writeFile(stubPath, stubScript, 'utf8');
+  await chmod(stubPath, 0o755);
+
+  return {
+    logPath,
+    env: {
+      DEP_GUARD_GIT_STUB_LOG: logPath,
+      DEP_GUARD_REAL_GIT: realGitPath,
+      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    },
+  };
+}
+
+// Every recorded git invocation as its argv array, oldest first, or []
+// when git was never called at all (the stub only ever creates the log
+// file on its first call, via appendFileSync, so "never called" and
+// "file absent" are the same fact here).
+async function readGitStubCalls(logPath: string): Promise<string[][]> {
+  if (!existsSync(logPath)) {
+    return [];
+  }
+  const content = await readFile(logPath, 'utf8');
+  return content
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as string[]);
 }
 
 beforeAll(async () => {
@@ -462,8 +517,24 @@ describe('commander usage errors exit 2, not 1', () => {
 
   // --help and --version are not usage mistakes -- they still exit 0.
   test('--help exits 0', async () => {
-    const run = await runCli(['--help'], repo);
+    const stub = await makeGitStub();
+    const run = await runCli(['--help'], repo, stub.env);
     expect(run.exitCode).toBe(0);
+    // MUTATION-CHECKED 2026-09-02. A command that only prints usage text
+    // and exits has no reason to touch the repository at all, but nothing
+    // above proves that: exitCode 0 says nothing about what --help did on
+    // the way there. The stub git's log file is only ever created on its
+    // first invocation (see makeGitStub/readGitStubCalls above), so
+    // asserting it stays absent is the same as asserting zero git calls.
+    //
+    // Verified by injecting a mutation into cli.ts's program setup that
+    // called execFileSync('git', ['--version']) unconditionally before
+    // program.parseAsync, simulating a --help path that shells out: with
+    // the mutation in place this assertion failed (a log file existed,
+    // containing one recorded call), while the exitCode-0 assertion above
+    // kept passing, since --help still exited 0 regardless. Reverted after
+    // confirming red.
+    expect(await readGitStubCalls(stub.logPath)).toEqual([]);
   }, CLI_TIMEOUT_MS);
 
   test('--version exits 0', async () => {
@@ -729,10 +800,40 @@ describe('the init command, through the real binary', () => {
     await write('package.json', manifestJson({}));
     await commitAll('first');
 
-    const dry = await runCli(['init', '--dry-run'], repo);
+    const stub = await makeGitStub();
+    const dry = await runCli(['init', '--dry-run'], repo, stub.env);
     expect(dry.exitCode).toBe(0);
     expect(dry.stdout).toContain('dry run');
     expect(existsSync(path.join(repo, '.git', 'hooks', 'pre-commit'))).toBe(false);
+    // MUTATION-CHECKED 2026-09-02. The existsSync checks above only prove
+    // --dry-run did not WRITE anything; a --dry-run that additionally read
+    // the policy config or a lockfile, or shelled out beyond planInit's own
+    // read-only git probing, would pass every assertion in this test as it
+    // stood before this one. This lists, in the exact order planInit and
+    // hookArtifactFor issue them for the default (native) manager, every
+    // git call a dry run legitimately makes: two redundant-but-harmless
+    // "rev-parse --show-toplevel" resolutions inside hookArtifactFor (one
+    // from its own unused `root` binding, one from effectiveHooksDir) on
+    // top of planInit's own initial one, then "rev-parse --git-dir" and
+    // "config --get core.hooksPath" from effectiveHooksDir working out
+    // where git will actually look for hooks. None of these write
+    // anything, read a lockfile, or read .dep-guard.json.
+    //
+    // Verified by injecting a mutation into planInit (init.ts) that called
+    // gitOutput(cwd, ['add', '-A']) right after resolving `root`, simulating
+    // a dry run that reaches into the working tree beyond what it needs:
+    // with the mutation in place this assertion failed (the recorded call
+    // list contained an unexpected "add -A" entry with 6 calls instead of
+    // 5), while the pre-existing existsSync checks above kept passing,
+    // since the injected git call was not itself a write to the temp
+    // directory. Reverted after confirming red.
+    expect(await readGitStubCalls(stub.logPath)).toEqual([
+      ['rev-parse', '--show-toplevel'],
+      ['rev-parse', '--show-toplevel'],
+      ['rev-parse', '--show-toplevel'],
+      ['rev-parse', '--git-dir'],
+      ['config', '--get', 'core.hooksPath'],
+    ]);
 
     const bad = await runCli(['init', '--manager', 'nonsense'], repo);
     expect(bad.exitCode).toBe(2);

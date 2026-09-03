@@ -1,0 +1,64 @@
+{
+  "findings": [
+    {
+      "ruleId": "unknown-package",
+      "severity": "high",
+      "packageName": "raect",
+      "message": "\"raect\" is not in the known-package corpus built 2026-08-01. It may be hallucinated, or published after that date.",
+      "manifestPath": "package.json",
+      "details": {
+        "specifier": "^1.0.0",
+        "depType": "dependencies",
+        "protocol": "registry",
+        "corpusBuiltAt": "2026-08-01"
+      },
+      "fingerprint": "419caaece0144c9f177d5e1cc446d6a7f422b2d83a675f663b2bd554fc0565b0"
+    },
+    {
+      "ruleId": "unknown-package",
+      "severity": "high",
+      "packageName": "some-unknown-thing",
+      "message": "\"some-unknown-thing\" is not in the known-package corpus built 2026-08-01. It may be hallucinated, or published after that date.",
+      "manifestPath": "package.json",
+      "details": {
+        "specifier": "^1.0.0",
+        "depType": "dependencies",
+        "protocol": "registry",
+        "corpusBuiltAt": "2026-08-01"
+      },
+      "fingerprint": "83e77ae5a3d4ac8fb440f1a54c5f635346d7924eafaf9bd90c5e7e40e510425e"
+    },
+    {
+      "ruleId": "typosquat",
+      "severity": "low",
+      "packageName": "raect",
+      "message": "\"raect\" transposes two characters of \"react\" (rank 1). Confirm the name is the package you meant to install.",
+      "manifestPath": "package.json",
+      "details": {
+        "matchedBy": "character-transposition",
+        "target": "react",
+        "targetRank": 1,
+        "specifier": "^1.0.0",
+        "depType": "dependencies"
+      },
+      "fingerprint": "5d79d445d06b04bf82d3ad74229af0528269b7c008a8535b33bf4b2d90cc7d41"
+    }
+  ],
+  "suppressed": 0,
+  "ignored": 0,
+  "run": {
+    "mode": "base",
+    "failOn": "medium",
+    "blockingMatches": 2,
+    "durationMs": 0,
+    "corpusBuiltAt": "2026-08-01",
+    "lockfileFormat": "none",
+    "diagnostics": [
+      {
+        "code": "lockfile-missing",
+        "message": "no lockfile was found, so the lockfile-tamper and install-script checks had nothing to read and were skipped; the manifest-level checks still ran"
+      }
+    ]
+  },
+  "exitCode": 1
+}
