@@ -33,6 +33,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   statSync,
@@ -167,6 +168,14 @@ export interface InitResult {
   conflicts: InitConflict[];
   /** Absolute path of the artifact this manager owns. */
   hookPath: string;
+  /**
+   * True when a bare (native) init resolved to husky's tracked hook file
+   * because the effective hooks directory turned out to be husky 9's
+   * generated .husky/_. `manager` stays "native" -- this was never a
+   * `--manager husky` invocation -- but the artifact and its content are
+   * husky's.
+   */
+  huskyManaged: boolean;
 }
 
 function gitOutput(cwd: string, args: string[]): string | null {
@@ -230,6 +239,73 @@ function effectiveHooksDir(cwd: string): string {
   return path.isAbsolute(hooksPath) ? hooksPath : path.join(root, hooksPath);
 }
 
+// husky 9 sets core.hooksPath to .husky/_ -- a directory husky's own
+// "prepare" script generates and .gitignores, rewriting it from scratch
+// on every install. Writing a hook there works until the next install
+// and then silently stops existing, because the file git actually keeps
+// running long-term is the TRACKED .husky/<hookname>: .husky/_/<hookname>
+// is a two-line dispatcher that sources "./h", and "h" is what execs the
+// tracked file.
+//
+// Three independent signals, any one of which is enough to recognise
+// this shape. None of them requires husky to have actually run recently
+// -- a repository can be inspected right after a fresh clone, before its
+// "prepare" script has ever fired, and core.hooksPath is already set by
+// then (it is committed nowhere; husky sets it locally the first time it
+// runs, and it survives until something unsets it):
+//
+//  1. The resolved hooks directory's basename is "_" under a directory
+//     named ".husky". This is the shape alone, checked without touching
+//     the filesystem, so it still fires against an empty or not-yet-
+//     regenerated directory.
+//  2. The generated "h" shim exists in that directory.
+//  3. The pre-commit file already there is husky's two-line dispatcher.
+function isHuskyGeneratedHooksDir(hooksDir: string): boolean {
+  if (path.basename(hooksDir) === '_' && path.basename(path.dirname(hooksDir)) === '.husky') {
+    return true;
+  }
+  if (existsSync(path.join(hooksDir, 'h'))) {
+    return true;
+  }
+  const preCommit = readIfExists(path.join(hooksDir, 'pre-commit'));
+  return preCommit !== undefined && isHuskyDispatcherScript(preCommit);
+}
+
+// husky 9's generated dispatcher: a shebang line, then exactly one line
+// sourcing "$(dirname "$0")/h". Matched loosely, by shape rather than by
+// exact bytes, so a husky point release that reformats this file a little
+// is still recognised.
+function isHuskyDispatcherScript(content: string): boolean {
+  const lines = content
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length !== 2 || !lines[0].startsWith('#!')) {
+    return false;
+  }
+  return lines[1].includes('dirname') && /\/h"?$/.test(lines[1]);
+}
+
+interface NativeHookArtifact {
+  path: string;
+  /** True when this resolved to husky's tracked file instead of the
+   * requested native location, because the effective hooks directory
+   * turned out to be husky 9's generated .husky/_. */
+  huskyManaged: boolean;
+}
+
+// The native manager's own resolution, folding in the husky-generated-dir
+// redirect: when the effective hooks directory turns out to be husky 9's
+// generated .husky/_, the artifact this manager owns is the same tracked
+// file the husky manager owns, never anything under .husky/_.
+function resolveNativeHookArtifact(cwd: string, root: string): NativeHookArtifact {
+  const hooksDir = effectiveHooksDir(cwd);
+  if (isHuskyGeneratedHooksDir(hooksDir)) {
+    return { path: path.join(root, '.husky', 'pre-commit'), huskyManaged: true };
+  }
+  return { path: path.join(hooksDir, 'pre-commit'), huskyManaged: false };
+}
+
 /**
  * Absolute path of the file the given manager's hook lives in.
  *
@@ -250,7 +326,7 @@ export function hookArtifactFor(cwd: string, manager: HookManager): string {
       return path.join(root, '.pre-commit-config.yaml');
     case 'native':
     default:
-      return path.join(effectiveHooksDir(cwd), 'pre-commit');
+      return resolveNativeHookArtifact(cwd, root).path;
   }
 }
 
@@ -318,6 +394,7 @@ export function planInit(options: InitOptions = {}): InitResult {
     actions,
     conflicts,
     hookPath: '',
+    huskyManaged: false,
   };
 
   const root = repoRoot(cwd);
@@ -330,7 +407,12 @@ export function planInit(options: InitOptions = {}): InitResult {
     return { ...base, hookPath: '', ok: false, alreadyInstalled: false };
   }
 
-  const hookPath = hookArtifactFor(cwd, manager);
+  // A bare (native) init resolves through the husky-generated-dir check;
+  // every other manager resolves the way it always has.
+  const huskyManaged = manager === 'native' && resolveNativeHookArtifact(cwd, root).huskyManaged;
+  const hookPath = huskyManaged
+    ? path.join(root, '.husky', 'pre-commit')
+    : hookArtifactFor(cwd, manager);
   // Reported relative to the repository ROOT, not to cwd: init run from a
   // subdirectory would otherwise print a path full of "../.." segments
   // for a file that has a perfectly ordinary name from the root.
@@ -339,7 +421,7 @@ export function planInit(options: InitOptions = {}): InitResult {
 
   if (existing !== undefined && existing.includes(MANAGED_HOOK_MARKER)) {
     actions.push({ kind: 'skip', path: relPath, detail: 'already installed by dep-guard init' });
-    return { ...base, hookPath, ok: true, alreadyInstalled: true };
+    return { ...base, hookPath, huskyManaged, ok: true, alreadyInstalled: true };
   }
 
   // A whitespace-only file is not a foreign hook. git ships .sample hooks
@@ -349,9 +431,9 @@ export function planInit(options: InitOptions = {}): InitResult {
     conflicts.push({
       path: relPath,
       reason: 'foreign-hook',
-      guidance: foreignGuidance(manager, relPath),
+      guidance: foreignGuidance(huskyManaged ? 'husky' : manager, relPath),
     });
-    return { ...base, hookPath, ok: false, alreadyInstalled: false };
+    return { ...base, hookPath, huskyManaged, ok: false, alreadyInstalled: false };
   }
 
   actions.push({
@@ -359,7 +441,7 @@ export function planInit(options: InitOptions = {}): InitResult {
     path: relPath,
     detail: existing === undefined ? 'create' : 'replace an empty file',
   });
-  return { ...base, hookPath, ok: true, alreadyInstalled: false };
+  return { ...base, hookPath, huskyManaged, ok: true, alreadyInstalled: false };
 }
 
 /**
@@ -371,7 +453,10 @@ export function applyInit(plan: InitResult, options: InitOptions = {}): InitResu
     return plan;
   }
 
-  const manager = options.manager ?? plan.manager;
+  // A husky-managed native plan writes husky's own content: the artifact
+  // is husky's tracked file, and this is exactly what "--manager husky"
+  // would have written to the same path.
+  const manager = plan.huskyManaged ? 'husky' : (options.manager ?? plan.manager);
   try {
     mkdirSync(path.dirname(plan.hookPath), { recursive: true });
     writeFileSync(plan.hookPath, contentFor(manager), 'utf8');
@@ -403,6 +488,15 @@ export function applyInit(plan: InitResult, options: InitOptions = {}): InitResu
 
 function renderHuman(result: InitResult): string {
   const lines: string[] = [];
+
+  // Printed ahead of every other outcome -- conflict, already-installed,
+  // or fresh write -- because a user who typed a bare "dep-guard init"
+  // and sees ".husky/pre-commit" in the output needs to know why that
+  // path and not .git/hooks/pre-commit, whichever of the three outcomes
+  // they landed on.
+  if (result.huskyManaged) {
+    lines.push('hooks are managed by husky; installing into .husky/pre-commit');
+  }
 
   if (result.conflicts.length > 0) {
     lines.push('dep-guard init: nothing was written.');

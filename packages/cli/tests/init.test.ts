@@ -1,5 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -36,6 +47,69 @@ function nativeHookPath(dir: string): string {
 
 function install(dir: string, manager: HookManager = 'native') {
   return applyInit(planInit({ cwd: dir, manager }), { cwd: dir, manager });
+}
+
+// Builds husky 9's generated hooks directory by hand: core.hooksPath
+// points git at .husky/_, which husky's own "prepare" script populates
+// with a two-line dispatcher per hook (source "./h") plus the "h" shim
+// that actually execs the TRACKED hook of the same name at the
+// repository root, and a .gitignore of "*" so none of it is ever
+// committed. node_modules does not carry husky in this repository, so
+// "h" is written here as a functional stand-in rather than copied from
+// the real package: it walks up from its own location to the repo root
+// and execs the tracked hook, exactly what husky 9's own "h" does.
+function writeHuskyGeneratedDir(dir: string): void {
+  const genDir = path.join(dir, '.husky', '_');
+  mkdirSync(genDir, { recursive: true });
+
+  writeFileSync(path.join(genDir, '.gitignore'), '*\n');
+
+  const dispatcher = '#!/usr/bin/env sh\n. "$(dirname -- "$0")/h"\n';
+  writeFileSync(path.join(genDir, 'pre-commit'), dispatcher);
+  chmodSync(path.join(genDir, 'pre-commit'), 0o755);
+
+  const h = [
+    '#!/usr/bin/env sh',
+    'hookName=$(basename -- "$0")',
+    'scriptDir=$(dirname -- "$0")',
+    'huskyDir=$(dirname -- "$scriptDir")',
+    'rootDir=$(dirname -- "$huskyDir")',
+    'exec "$rootDir/.husky/$hookName" "$@"',
+    '',
+  ].join('\n');
+  writeFileSync(path.join(genDir, 'h'), h);
+  chmodSync(path.join(genDir, 'h'), 0o755);
+}
+
+function huskyRepo(): string {
+  const dir = initRepo();
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'test'], { cwd: dir });
+  execFileSync('git', ['config', 'core.hooksPath', '.husky/_'], { cwd: dir });
+  writeHuskyGeneratedDir(dir);
+  return dir;
+}
+
+function trackedHuskyHookPath(dir: string): string {
+  // git resolves symlinks in "rev-parse --show-toplevel" (on macOS,
+  // /var/folders/... vs /private/var/folders/...), and hookPath is built
+  // from that resolved root, so this compares like for like.
+  return path.join(realpathSync(dir), '.husky', 'pre-commit');
+}
+
+function runCommit(dir: string, binDir: string): boolean {
+  writeFileSync(path.join(dir, 'a.txt'), 'hello');
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  try {
+    execFileSync('git', ['commit', '-q', '-m', 'should be blocked'], {
+      cwd: dir,
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}` },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe('dep-guard init: the native hook', () => {
@@ -137,59 +211,13 @@ describe('dep-guard init: the native hook', () => {
     expect(existsSync(path.join(hooksDir, 'pre-commit'))).toBe(true);
   });
 
-  test('installs where git actually runs it: the hook fires on a real commit', () => {
-    // The reviewer's proof, reproduced. With core.hooksPath set the way
-    // husky 9 sets it, init reported success while writing to a path git
-    // never consults, so the gate silently did not exist. No amount of
-    // path assertion is as convincing as making git run the thing, so
-    // this drives a real commit and reads back what executed.
-    const dir = initRepo();
-    execFileSync('git', ['config', 'core.hooksPath', '.husky/_'], { cwd: dir });
-    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
-    execFileSync('git', ['config', 'user.name', 'test'], { cwd: dir });
-
-    const result = install(dir);
-    expect(result.ok).toBe(true);
-    expect(existsSync(path.join(dir, '.husky', '_', 'pre-commit'))).toBe(true);
-    expect(existsSync(path.join(dir, '.git', '.husky', '_', 'pre-commit'))).toBe(false);
-
-    // A stub dep-guard that exits non-zero. If the installed hook is the
-    // one git runs, the commit is refused; if init wrote somewhere git
-    // does not look, the commit succeeds and the gate was never there.
-    const binDir = makeStubBin(1);
-    writeFileSync(path.join(dir, 'a.txt'), 'hello');
-    execFileSync('git', ['add', '-A'], { cwd: dir });
-
-    let committed = true;
-    try {
-      execFileSync('git', ['commit', '-q', '-m', 'should be blocked'], {
-        cwd: dir,
-        env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}` },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch {
-      committed = false;
-    }
-
-    expect(committed).toBe(false);
-  });
-
-  test('refuses an existing husky-style hook at a relative core.hooksPath', () => {
-    // The other half of resolving to the wrong place: a foreign hook that
-    // really is where git looks was invisible, so init would have happily
-    // reported success beside somebody else's working setup.
-    const dir = initRepo();
-    execFileSync('git', ['config', 'core.hooksPath', '.husky/_'], { cwd: dir });
-    const foreign = '#!/bin/sh\n. "$(dirname "$0")/husky.sh"\necho existing husky hook\n';
-    mkdirSync(path.join(dir, '.husky', '_'), { recursive: true });
-    writeFileSync(path.join(dir, '.husky', '_', 'pre-commit'), foreign);
-
-    const result = install(dir);
-
-    expect(result.ok).toBe(false);
-    expect(result.conflicts.map((c) => c.reason)).toContain('foreign-hook');
-    expect(readFileSync(path.join(dir, '.husky', '_', 'pre-commit'), 'utf8')).toBe(foreign);
-  });
+  // core.hooksPath=.husky/_ is exactly the husky 9 shape, and it now gets
+  // its own describe block below rather than being covered here: .husky/_
+  // is a generated, gitignored directory husky's own "prepare" script
+  // rewrites on every install, so a hook written there (which is what
+  // this suite used to assert) works until the next install and then
+  // silently stops existing. See "dep-guard init: husky 9's generated
+  // hooks directory".
 
   test('works when run from a subdirectory of the repository', () => {
     // N3. A user running "dep-guard init" from packages/app would
@@ -295,6 +323,113 @@ describe('dep-guard init: hook managers', () => {
       const content = readFileSync(hookArtifactFor(dir, manager), 'utf8');
       expect([manager, content.startsWith('#!')]).toEqual([manager, true]);
     }
+  });
+});
+
+describe("dep-guard init: husky 9's generated hooks directory", () => {
+  // husky 9 sets core.hooksPath to .husky/_, a directory husky's own
+  // "prepare" script generates and .gitignores, rewriting it on every
+  // install. The file git actually runs there, .husky/_/pre-commit, is a
+  // two-line dispatcher that sources "./h", and "h" execs the TRACKED
+  // .husky/<hookname> at the repository root. A bare "dep-guard init"
+  // (manager: native, the default) must resolve to that tracked file, not
+  // to anything under .husky/_: a hook written into .husky/_ is gone the
+  // next time husky's prepare script runs.
+
+  test('a bare init installs into the tracked hook, not the generated directory', () => {
+    const dir = huskyRepo();
+    const before = {
+      dispatcher: readFileSync(path.join(dir, '.husky', '_', 'pre-commit'), 'utf8'),
+      h: readFileSync(path.join(dir, '.husky', '_', 'h'), 'utf8'),
+      gitignore: readFileSync(path.join(dir, '.husky', '_', '.gitignore'), 'utf8'),
+      entries: readdirSync(path.join(dir, '.husky', '_')).sort(),
+    };
+
+    const result = install(dir);
+
+    expect(result.ok).toBe(true);
+    expect(result.hookPath).toBe(trackedHuskyHookPath(dir));
+    expect(existsSync(trackedHuskyHookPath(dir))).toBe(true);
+    expect(readFileSync(trackedHuskyHookPath(dir), 'utf8')).toContain(MANAGED_HOOK_MARKER);
+
+    // Nothing under the generated directory moved.
+    expect(readFileSync(path.join(dir, '.husky', '_', 'pre-commit'), 'utf8')).toBe(
+      before.dispatcher
+    );
+    expect(readFileSync(path.join(dir, '.husky', '_', 'h'), 'utf8')).toBe(before.h);
+    expect(readFileSync(path.join(dir, '.husky', '_', '.gitignore'), 'utf8')).toBe(
+      before.gitignore
+    );
+    expect(readdirSync(path.join(dir, '.husky', '_')).sort()).toEqual(before.entries);
+  });
+
+  test('hookArtifactFor agrees: it names the tracked hook for the native manager', () => {
+    const dir = huskyRepo();
+    expect(hookArtifactFor(dir, 'native')).toBe(trackedHuskyHookPath(dir));
+  });
+
+  test('the installed hook survives husky regenerating .husky/_ on the next install, and still fires', () => {
+    const dir = huskyRepo();
+    const result = install(dir);
+    expect(result.ok).toBe(true);
+    expect(existsSync(trackedHuskyHookPath(dir))).toBe(true);
+
+    // Simulate husky's own "prepare" script running again on the next
+    // "pnpm install": it wipes .husky/_ and regenerates it from scratch.
+    // This must not touch the tracked hook, which lives outside .husky/_.
+    rmSync(path.join(dir, '.husky', '_'), { recursive: true, force: true });
+    writeHuskyGeneratedDir(dir);
+
+    expect(existsSync(trackedHuskyHookPath(dir))).toBe(true);
+    expect(readFileSync(trackedHuskyHookPath(dir), 'utf8')).toContain(MANAGED_HOOK_MARKER);
+
+    // A stub dep-guard that exits non-zero. If the tracked hook is still
+    // the one git ends up running (dispatched to via .husky/_/pre-commit
+    // -> h -> .husky/pre-commit), the commit is refused.
+    const committed = runCommit(dir, makeStubBin(1));
+    expect(committed).toBe(false);
+  });
+
+  test('an already-installed tracked hook is reported as already installed', () => {
+    const dir = huskyRepo();
+    mkdirSync(path.dirname(trackedHuskyHookPath(dir)), { recursive: true });
+    writeFileSync(
+      trackedHuskyHookPath(dir),
+      `#!/bin/sh\n# ${MANAGED_HOOK_MARKER}\ndep-guard scan --staged\n`
+    );
+
+    const result = install(dir);
+
+    expect(result.ok).toBe(true);
+    expect(result.alreadyInstalled).toBe(true);
+    expect(result.hookPath).toBe(trackedHuskyHookPath(dir));
+  });
+
+  test('a foreign tracked hook is refused by its tracked path, not .husky/_', () => {
+    const dir = huskyRepo();
+    const foreign = '#!/bin/sh\necho existing husky hook\n';
+    mkdirSync(path.dirname(trackedHuskyHookPath(dir)), { recursive: true });
+    writeFileSync(trackedHuskyHookPath(dir), foreign);
+
+    const result = install(dir);
+
+    expect(result.ok).toBe(false);
+    expect(result.conflicts.map((c) => c.reason)).toContain('foreign-hook');
+    expect(result.conflicts.map((c) => c.path)).toEqual(['.husky/pre-commit']);
+    expect(readFileSync(trackedHuskyHookPath(dir), 'utf8')).toBe(foreign);
+  });
+
+  test('--dry-run reports the tracked path and writes nothing', () => {
+    const dir = huskyRepo();
+
+    const plan = planInit({ cwd: dir, manager: 'native', dryRun: true });
+    const result = applyInit(plan, { cwd: dir, manager: 'native', dryRun: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.dryRun).toBe(true);
+    expect(result.hookPath).toBe(trackedHuskyHookPath(dir));
+    expect(result.actions[0]?.path).toBe('.husky/pre-commit');
+    expect(existsSync(trackedHuskyHookPath(dir))).toBe(false);
   });
 });
 
