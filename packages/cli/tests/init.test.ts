@@ -534,6 +534,33 @@ function runHook(
   }
 }
 
+// husky's own "h" shim runs the tracked hook under "sh -e", not plain
+// "sh": errexit is on for the whole invocation regardless of anything
+// the hook's own text does or does not say. This runs the generated hook
+// the same way, rather than through plain /bin/sh, because a capture
+// pattern that only works without an externally imposed -e is exactly
+// what a husky-managed repository has.
+function runHookUnderErrexit(
+  hookPath: string,
+  pathValue: string
+): { status: number; stdout: string; stderr: string } {
+  try {
+    const stdout = execFileSync('/bin/sh', ['-e', hookPath], {
+      encoding: 'utf8',
+      env: { PATH: pathValue },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { status: 0, stdout, stderr: '' };
+  } catch (err) {
+    const failure = err as { status?: number; stdout?: string; stderr?: string };
+    return {
+      status: typeof failure.status === 'number' ? failure.status : -1,
+      stdout: failure.stdout ?? '',
+      stderr: failure.stderr ?? '',
+    };
+  }
+}
+
 describe('the generated hook, run under /bin/sh', () => {
   test('fails closed when the dep-guard binary is missing', () => {
     const dir = initRepo();
@@ -559,6 +586,26 @@ describe('the generated hook, run under /bin/sh', () => {
     const run = runHook(nativeHookPath(dir), makeStubBin(0));
 
     expect(run.status).toBe(0);
+  });
+
+  test('under sh -e, the shell husky itself invokes hooks with, the explanation still prints and the exit code still passes through', () => {
+    // husky's own "h" shim runs the tracked hook with "sh -e", not plain
+    // sh. A capture pattern that relies on nothing outside the hook ever
+    // enabling errexit breaks exactly there: the shell aborts at the
+    // failing "dep-guard scan" line before the status is ever captured,
+    // silently keeping the right exit code (errexit propagates the
+    // failing command's own status) while losing the explanatory line
+    // entirely -- the one thing this hook exists to still print.
+    const dir = initRepo();
+    install(dir);
+
+    const blocked = runHookUnderErrexit(nativeHookPath(dir), makeStubBin(1));
+    expect(blocked.status).toBe(1);
+    expect(blocked.stderr).toContain('commit blocked');
+
+    const notRun = runHookUnderErrexit(nativeHookPath(dir), makeStubBin(2));
+    expect(notRun.status).toBe(2);
+    expect(notRun.stderr).toContain('commit blocked');
   });
 
   test('passes exit 1 (blocking findings) through unchanged', () => {

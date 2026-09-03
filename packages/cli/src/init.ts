@@ -50,11 +50,20 @@ export const MANAGED_HOOK_MARKER = 'dep-guard-managed-hook: v1';
 
 // The shell body shared by the native and husky hooks.
 //
-// No `set -e`. That is deliberate and not an oversight: under `set -e`
-// the shell would exit at the failing `dep-guard scan` line before the
-// status could be captured, which happens to preserve the exit code but
-// loses the explanatory line entirely, so a blocked commit would print
-// nothing about why. Capturing `$?` explicitly gets both.
+// This script never says `set -e` itself, but it cannot assume it is
+// never run under one: husky 9's own "h" shim execs the tracked hook via
+// `sh -e`, not plain `sh`, so errexit can be imposed from OUTSIDE this
+// text regardless of anything written here. A bare `dep_guard_status=$?`
+// placed right after the plain `dep-guard scan --staged` line works fine
+// when nothing external enables -e, but under husky's `sh -e` invocation
+// the shell aborts at that failing scan line before the assignment ever
+// runs -- which happens to preserve the exit code (errexit propagates the
+// failing command's own status when it aborts the script) but loses the
+// explanatory line entirely, so a blocked commit prints nothing about
+// why. `cmd || var=$?` sidesteps this: a command that is not the last
+// element of an `&&`/`||` list is explicitly exempt from triggering
+// errexit's abort, so the scan's own failure never aborts the script,
+// under an externally imposed -e or otherwise.
 //
 // `command -v` rather than `which`: `which` is not in POSIX, is absent
 // from some minimal images, and reports success in some shells for a
@@ -64,8 +73,8 @@ const HOOK_BODY = `if ! command -v dep-guard >/dev/null 2>&1; then
   exit 1
 fi
 
-dep-guard scan --staged
-dep_guard_status=$?
+dep_guard_status=0
+dep-guard scan --staged || dep_guard_status=$?
 
 if [ "$dep_guard_status" -ne 0 ]; then
   echo "dep-guard: commit blocked (dep-guard exit $dep_guard_status). Review the report above; 'git commit --no-verify' bypasses this hook at your own risk." >&2
