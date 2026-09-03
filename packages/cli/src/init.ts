@@ -178,6 +178,15 @@ export interface InitResult {
    * husky's.
    */
   huskyManaged: boolean;
+  /**
+   * Relative path (from the repository root) of a dep-guard-managed hook
+   * still sitting in husky's generated directory -- written there by an
+   * older dep-guard, before this redirect existed. Present only when
+   * `huskyManaged` is true and such a file exists. husky's own install
+   * step removes it eventually, but until that happens it is still the
+   * file git actually runs, not the newly installed tracked one.
+   */
+  staleGeneratedHookPath?: string;
 }
 
 function gitOutput(cwd: string, args: string[]): string | null {
@@ -283,6 +292,13 @@ interface NativeHookArtifact {
    * requested native location, because the effective hooks directory
    * turned out to be husky 9's generated .husky/_. */
   huskyManaged: boolean;
+  /**
+   * The husky-generated directory itself (e.g. root/.husky/_), present
+   * only when huskyManaged is true. Kept around so a caller can check it
+   * for a hook an OLDER dep-guard wrote directly into it, before this
+   * redirect existed.
+   */
+  generatedDir?: string;
 }
 
 // The native manager's own resolution, folding in the husky-generated-dir
@@ -292,7 +308,7 @@ interface NativeHookArtifact {
 function resolveNativeHookArtifact(cwd: string, root: string): NativeHookArtifact {
   const hooksDir = effectiveHooksDir(cwd);
   if (isHuskyGeneratedHooksDir(hooksDir)) {
-    return { path: path.join(root, '.husky', 'pre-commit'), huskyManaged: true };
+    return { path: path.join(root, '.husky', 'pre-commit'), huskyManaged: true, generatedDir: hooksDir };
   }
   return { path: path.join(hooksDir, 'pre-commit'), huskyManaged: false };
 }
@@ -400,10 +416,30 @@ export function planInit(options: InitOptions = {}): InitResult {
 
   // A bare (native) init resolves through the husky-generated-dir check;
   // every other manager resolves the way it always has.
-  const huskyManaged = manager === 'native' && resolveNativeHookArtifact(cwd, root).huskyManaged;
+  const nativeArtifact = manager === 'native' ? resolveNativeHookArtifact(cwd, root) : null;
+  const huskyManaged = nativeArtifact?.huskyManaged ?? false;
   const hookPath = huskyManaged
     ? path.join(root, '.husky', 'pre-commit')
     : hookArtifactFor(cwd, manager);
+
+  // A hook an OLDER dep-guard (0.2.0) wrote straight into the generated
+  // directory, before this redirect existed. Nothing here removes it --
+  // that file is still what git actually runs, via core.hooksPath, until
+  // husky's own install step regenerates the directory -- so a user
+  // installing the fix needs to be told it is still live, not just that
+  // a new (correct) hook now also exists.
+  const staleGeneratedHookPath = ((): string | undefined => {
+    if (!huskyManaged || nativeArtifact?.generatedDir === undefined) {
+      return undefined;
+    }
+    const generatedPreCommit = path.join(nativeArtifact.generatedDir, 'pre-commit');
+    const content = readIfExists(generatedPreCommit);
+    if (content === undefined || !content.includes(MANAGED_HOOK_MARKER)) {
+      return undefined;
+    }
+    return path.relative(root, generatedPreCommit).split(path.sep).join('/');
+  })();
+
   // Reported relative to the repository ROOT, not to cwd: init run from a
   // subdirectory would otherwise print a path full of "../.." segments
   // for a file that has a perfectly ordinary name from the root.
@@ -412,7 +448,7 @@ export function planInit(options: InitOptions = {}): InitResult {
 
   if (existing !== undefined && existing.includes(MANAGED_HOOK_MARKER)) {
     actions.push({ kind: 'skip', path: relPath, detail: 'already installed by dep-guard init' });
-    return { ...base, hookPath, huskyManaged, ok: true, alreadyInstalled: true };
+    return { ...base, hookPath, huskyManaged, staleGeneratedHookPath, ok: true, alreadyInstalled: true };
   }
 
   // A whitespace-only file is not a foreign hook. git ships .sample hooks
@@ -424,7 +460,7 @@ export function planInit(options: InitOptions = {}): InitResult {
       reason: 'foreign-hook',
       guidance: foreignGuidance(huskyManaged ? 'husky' : manager, relPath),
     });
-    return { ...base, hookPath, huskyManaged, ok: false, alreadyInstalled: false };
+    return { ...base, hookPath, huskyManaged, staleGeneratedHookPath, ok: false, alreadyInstalled: false };
   }
 
   actions.push({
@@ -432,7 +468,7 @@ export function planInit(options: InitOptions = {}): InitResult {
     path: relPath,
     detail: existing === undefined ? 'create' : 'replace an empty file',
   });
-  return { ...base, hookPath, huskyManaged, ok: true, alreadyInstalled: false };
+  return { ...base, hookPath, huskyManaged, staleGeneratedHookPath, ok: true, alreadyInstalled: false };
 }
 
 /**
@@ -487,6 +523,16 @@ function renderHuman(result: InitResult): string {
   // they landed on.
   if (result.huskyManaged) {
     lines.push('hooks are managed by husky; installing into .husky/pre-commit');
+  }
+
+  // Printed for the same reason and in the same place: a stale hook an
+  // older dep-guard left behind is still the one git runs, via
+  // core.hooksPath, regardless of which of the three outcomes below this
+  // run landed on -- writing the tracked hook does not remove it.
+  if (result.staleGeneratedHookPath !== undefined) {
+    lines.push(
+      `note: ${result.staleGeneratedHookPath} still holds a dep-guard hook from an older install; it is stale and will be replaced the next time husky reinstalls, but until then it is the file git actually runs, not the one just installed.`
+    );
   }
 
   if (result.conflicts.length > 0) {

@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -17,10 +18,11 @@ import {
   HOOK_MANAGERS,
   MANAGED_HOOK_MARKER,
   hookArtifactFor,
+  initCommand,
   planInit,
   applyInit,
 } from '../src/init.js';
-import type { HookManager } from '../src/init.js';
+import type { HookManager, InitOptions } from '../src/init.js';
 
 // Two kinds of test live here and they prove different things.
 //
@@ -47,6 +49,26 @@ function nativeHookPath(dir: string): string {
 
 function install(dir: string, manager: HookManager = 'native') {
   return applyInit(planInit({ cwd: dir, manager }), { cwd: dir, manager });
+}
+
+// Runs the real command entry point and captures everything it printed,
+// stdout and stderr combined, since initCommand writes success to stdout
+// and failure to stderr and these tests care about the text either way.
+function captureInitCommandOutput(options: InitOptions): string {
+  const chunks: string[] = [];
+  const record = (chunk: unknown): boolean => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  const stdoutSpy = jest.spyOn(process.stdout, 'write').mockImplementation(record as never);
+  const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(record as never);
+  try {
+    initCommand(options);
+  } finally {
+    stdoutSpy.mockRestore();
+    stderrSpy.mockRestore();
+  }
+  return chunks.join('');
 }
 
 // Builds husky 9's generated hooks directory by hand: core.hooksPath
@@ -434,6 +456,29 @@ describe("dep-guard init: husky 9's generated hooks directory", () => {
     expect(result.ok).toBe(true);
     expect(result.alreadyInstalled).toBe(true);
     expect(result.hookPath).toBe(trackedHuskyHookPath(dir));
+  });
+
+  test('warns about a stale dep-guard hook left behind in .husky/_ by an older dep-guard', () => {
+    // 0.2.0's bug: it wrote straight into the generated directory. That
+    // file is still what git runs -- core.hooksPath still points at
+    // .husky/_ -- until husky's own install step regenerates it, which
+    // this fresh dep-guard has no way to trigger, so the user needs to
+    // be told the old file is still live rather than finding out by
+    // watching an old dep-guard version's message on their next commit.
+    const dir = huskyRepo();
+    writeFileSync(
+      path.join(dir, '.husky', '_', 'pre-commit'),
+      `#!/bin/sh\n# ${MANAGED_HOOK_MARKER}\ndep-guard scan --staged\n`
+    );
+
+    const result = install(dir);
+
+    expect(result.ok).toBe(true);
+    expect(result.staleGeneratedHookPath).toBe('.husky/_/pre-commit');
+
+    const output = captureInitCommandOutput({ cwd: dir, manager: 'native' });
+    expect(output).toContain('.husky/_/pre-commit');
+    expect(output.toLowerCase()).toContain('stale');
   });
 
   test('a foreign tracked hook is refused by its tracked path, not .husky/_', () => {
