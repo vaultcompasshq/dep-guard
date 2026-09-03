@@ -305,10 +305,25 @@ interface NativeHookArtifact {
 // redirect: when the effective hooks directory turns out to be husky 9's
 // generated .husky/_, the artifact this manager owns is the same tracked
 // file the husky manager owns, never anything under .husky/_.
-function resolveNativeHookArtifact(cwd: string, root: string): NativeHookArtifact {
+//
+// The tracked hook is the PARENT of the matched "_" directory, plus the
+// hook name -- never a fixed root/.husky/pre-commit. husky supports an
+// optional custom directory argument ("husky packages/app/.husky" puts
+// the whole husky tree under packages/app instead of the repository
+// root), and husky's own "h" shim computes the tracked hook the same
+// way: one level up from its own location, not from the repository
+// root. For the ordinary top-level .husky/_ the two happen to coincide;
+// for a custom directory they do not, and a fixed root/.husky/pre-commit
+// would write to a path git never reads there, the exact bug this
+// redirect exists to fix.
+function resolveNativeHookArtifact(cwd: string): NativeHookArtifact {
   const hooksDir = effectiveHooksDir(cwd);
   if (isHuskyGeneratedHooksDir(hooksDir)) {
-    return { path: path.join(root, '.husky', 'pre-commit'), huskyManaged: true, generatedDir: hooksDir };
+    return {
+      path: path.join(path.dirname(hooksDir), 'pre-commit'),
+      huskyManaged: true,
+      generatedDir: hooksDir,
+    };
   }
   return { path: path.join(hooksDir, 'pre-commit'), huskyManaged: false };
 }
@@ -333,7 +348,7 @@ export function hookArtifactFor(cwd: string, manager: HookManager): string {
       return path.join(root, '.pre-commit-config.yaml');
     case 'native':
     default:
-      return resolveNativeHookArtifact(cwd, root).path;
+      return resolveNativeHookArtifact(cwd).path;
   }
 }
 
@@ -415,12 +430,15 @@ export function planInit(options: InitOptions = {}): InitResult {
   }
 
   // A bare (native) init resolves through the husky-generated-dir check;
-  // every other manager resolves the way it always has.
-  const nativeArtifact = manager === 'native' ? resolveNativeHookArtifact(cwd, root) : null;
+  // every other manager resolves the way it always has. hookPath always
+  // comes from resolveNativeHookArtifact's own computed path when
+  // huskyManaged -- never a separately reconstructed root/.husky path --
+  // so idempotence, foreign-hook detection, and everything printed below
+  // all agree with each other and with hookArtifactFor about the same
+  // target, custom husky directory or not.
+  const nativeArtifact = manager === 'native' ? resolveNativeHookArtifact(cwd) : null;
   const huskyManaged = nativeArtifact?.huskyManaged ?? false;
-  const hookPath = huskyManaged
-    ? path.join(root, '.husky', 'pre-commit')
-    : hookArtifactFor(cwd, manager);
+  const hookPath = nativeArtifact?.huskyManaged ? nativeArtifact.path : hookArtifactFor(cwd, manager);
 
   // A hook an OLDER dep-guard (0.2.0) wrote straight into the generated
   // directory, before this redirect existed. Nothing here removes it --
@@ -531,7 +549,11 @@ function renderHuman(result: InitResult): string {
   const artifactIsUnderHusky =
     result.manager === 'native' && path.basename(path.dirname(result.hookPath)) === '.husky';
   if (artifactIsUnderHusky) {
-    lines.push('hooks are managed by husky; installing into .husky/pre-commit');
+    // The relative path, wherever this outcome recorded it -- a custom
+    // husky directory (husky's own optional directory argument) means
+    // this is not always ".husky/pre-commit" at the repository root.
+    const relHookPath = result.actions[0]?.path ?? result.conflicts[0]?.path ?? 'the tracked hook';
+    lines.push(`hooks are managed by husky; installing into ${relHookPath}`);
   }
 
   // Printed for the same reason and in the same place: a stale hook an

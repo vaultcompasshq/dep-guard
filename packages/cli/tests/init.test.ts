@@ -80,8 +80,15 @@ function captureInitCommandOutput(options: InitOptions): string {
 // "h" is written here as a functional stand-in rather than copied from
 // the real package: it walks up from its own location to the repo root
 // and execs the tracked hook, exactly what husky 9's own "h" does.
-function writeHuskyGeneratedDir(dir: string): void {
-  const genDir = path.join(dir, '.husky', '_');
+// Takes the generated directory itself (e.g. <root>/.husky/_, or
+// <root>/packages/app/.husky/_ for husky's optional custom-directory
+// argument), not the repository root, so the same helper builds both the
+// ordinary and a nested husky layout. "h" walks exactly one level up
+// from its own location and execs the tracked hook there -- the parent
+// of the "_" directory plus the hook name -- which is what husky 9's own
+// "h" does, and is correct at any nesting depth: it never needs to know
+// the repository root, only its own location.
+function writeHuskyGeneratedDir(genDir: string): void {
   mkdirSync(genDir, { recursive: true });
 
   writeFileSync(path.join(genDir, '.gitignore'), '*\n');
@@ -95,8 +102,7 @@ function writeHuskyGeneratedDir(dir: string): void {
     'hookName=$(basename -- "$0")',
     'scriptDir=$(dirname -- "$0")',
     'huskyDir=$(dirname -- "$scriptDir")',
-    'rootDir=$(dirname -- "$huskyDir")',
-    'exec "$rootDir/.husky/$hookName" "$@"',
+    'exec "$huskyDir/$hookName" "$@"',
     '',
   ].join('\n');
   writeFileSync(path.join(genDir, 'h'), h);
@@ -108,7 +114,7 @@ function huskyRepo(): string {
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'test'], { cwd: dir });
   execFileSync('git', ['config', 'core.hooksPath', '.husky/_'], { cwd: dir });
-  writeHuskyGeneratedDir(dir);
+  writeHuskyGeneratedDir(path.join(dir, '.husky', '_'));
   return dir;
 }
 
@@ -415,7 +421,7 @@ describe("dep-guard init: husky 9's generated hooks directory", () => {
     // "pnpm install": it wipes .husky/_ and regenerates it from scratch.
     // This must not touch the tracked hook, which lives outside .husky/_.
     rmSync(path.join(dir, '.husky', '_'), { recursive: true, force: true });
-    writeHuskyGeneratedDir(dir);
+    writeHuskyGeneratedDir(path.join(dir, '.husky', '_'));
 
     expect(existsSync(trackedHuskyHookPath(dir))).toBe(true);
     expect(readFileSync(trackedHuskyHookPath(dir), 'utf8')).toContain(MANAGED_HOOK_MARKER);
@@ -590,6 +596,95 @@ describe('dep-guard init: husky-shape detection is anchored to the directory, no
     const output = captureInitCommandOutput({ cwd: dir, manager: 'native' });
 
     expect(output).toContain('hooks are managed by husky');
+  });
+});
+
+describe('dep-guard init: a custom (nested) husky directory', () => {
+  // husky supports an optional directory argument -- "husky
+  // packages/app/.husky" puts the whole husky tree under packages/app
+  // instead of the repository root, and core.hooksPath then reads
+  // packages/app/.husky/_. husky's own "h" shim computes the tracked
+  // hook as the parent of the "_" directory plus the hook name, so the
+  // tracked file git actually runs is packages/app/.husky/pre-commit,
+  // never root/.husky/pre-commit. A redirect that always targets a fixed
+  // root/.husky/pre-commit gets this case wrong in exactly the way the
+  // whole fix exists to avoid: it reports success and writes somewhere
+  // git never reads.
+
+  function nestedHuskyRepo(): { dir: string; hooksPath: string; genDir: string } {
+    const dir = initRepo();
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'test'], { cwd: dir });
+    const hooksPath = path.join('packages', 'app', '.husky', '_');
+    execFileSync('git', ['config', 'core.hooksPath', hooksPath], { cwd: dir });
+    const genDir = path.join(dir, hooksPath);
+    writeHuskyGeneratedDir(genDir);
+    return { dir, hooksPath, genDir };
+  }
+
+  test('the redirect targets the matched .husky directory itself, not a fixed repo-root path, and the hook fires on a real commit', () => {
+    const { dir } = nestedHuskyRepo();
+    const root = realpathSync(dir);
+    const nestedTracked = path.join(root, 'packages', 'app', '.husky', 'pre-commit');
+    const fixedRootTracked = path.join(root, '.husky', 'pre-commit');
+
+    const result = install(dir);
+
+    expect(result.ok).toBe(true);
+    expect(result.huskyManaged).toBe(true);
+    expect(result.hookPath).toBe(nestedTracked);
+    expect(existsSync(nestedTracked)).toBe(true);
+    // Nothing was ever created at the fixed root/.husky location -- there
+    // is no root/.husky directory at all in this layout.
+    expect(existsSync(fixedRootTracked)).toBe(false);
+    expect(existsSync(path.join(root, '.husky'))).toBe(false);
+
+    // hookArtifactFor, used directly by other tooling and by the
+    // idempotence/foreign-hook checks below, agrees with planInit.
+    expect(hookArtifactFor(dir, 'native')).toBe(nestedTracked);
+
+    // Idempotence reads the same nested target, not a fixed root path.
+    const second = install(dir);
+    expect(second.ok).toBe(true);
+    expect(second.alreadyInstalled).toBe(true);
+    expect(second.hookPath).toBe(nestedTracked);
+
+    // The proof that matters: a real commit runs the nested tracked
+    // hook, dispatched to via packages/app/.husky/_/pre-commit -> h ->
+    // packages/app/.husky/pre-commit.
+    const commitResult = runCommit(dir, makeStubBin(1));
+    expect(commitResult.stubRan).toBe(true);
+    expect(commitResult.committed).toBe(false);
+  });
+
+  test('a foreign hook at the nested tracked path is refused there, not at a fixed root/.husky/pre-commit', () => {
+    const { dir } = nestedHuskyRepo();
+    const nestedTracked = path.join(realpathSync(dir), 'packages', 'app', '.husky', 'pre-commit');
+    const foreign = '#!/bin/sh\necho existing nested husky hook\n';
+    mkdirSync(path.dirname(nestedTracked), { recursive: true });
+    writeFileSync(nestedTracked, foreign);
+
+    const result = install(dir);
+
+    expect(result.ok).toBe(false);
+    expect(result.huskyManaged).toBe(true);
+    expect(result.conflicts.map((c) => c.reason)).toContain('foreign-hook');
+    expect(result.conflicts.map((c) => c.path)).toEqual(['packages/app/.husky/pre-commit']);
+    expect(readFileSync(nestedTracked, 'utf8')).toBe(foreign);
+    expect(existsSync(path.join(realpathSync(dir), '.husky'))).toBe(false);
+  });
+
+  test('--dry-run reports the nested tracked path, not a fixed root/.husky/pre-commit', () => {
+    const { dir } = nestedHuskyRepo();
+    const nestedTracked = path.join(realpathSync(dir), 'packages', 'app', '.husky', 'pre-commit');
+
+    const plan = planInit({ cwd: dir, manager: 'native', dryRun: true });
+    const result = applyInit(plan, { cwd: dir, manager: 'native', dryRun: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.hookPath).toBe(nestedTracked);
+    expect(result.actions[0]?.path).toBe('packages/app/.husky/pre-commit');
+    expect(existsSync(nestedTracked)).toBe(false);
   });
 });
 
