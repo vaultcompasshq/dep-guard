@@ -575,6 +575,22 @@ describe('dep-guard init: husky-shape detection is anchored to the directory, no
     expect(result.ok).toBe(false);
     expect(result.conflicts.map((c) => c.reason)).toContain('foreign-hook');
   });
+
+  test('a husky 8 repository still prints the "managed by husky" explanation, even without a redirect', () => {
+    // huskyManaged is false here (the native path already resolves to
+    // .husky/pre-commit on its own, so there is nothing to redirect),
+    // but the user still typed a bare "dep-guard init" and still sees
+    // ".husky/pre-commit" in the output. Without this, that path would
+    // show up unexplained.
+    const dir = initRepo();
+    execFileSync('git', ['config', 'core.hooksPath', '.husky'], { cwd: dir });
+    mkdirSync(path.join(dir, '.husky', '_'), { recursive: true });
+    writeFileSync(path.join(dir, '.husky', '_', 'husky.sh'), '#!/bin/sh\n# husky 8 preamble\n');
+
+    const output = captureInitCommandOutput({ cwd: dir, manager: 'native' });
+
+    expect(output).toContain('hooks are managed by husky');
+  });
 });
 
 // ---------------------------------------------------------------------------

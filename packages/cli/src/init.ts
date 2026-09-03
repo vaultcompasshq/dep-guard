@@ -521,7 +521,16 @@ function renderHuman(result: InitResult): string {
   // and sees ".husky/pre-commit" in the output needs to know why that
   // path and not .git/hooks/pre-commit, whichever of the three outcomes
   // they landed on.
-  if (result.huskyManaged) {
+  //
+  // Checked by where the artifact actually landed, not by huskyManaged:
+  // a husky 8 repository resolves to .husky/pre-commit through the
+  // ordinary native path, with huskyManaged false, because core.hooksPath
+  // there is .husky itself rather than .husky/_ -- there is nothing to
+  // redirect. Gating this on huskyManaged alone left that case printing
+  // ".husky/pre-commit" with no explanation at all.
+  const artifactIsUnderHusky =
+    result.manager === 'native' && path.basename(path.dirname(result.hookPath)) === '.husky';
+  if (artifactIsUnderHusky) {
     lines.push('hooks are managed by husky; installing into .husky/pre-commit');
   }
 
