@@ -18,7 +18,7 @@
 // module itself) to be imported dynamically, after registration, rather
 // than via a static top-level import.
 import { jest } from '@jest/globals';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -28,6 +28,12 @@ import type { fetchWeeklyDownloads, fetchPackument } from '../src/online/registr
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_CORPUS = path.join(__dirname, '..', 'fixtures', 'corpus');
+const OFFLINE_GOLDEN_FIXTURE = path.join(
+  __dirname,
+  '..',
+  'fixtures',
+  'scan-online-offline-golden.json'
+);
 
 function initRepo(): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'depguard-scan-online-'));
@@ -602,11 +608,32 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
   });
 
   test('offline output is unchanged by all of this, field for field', async () => {
-    // The whole online subsystem is additive. The strongest available
-    // statement of that is a comparison of a full offline ScanResult
-    // against itself across the change -- durationMs is the only field
-    // that legitimately moves between two runs, so it is the only one
-    // excluded.
+    // The whole online subsystem is additive. durationMs is the only field
+    // that legitimately moves between runs, so it is the only one excluded
+    // from both comparisons below.
+    //
+    // MUTATION-CHECKED 2026-09-02. This test used to compare two same-process
+    // scan() calls (both with online: false) against EACH OTHER instead of
+    // against a fixed expectation. That self-comparison cannot detect a bug
+    // in the offline path itself: mutating typosquat.ts's severityFor to
+    // return 'medium' instead of 'low' for a non-alias match (a one-line
+    // change, reverted immediately after) changed both same-process calls
+    // identically, so `strip(second) === strip(first)` kept passing -- the
+    // whole suite still went from 22 to 15 passing, but this specific test
+    // was among the 15, not among the 7 that caught it. Confirmed by running
+    // the mutation with `-t "offline output is unchanged"` in isolation: 1
+    // passed, 0 failed.
+    //
+    // Fix: compare against OFFLINE_GOLDEN_FIXTURE, a committed JSON snapshot
+    // of the real offline ScanResult for this exact scenario (durationMs
+    // zeroed the same way). Re-running the identical severityFor mutation
+    // with the golden comparison in place now fails this test directly, on
+    // the typosquat finding's severity field ("low" expected, "medium"
+    // received) -- see the git history of this file for the transcript. The
+    // same-process double-call is kept alongside it (renamed `first`/
+    // `second`) because it still catches a different bug class: nondeterminism
+    // that a golden fixture alone would not surface (two calls disagreeing
+    // with each other even if neither matches the fixture).
     const dir = initRepo();
     commitManifest(dir, {});
     commitManifest(dir, { raect: '^1.0.0', 'some-unknown-thing': '^1.0.0' });
@@ -628,6 +655,8 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
     expect(fetchWeeklyDownloadsMock).not.toHaveBeenCalled();
     const strip = (r: typeof first) => JSON.stringify({ ...r, run: { ...r.run, durationMs: 0 } });
     expect(strip(second)).toBe(strip(first));
+    const golden = JSON.parse(readFileSync(OFFLINE_GOLDEN_FIXTURE, 'utf8'));
+    expect(JSON.parse(strip(first))).toEqual(golden);
     // No online detail ever reaches an offline finding's details bag.
     for (const finding of first.findings) {
       expect(finding.details ?? {}).not.toHaveProperty('onlineResolution');
