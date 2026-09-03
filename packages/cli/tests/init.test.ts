@@ -97,19 +97,34 @@ function trackedHuskyHookPath(dir: string): string {
   return path.join(realpathSync(dir), '.husky', 'pre-commit');
 }
 
-function runCommit(dir: string, binDir: string): boolean {
+// A refused commit (non-zero git exit) is not by itself evidence that
+// dep-guard blocked it: a broken dispatcher chain, a non-executable
+// hook, or any other crash before dep-guard ever runs also refuses the
+// commit, and scores as a "successful block" if only the exit status is
+// checked. stubRan distinguishes the two by looking for the stub
+// binary's own announce line (see makeStubBin) in whatever the commit
+// printed, so a caller can tell "dep-guard blocked this" from "something
+// upstream of dep-guard broke and the commit failed anyway".
+function runCommit(dir: string, binDir: string): { committed: boolean; stubRan: boolean } {
   writeFileSync(path.join(dir, 'a.txt'), 'hello');
   execFileSync('git', ['add', '-A'], { cwd: dir });
+
+  let committed = true;
+  let output = '';
   try {
-    execFileSync('git', ['commit', '-q', '-m', 'should be blocked'], {
+    output = execFileSync('git', ['commit', '-q', '-m', 'should be blocked'], {
       cwd: dir,
+      encoding: 'utf8',
       env: { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ''}` },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    return true;
-  } catch {
-    return false;
+  } catch (err) {
+    committed = false;
+    const failure = err as { stdout?: string; stderr?: string };
+    output = `${failure.stdout ?? ''}${failure.stderr ?? ''}`;
   }
+
+  return { committed, stubRan: output.includes('stub dep-guard ran') };
 }
 
 describe('dep-guard init: the native hook', () => {
@@ -385,9 +400,25 @@ describe("dep-guard init: husky 9's generated hooks directory", () => {
 
     // A stub dep-guard that exits non-zero. If the tracked hook is still
     // the one git ends up running (dispatched to via .husky/_/pre-commit
-    // -> h -> .husky/pre-commit), the commit is refused.
-    const committed = runCommit(dir, makeStubBin(1));
-    expect(committed).toBe(false);
+    // -> h -> .husky/pre-commit), the commit is refused, and the stub
+    // actually ran -- proving the refusal came from dep-guard, not from
+    // the dispatcher chain breaking some other way.
+    const commitResult = runCommit(dir, makeStubBin(1));
+    expect(commitResult.stubRan).toBe(true);
+    expect(commitResult.committed).toBe(false);
+  });
+
+  test('a refused commit only counts as dep-guard blocking it when the stub actually ran', () => {
+    // No install() call here: the tracked hook does not exist, so
+    // husky's own "h" shim fails to exec it. Git still refuses the
+    // commit, but that refusal has nothing to do with dep-guard -- the
+    // stub never ran -- and a harness that only checks "was the commit
+    // refused" cannot tell the difference from a real block.
+    const dir = huskyRepo();
+
+    const result = runCommit(dir, makeStubBin(0));
+
+    expect(result.stubRan).toBe(false);
   });
 
   test('an already-installed tracked hook is reported as already installed', () => {
