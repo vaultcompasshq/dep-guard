@@ -3,6 +3,22 @@
 Blocks risky dependencies at the moment they are added -- before install,
 before commit, before CI.
 
+<!-- guardrails-family: shared block, keep it identical in dep-guard, vault-guard, intent-guard and conductor -->
+The Vault & Compass guardrails are three gates over an AI-assisted coding
+session: [dep-guard](https://www.npmjs.com/package/@vaultcompass/dep-guard)
+checks what comes in (hallucinated package names, typosquats, tampered
+lockfile entries),
+[vault-guard](https://www.npmjs.com/package/@vaultcompass/vault-guard) checks
+what goes out (credentials about to be committed), and
+[intent-guard](https://www.npmjs.com/package/@vaultcompass/intent-guard)
+checks the change against what was approved (drift from a frozen intent
+contract, and change budgets). Each one installs, configures and runs on its
+own;
+[conductor](https://www.npmjs.com/package/@vaultcompass/conductor) is the
+optional umbrella that runs them from one policy file, one hook and one
+report.
+<!-- /guardrails-family -->
+
 **Status: published.** [`@vaultcompass/dep-guard`](https://www.npmjs.com/package/@vaultcompass/dep-guard)
 is on npm, covered by 1162 tests, and works out of the box: the package
 name corpus ships inside

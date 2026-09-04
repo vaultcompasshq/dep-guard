@@ -29,3 +29,7 @@ packages/core/data/
 bench/repos.local.json
 bench/baseline.local.json
 bench/results.local.json
+
+# The umbrella's local policy file and hook manifest, written on this machine while that tool is unpublished.
+.guardrails.yaml
+.guardrails/
