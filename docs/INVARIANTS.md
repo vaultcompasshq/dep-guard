@@ -541,26 +541,50 @@ halves of that word are load-bearing. They say what a dependency IS, never
 that anything happened between two revisions, which has two consequences
 the code now spells out where it used to get both wrong.
 
-The first is severity. A git source pinned to a full commit object id --
-40 hex characters for sha1, 64 for the sha256 object format git is
-migrating to -- names bytes that cannot change. One on a branch, a tag, an
-abbreviated SHA, or no ref at all names bytes whoever controls the
-repository can replace under a dependent with nothing in the manifest
-moving. Reporting both at one unconditional critical hard-blocked the
-first commit of any repository with a long-standing pinned git dependency,
-which is a legitimate configuration, and the finding fires whether or not
-anything changed, so there was no revision to get past it on. The pinned
-case reports `low` now -- the finding stays, because bypassing the
-registry's integrity guarantees is worth saying, and low sits under the
-default medium gate for the same reason install-script's `present` does.
-The mutable case keeps `critical`, deliberately and unlike the
-`ambiguous-critical` escalation above: that one is softened to high
+The first is severity, and the exact scope of the softening is the whole
+point, because getting it one predicate too wide reopens the check's
+headline attack.
+
+A git source pinned to a full commit object id -- 40 hex characters for
+sha1, 64 for the sha256 object format git is migrating to -- names bytes
+that cannot change. One on a branch, a tag, an abbreviated SHA, or no ref
+at all names bytes whoever controls the repository can replace under a
+dependent with nothing in the manifest moving. Reporting both at one
+unconditional critical hard-blocked the first commit of any repository
+with a long-standing pinned git dependency, which is a legitimate
+configuration, and the finding fires whether or not anything changed, so
+there was no revision to get past it on.
+
+The demotion that fixes that belongs to the STATE case alone: `low`
+requires a full commit object id AND the absence of a comparison base.
+A pin says the bytes cannot change FROM HERE. It says nothing about
+whether moving to them was the change under review, and an attacker's
+fork pinned to a commit is still an attacker's fork -- the pin makes it
+more attractive, not less, because it looks deliberate and reviewed. A
+first version of this fix read the pin off the specifier alone, and so
+reported `"^4.17.21"` rewritten to `github:attacker/lodash#<40 hex>` at
+low with exit 0: the precise shape this check's own header names as the
+attack it exists for, converted into a note. With a comparison base every
+branch here blocks, `added` as well as `changed`, because with a base
+`added` means genuinely newly added and deserves the look; without one,
+everything reads as added falsely, which is the situation the demotion
+covers and the only one.
+
+The mutable case keeps `critical` in both modes, deliberately and unlike
+the `ambiguous-critical` escalation above: that one is softened to high
 because it cannot assert its fact, whereas this one is certain -- the
-dependency really does install whatever that ref points at today. What the
-message owes is naming which of the two cases it is, so a reader can tell
-an accepted pin from a live exposure. The pin is git-only: a url source
-names a tarball at a URL whose bytes can be swapped however hex-shaped its
-fragment looks.
+dependency really does install whatever that ref points at today. The pin
+is git-only: a url source names a tarball at a URL whose bytes can be
+swapped however hex-shaped its fragment looks.
+
+That makes three messages, not two, and the third is not decoration. A
+pinned source in delta mode carries a blocking severity, so it must not
+carry reassuring wording: a critical whose text says the commit "cannot
+change under you" is the same self-contradiction the host-changed rule
+avoids by naming full origins, and a reader told that the severity and the
+text disagree believes the text. The low variant says instead that the
+scan has no earlier revision and therefore cannot tell whether the pin is
+new.
 
 The second is `kind`. With no comparison base every dependency reads as
 `added`, and a state signal spelling that as `added` told a first-time
@@ -569,6 +593,15 @@ two signals report `kind: 'present'` when `hasComparisonBase` is false, the
 same word install-script uses in that mode; the comparison-derived signals
 are genuine events and keep their own kind. This is the "may report facts,
 never events" rule applied to the rule it bit second.
+
+`present` is the state-signal value of `details.kind`, and it is the third
+member of a set that is `added | changed` everywhere else in the engine.
+`ReportedKind` in `checks/tamper.ts` declares it, and the expression that
+produces it is annotated against that type, because `details` is a
+`Record<string, unknown>` that would accept any string at all and a value
+this contract-bearing should not rest on one un-checked template.
+`ComparisonSubject.kind` stays `added | changed`: the comparison signals
+describe events and must never acquire the third value.
 
 None of that may touch `details.signal`. The severity, the message, the new
 `commitPinned` detail and `kind` are all outside the fingerprint by design,
@@ -670,12 +703,19 @@ re-deriving the rule from the format description instead of from a file.
 
 The self-management document's own packages are deliberately NOT scanned.
 They are genuinely installed dependencies and reading them would be real
-coverage, which is exactly why they are not read here: new findings about
-packages no previous release looked at are a coverage change, and this
-shipped in a patch. `pnpm-multi-document-lockfile` names the count of
-documents and says which were not scanned, so the omission cannot read as
-a clean scan of the whole file. Scanning both importer sets, attributed,
-is the open follow-up and belongs in a minor.
+coverage, and it is deferred rather than bundled here so that the fix for
+the exit-2 failure is not carrying a coverage change nobody asked for.
+`pnpm-multi-document-lockfile` names how many documents the file held and
+how many were not scanned, so the omission cannot read as a clean scan of
+the whole file. Scanning both importer sets, attributed, is the open
+follow-up.
+
+That diagnostic counts every UNSELECTED document, and it says exactly
+that rather than calling them self-management documents. Step 4 of the
+rule can select on importer count alone, in which case a discarded
+document was never classified as self-management at all, and a message
+naming a cause its own number does not support is the failure these
+diagnostics exist to prevent.
 
 ## Diagnostics never change the exit code
 

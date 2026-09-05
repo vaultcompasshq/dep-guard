@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tamperCheck } from '../src/checks/tamper.js';
 import { fingerprintFinding } from '../src/fingerprint.js';
+import { isBlocking } from '../src/gate.js';
 import { parseManifest } from '../src/manifest.js';
 import type { CheckContext, ResolvedConfig } from '../src/checks/types.js';
 import type { Corpus } from '../src/corpus.js';
@@ -1001,40 +1002,50 @@ describe('tamperCheck: git/url source swap', () => {
 // at the same unconditional critical hard-blocked the first commit of any
 // repository with a long-standing pinned git dependency, which is a
 // legitimate configuration this gate has no business refusing.
-describe('tamperCheck: git sources pinned to an immutable commit', () => {
-  function gitChange(specifier: string, options: ContextOptions = {}) {
-    const changes = [makeChange({ name: 'dep', kind: 'changed', protocol: 'git', specifier })];
-    const findings = tamperCheck(makeContext(changes, options));
+//
+// The demotion is a property of the STATE case alone, and these all run
+// with no comparison base for that reason. The pin says the bytes cannot
+// change from here; it says nothing about whether moving to them was the
+// change under review. See the delta-mode describe below, which is the
+// half that must never be softened.
+describe('tamperCheck: a pre-existing pinned git source, seen with no earlier revision', () => {
+  function statePin(specifier: string) {
+    const changes = [makeChange({ name: 'dep', kind: 'added', protocol: 'git', specifier })];
+    const findings = tamperCheck(makeContext(changes, { hasComparisonBase: false }));
     expect(findings).toHaveLength(1);
     return findings[0];
   }
 
   test('a 40-hex commit SHA reports at low, under the default medium gate', () => {
-    const finding = gitChange(
-      'git+https://git.example.test/owner/repo.git#49103de6ed70804e940637bf3e9e29e4a3f54e64'
-    );
-    expect(finding.severity).toBe('low');
+    expect(
+      statePin('git+https://git.example.test/owner/repo.git#49103de6ed70804e940637bf3e9e29e4a3f54e64')
+        .severity
+    ).toBe('low');
   });
 
-  test('the immutable-commit message says the pin cannot change', () => {
-    const finding = gitChange(
+  // The message has to say WHY it is not blocking, and the reason is the
+  // missing revision, not the pin on its own.
+  test('the low message says the scan has no earlier revision and the pin cannot change', () => {
+    const finding = statePin(
       'git+https://git.example.test/owner/repo.git#49103de6ed70804e940637bf3e9e29e4a3f54e64'
     );
     expect(finding.message).toContain('immutable commit');
+    expect(finding.message).toContain('no earlier revision');
     expect(finding.message).toContain('cannot change');
   });
 
   // git repositories are migrating to sha256 object ids, and a 64-hex ref
   // is exactly as immutable as a 40-hex one.
   test('a 64-hex sha256 commit id is immutable too', () => {
-    const finding = gitChange(
-      'git+https://git.example.test/owner/repo.git#8b1a9953c4611296a827abf8c47804d7c470c39cf17b2a4d1e2f7e5a2c0d3b6f'
-    );
-    expect(finding.severity).toBe('low');
+    expect(
+      statePin(
+        'git+https://git.example.test/owner/repo.git#8b1a9953c4611296a827abf8c47804d7c470c39cf17b2a4d1e2f7e5a2c0d3b6f'
+      ).severity
+    ).toBe('low');
   });
 
   test('the github: shorthand with a pinned SHA is immutable even though it carries no host', () => {
-    const finding = gitChange('github:owner/repo#49103de6ed70804e940637bf3e9e29e4a3f54e64');
+    const finding = statePin('github:owner/repo#49103de6ed70804e940637bf3e9e29e4a3f54e64');
     expect(finding.severity).toBe('low');
     expect(finding.details?.host).toBeNull();
   });
@@ -1045,12 +1056,12 @@ describe('tamperCheck: git sources pinned to an immutable commit', () => {
     ['no ref at all', 'git+https://git.example.test/owner/repo.git'],
     ['a short SHA', 'git+https://git.example.test/owner/repo.git#49103de'],
     ['a 40-character non-hex ref', 'git+https://git.example.test/owner/repo.git#zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'],
-  ])('%s keeps its blocking severity', (_label, specifier) => {
-    expect(gitChange(specifier).severity).toBe('critical');
+  ])('%s keeps its blocking severity even with no comparison base', (_label, specifier) => {
+    expect(statePin(specifier).severity).toBe('critical');
   });
 
   test('the mutable-ref message says the installed code can change without the manifest changing', () => {
-    const finding = gitChange('git+https://git.example.test/owner/repo.git#main');
+    const finding = statePin('git+https://git.example.test/owner/repo.git#main');
     expect(finding.message).toContain('can change');
     expect(finding.message).not.toContain('immutable commit');
   });
@@ -1062,25 +1073,120 @@ describe('tamperCheck: git sources pinned to an immutable commit', () => {
     const changes = [
       makeChange({
         name: 'dep',
-        kind: 'changed',
+        kind: 'added',
         protocol: 'url',
         specifier:
           'https://evil.example.test/dep.tgz#49103de6ed70804e940637bf3e9e29e4a3f54e64',
       }),
     ];
-    const findings = tamperCheck(makeContext(changes));
+    const findings = tamperCheck(makeContext(changes, { hasComparisonBase: false }));
     expect(findings[0].severity).toBe('critical');
   });
 
   // The credential rule holds for the new branches too: a ref is read to
   // classify the pin, never echoed alongside the rest of the specifier.
   test('an immutable pin on a credential-bearing specifier still leaks no token', () => {
-    const finding = gitChange(
+    const finding = statePin(
       'git+https://x-access-token:ghp_SECRETTOKEN@git.example.test/o/r.git#49103de6ed70804e940637bf3e9e29e4a3f54e64'
     );
     expect(finding.severity).toBe('low');
     expect(finding.message).not.toContain('ghp_SECRETTOKEN');
     expect(JSON.stringify(finding.details)).not.toContain('ghp_SECRETTOKEN');
+  });
+});
+
+// The attack this check was written for, named in its own header: a pinned
+// range rewritten to a git source. An attacker's fork pinned to a commit is
+// still an attacker's fork, and the pin makes it MORE attractive, not less,
+// because it looks deliberate and reviewed. A severity computed from the
+// specifier alone would report exactly that at low and exit 0.
+describe('tamperCheck: a move to a git source with a comparison base always blocks', () => {
+  function deltaChange(kind: 'added' | 'changed', specifier: string) {
+    const changes = [makeChange({ name: 'lodash', kind, protocol: 'git', specifier })];
+    const findings = tamperCheck(makeContext(changes, { hasComparisonBase: true }));
+    expect(findings).toHaveLength(1);
+    return findings[0];
+  }
+
+  test('a registry range repointed to an attacker fork pinned to a commit is critical', () => {
+    const finding = deltaChange(
+      'changed',
+      'github:attacker/lodash#49103de6ed70804e940637bf3e9e29e4a3f54e64'
+    );
+    expect(finding.severity).toBe('critical');
+    expect(finding.details?.kind).toBe('changed');
+  });
+
+  test('that finding blocks at the default medium threshold', () => {
+    const finding = deltaChange(
+      'changed',
+      'github:attacker/lodash#49103de6ed70804e940637bf3e9e29e4a3f54e64'
+    );
+    expect(isBlocking({ ...finding, fingerprint: 'x' }, 'medium')).toBe(true);
+  });
+
+  // A dependency genuinely added in this revision is an event too. Only
+  // the no-comparison-base case reads everything as added falsely, and
+  // that case is the only one the demotion covers.
+  test('a newly added pinned git dependency is critical when the scan has a comparison base', () => {
+    expect(
+      deltaChange('added', 'github:attacker/lodash#49103de6ed70804e940637bf3e9e29e4a3f54e64')
+        .severity
+    ).toBe('critical');
+  });
+
+  test('the delta-mode message for a pinned source does not read as reassurance', () => {
+    const finding = deltaChange(
+      'changed',
+      'github:attacker/lodash#49103de6ed70804e940637bf3e9e29e4a3f54e64'
+    );
+    expect(finding.message).toContain('this revision');
+    expect(finding.message).not.toContain('no earlier revision');
+  });
+});
+
+// The pin test decides a severity, so its edges are a gate boundary rather
+// than a formatting detail: one character either side of a commit id, and a
+// fragment that is not a ref at all.
+describe('tamperCheck: what counts as a full commit object id', () => {
+  function severityOf(fragment: string) {
+    const changes = [
+      makeChange({
+        name: 'dep',
+        kind: 'added',
+        protocol: 'git',
+        specifier: `git+https://git.example.test/owner/repo.git#${fragment}`,
+      }),
+    ];
+    return tamperCheck(makeContext(changes, { hasComparisonBase: false }))[0].severity;
+  }
+
+  test('39 hex characters is not a commit id', () => {
+    expect(severityOf('49103de6ed70804e940637bf3e9e29e4a3f54e6')).toBe('critical');
+  });
+
+  test('41 hex characters is not a commit id', () => {
+    expect(severityOf('49103de6ed70804e940637bf3e9e29e4a3f54e644')).toBe('critical');
+  });
+
+  test('63 hex characters is not a commit id', () => {
+    expect(
+      severityOf('8b1a9953c4611296a827abf8c47804d7c470c39cf17b2a4d1e2f7e5a2c0d3b6')
+    ).toBe('critical');
+  });
+
+  // npm's "#semver:" fragment selects a tag by range. It is a ref
+  // selector, not a ref, and what it selects moves as tags are published.
+  test('a #semver: range fragment is not a commit id', () => {
+    expect(severityOf('semver:^1.0.0')).toBe('critical');
+  });
+
+  test('an uppercase 40-hex commit id is still a commit id', () => {
+    expect(severityOf('49103DE6ED70804E940637BF3E9E29E4A3F54E64')).toBe('low');
+  });
+
+  test('a mixed-case 40-hex commit id is still a commit id', () => {
+    expect(severityOf('49103De6eD70804e940637Bf3E9e29E4a3F54e64')).toBe('low');
   });
 });
 

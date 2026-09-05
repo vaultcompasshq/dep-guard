@@ -532,8 +532,20 @@ describe('parsePnpmLockfile: multi-document lockfiles (pnpm 12 self-management)'
     const result = parsePnpmLockfile(PATH, MULTIDOC_FIXTURE_CONTENT);
     const notes = result.diagnostics.filter((d) => d.code === 'pnpm-multi-document-lockfile');
     expect(notes).toHaveLength(1);
-    expect(notes[0].message).toContain('2');
+    expect(notes[0].message).toContain('2 YAML documents');
     expect(notes[0].message).toContain('not scanned');
+  });
+
+  // The count is every UNSELECTED document, and step 4 of the selection
+  // rule can discard a document that was never classified as
+  // self-management at all. Calling the count "self-management
+  // document(s)" asserts a cause the number does not carry.
+  test('the diagnostic counts unselected documents without claiming what they were', () => {
+    const note = parsePnpmLockfile(PATH, MULTIDOC_FIXTURE_CONTENT).diagnostics.find(
+      (d) => d.code === 'pnpm-multi-document-lockfile'
+    );
+    expect(note?.message).toContain('1 document(s) other than the project lockfile');
+    expect(note?.message).not.toContain('self-management');
   });
 
   test('an ordinary single-document lockfile raises no multi-document diagnostic', () => {

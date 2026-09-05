@@ -297,12 +297,20 @@ export function parsePnpmLockfile(path: string, content: string): ParsedLockfile
     // Coverage the engine did not provide has to say so. The packages in
     // the documents this parser passed over are really installed, and
     // nothing else in the scan will mention them.
+    //
+    // The count is every UNSELECTED document, which is not the same set as
+    // "the self-management documents": step 4 of the selection rule can
+    // pick a document on importer count alone, and then a discarded
+    // document was never classified as self-management at all. Calling the
+    // count self-management documents would name a cause the number does
+    // not support, which is the shape of misreport these diagnostics exist
+    // to avoid.
     diagnostics.push({
       code: 'pnpm-multi-document-lockfile',
       message:
         `${path}: this lockfile holds ${skipped + 1} YAML documents; the project lockfile document ` +
-        `was read and ${skipped} pnpm self-management document(s) were not scanned, so the pnpm ` +
-        'binaries they install are not covered by this scan',
+        `was read and ${skipped} document(s) other than the project lockfile were not scanned, so ` +
+        'any packages they install are not covered by this scan',
     });
   }
   const entries = new Map<string, LockEntry[]>();

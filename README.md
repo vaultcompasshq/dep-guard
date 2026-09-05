@@ -61,11 +61,15 @@ Six rules, all offline and deterministic (plus three optional online checks
   repointed within the same host. It also reads the declared specifier, so a
   dependency pointed at a git or url source instead of the registry is
   reported even in a repository whose lockfile format this tool cannot
-  parse. A git source pinned to a full commit SHA reports at `low`: it
-  bypasses the registry's integrity guarantees, which is worth knowing, but
-  the commit cannot change under you. A git source on a branch, a tag, or no
-  ref at all, and any url source, block at `critical`, because the code they
-  install can change without your manifest changing.
+  parse. Any revision that MOVES a dependency to a git or url source blocks
+  at `critical`, pinned to a commit or not: an attacker's fork pinned to a
+  commit is still an attacker's fork. The one softened case is a scan with
+  no earlier revision to compare against, where every dependency reads as
+  newly added whether or not it is. There, a git source already pinned to a
+  full commit SHA reports at `low`, because it cannot change under you and
+  blocking it would refuse the first commit of every repository that has
+  one. A mutable ref still blocks even in that mode, since what it installs
+  can change without your manifest changing.
 - **Version hygiene** -- wildcard and `latest` specifiers on new
   dependencies. Demoted rather than exempted on `@types/*` packages: a
   DefinitelyTyped package ships no runtime code, so an unpinned range on one
@@ -216,7 +220,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v5
-  - uses: vaultcompasshq/dep-guard@v0.2.3
+  - uses: vaultcompasshq/dep-guard@v0.3.0
     with:
       path: .
       online: 'true'

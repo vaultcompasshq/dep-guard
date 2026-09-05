@@ -178,6 +178,76 @@ function isCommitPinnedGitSpecifier(specifier: string): boolean {
   return IMMUTABLE_GIT_REF.test(specifier.slice(hashIndex + 1));
 }
 
+// The `kind` a source-swap finding reports. `DepChange['kind']` is
+// 'added' | 'changed' everywhere else in the engine, and the
+// comparison-derived signals keep exactly those two because they describe
+// events. The specifier-based signals add a third value: with no earlier
+// revision to compare against they report a standing state, and 'present'
+// is the word install-script already uses for the same situation. It is
+// declared here rather than left implicit inside a
+// Record<string, unknown>, so the third value is part of the contract
+// instead of an accident of one expression.
+type ReportedKind = DepChange['kind'] | 'present';
+
+// Severity and wording for the git-source and url-source signals.
+//
+// The rule that matters, and the one this got wrong first: the demotion
+// belongs to the STATE case alone. A commit pin says the bytes cannot
+// change FROM HERE. It says nothing about whether moving to them was the
+// change under review, and an attacker's fork pinned to a commit is still
+// an attacker's fork -- the pin makes it more attractive, not less,
+// because it looks deliberate and reviewed. Deciding severity from the
+// specifier alone therefore reported "^4.17.21" rewritten to
+// "github:attacker/lodash#<sha>" at low and exited 0, which is the exact
+// attack shape named in this check's own header.
+//
+// So `low` requires BOTH a full commit object id and the absence of a
+// comparison base. With a comparison base every branch here blocks,
+// whether the dependency was added or changed in that revision: with a
+// base, `added` means genuinely newly added and deserves the look. Without
+// one, everything reads as added falsely, which is the situation the
+// demotion exists for and the only one it covers.
+//
+// Three messages rather than two, because a pinned source in delta mode
+// gets a blocking severity and must not carry reassuring wording. A
+// critical finding whose message says the commit "cannot change under you"
+// is the same self-contradiction the host-changed rule avoids by naming
+// full origins: the reader is told the severity and the text disagree, and
+// believes the text.
+function sourceSwapReport(
+  protocol: 'git' | 'url',
+  named: string,
+  packageName: string,
+  pinned: boolean,
+  hasComparisonBase: boolean
+): { severity: Finding['severity']; message: string } {
+  const opening = `"${packageName}" resolves via ${named} instead of the registry`;
+  if (pinned && !hasComparisonBase) {
+    return {
+      severity: 'low',
+      message:
+        `${opening}, pinned to an immutable commit. This scan has no earlier revision to compare ` +
+        'against, so it cannot tell whether the pin is new; a pin that was already here bypasses ' +
+        'the integrity guarantees a registry resolution carries, but cannot change under you.',
+    };
+  }
+  if (pinned) {
+    return {
+      severity: 'critical',
+      message:
+        `${opening}, pinned to an immutable commit. The commit cannot change under you, but this ` +
+        'revision is what moved the dependency off the registry, and a fork pinned to a commit is ' +
+        'still whatever that fork contains.',
+    };
+  }
+  return {
+    severity: 'critical',
+    message:
+      `${opening}, on a reference that is not a pinned commit, so the code it installs can change ` +
+      'without this manifest changing.',
+  };
+}
+
 // The resolvedUrl comparison below cannot reuse hostOf: its
 // empty-host-to-null collapse is correct for a message but wrong for an
 // equality check -- a file: URL legitimately has an empty host, so a
@@ -732,35 +802,28 @@ export const tamperCheck: Check = (ctx) => {
       // falling back to the raw text.
       const host = hostOf(change.specifier);
       const named = host === null ? `a ${change.protocol} source` : `a ${change.protocol} source ("${host}")`;
-      // A git source pinned to a full commit object id is a different
-      // fact from one on a branch or a tag, and reporting both at one
+      // A git source pinned to a full commit object id is a different fact
+      // from one on a branch or a tag, and reporting both at one
       // unconditional critical hard-blocked the first commit of every
-      // repository with a long-standing pinned git dependency. Pinning to
-      // a commit still bypasses the registry's integrity guarantees --
-      // that is worth saying, and the finding stays -- but the bytes
-      // cannot be swapped afterwards, so it reports at low, under the
-      // default medium gate, the same place install-script's `present`
-      // sits for the same reason.
-      //
-      // A mutable ref keeps critical. The severity is not softened for it:
-      // unlike the ambiguous-critical escalation, which cannot assert its
-      // fact, this one is certain -- the dependency really does install
-      // whatever that ref points at today, and whoever controls the
-      // repository can change that without a line of this manifest
-      // moving. What the message owes is saying which of the two cases it
-      // is, so the reader can tell an accepted pin from a live exposure.
+      // repository with a long-standing pinned git dependency. The
+      // demotion for that is decided in sourceSwapReport, which requires
+      // the absence of a comparison base as well as the pin -- read the
+      // comment there before touching either input, because dropping the
+      // comparison-base half turns the check's headline attack shape into
+      // a non-blocking note.
       const pinned = change.protocol === 'git' && isCommitPinnedGitSpecifier(change.specifier);
+      const shape = sourceSwapReport(
+        change.protocol,
+        named,
+        change.registryName,
+        pinned,
+        delta.hasComparisonBase
+      );
       report({
         ruleId: 'lockfile-tamper',
-        severity: pinned ? 'low' : 'critical',
+        severity: shape.severity,
         packageName: change.registryName,
-        message: pinned
-          ? `"${change.registryName}" resolves via ${named} instead of the registry, pinned to an ` +
-            'immutable commit. That bypasses the integrity guarantees a registry resolution carries, ' +
-            'but the commit it installs cannot change under you.'
-          : `"${change.registryName}" resolves via ${named} instead of the registry, on a reference ` +
-            'that is not a pinned commit, so the code it installs can change without this manifest ' +
-            'changing.',
+        message: shape.message,
         manifestPath: change.manifestPath,
         details: {
           // Two git sources are two different facts, so the host the
@@ -784,7 +847,11 @@ export const tamperCheck: Check = (ctx) => {
           // The same `present` install-script reports in that mode, for
           // the same reason. The comparison-derived signals below are
           // genuine events and keep their own kind.
-          kind: delta.hasComparisonBase ? change.kind : 'present',
+          //
+          // Annotated with ReportedKind so the third value is declared
+          // rather than inferred from this expression: `details` is a
+          // Record<string, unknown>, which would accept any string here.
+          kind: (delta.hasComparisonBase ? change.kind : 'present') satisfies ReportedKind,
           host,
           // Whether the git ref is a full commit object id. The ref itself
           // is never carried: a specifier is where a credential lives.
