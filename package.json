@@ -25,6 +25,10 @@
     "@jest/globals": "^30.4.1",
     "@types/jest": "^30.0.0",
     "@types/node": "^22.19.0",
+    "@vaultcompass/conductor": "0.2.0",
+    "@vaultcompass/dep-guard": "0.2.1",
+    "@vaultcompass/intent-guard": "1.2.1",
+    "@vaultcompass/vault-guard": "1.4.6",
     "jest": "^30.4.2",
     "ts-jest": "^29.4.12",
     "typescript": "^5.9.3"

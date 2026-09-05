@@ -17,6 +17,18 @@ importers:
       '@types/node':
         specifier: ^22.19.0
         version: 22.20.1
+      '@vaultcompass/conductor':
+        specifier: 0.2.0
+        version: 0.2.0
+      '@vaultcompass/dep-guard':
+        specifier: 0.2.1
+        version: 0.2.1
+      '@vaultcompass/intent-guard':
+        specifier: 1.2.1
+        version: 1.2.1
+      '@vaultcompass/vault-guard':
+        specifier: 1.4.6
+        version: 1.4.6
       jest:
         specifier: ^30.4.2
         version: 30.4.2(@types/node@22.20.1)
@@ -504,6 +516,58 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@vaultcompass/conductor@0.2.0':
+    resolution: {integrity: sha512-E9VZ755Cbeg6/OP1SMclBWM9WE4loq6rgJWJE4k/Jd7tXf8xNsjjqslAorBSnvX5XWgcirWt8npUCLslgoJfzQ==}
+    engines: {node: '>=22'}
+    hasBin: true
+
+  '@vaultcompass/dep-guard-core@0.2.1':
+    resolution: {integrity: sha512-XiRv63SlFuxV5lDi+rAf+kn9B6bLxgjpgUgjBJmWryGGJiutb01BvtXKVd9XwBgSrJRPZY+b3IRijnDX3KVe6w==}
+    engines: {node: '>=22'}
+
+  '@vaultcompass/dep-guard@0.2.1':
+    resolution: {integrity: sha512-xMUH2swMMIut627yda8nV8hOyR299gR7Grv96dJ1C+HDErNDAa547Ad6yufyBMjoed5lBuT9zfNYQKtywk456g==}
+    engines: {node: '>=22'}
+    hasBin: true
+
+  '@vaultcompass/intent-guard-core@1.2.1':
+    resolution: {integrity: sha512-liQ8wlmG+mtwYzmA4wqfiuBXSWj9P1Ar2QzZVdg3zzOkyBJmJefeFpicMdslkzj3Ah0PiFKV9XigW+Ci5+Cbug==}
+
+  '@vaultcompass/intent-guard-schema@1.2.1':
+    resolution: {integrity: sha512-jyA4NxMEVYHiDYbm6qN93uhsZDMBm2HeXhw6lk74O5kG66uWxTgVwjJLNmk+13j7RvVzn9wRdV3Tu1pt58NPUg==}
+
+  '@vaultcompass/intent-guard-skill@1.2.1':
+    resolution: {integrity: sha512-TqIMBymuzV7QZpaoDpVB/EzZYUz8TVIWTKL3sgzQyTSDCr+jip9PYQu1yjDdxox9i/ynNPpF8P9Hil7BkLoteA==}
+    hasBin: true
+
+  '@vaultcompass/intent-guard@1.2.1':
+    resolution: {integrity: sha512-QhXpMKPimRRNM+MiFx3SLyBk5M0wpVJFuJnPMD7M5yadWW/KmhODpoIcfSb1iUswdc6NNtf+VnIGKNZH9tBysQ==}
+    hasBin: true
+
+  '@vaultcompass/vault-guard-core@1.4.6':
+    resolution: {integrity: sha512-yrfp6rfhm5ntllvGYg3EUb6Ytsbl0uyC2CitzT0A3WGp0bPtiOyWB1yBHVN0zpuI+5COsAMD3zvLkwTUr2XBhQ==}
+    engines: {node: '>=22.0.0', npm: '>=9.0.0', pnpm: '>=9.0.0'}
+
+  '@vaultcompass/vault-guard-telemetry@1.4.6':
+    resolution: {integrity: sha512-6FWjt1W1iK36dB9hbk1zncawNHS0vbtjcox+ly6ezvy7/AC2IxmmpeIl9A8Q18R02V4WZ7uNHZ7WVvmkWCMz3g==}
+    engines: {node: '>=22.0.0', npm: '>=9.0.0', pnpm: '>=9.0.0'}
+
+  '@vaultcompass/vault-guard@1.4.6':
+    resolution: {integrity: sha512-pg9MJ6yA4BR4NqFKw+X5b39dWziNfpUVvySwCcib1CZiITzAM/U3+f0A/7Wf8hJTELu/s5qrZGtHKb3h7+dDsw==}
+    engines: {node: '>=22.0.0', npm: '>=9.0.0', pnpm: '>=9.0.0'}
+    hasBin: true
+
+  ajv-formats@3.0.1:
+    resolution: {integrity: sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==}
+    peerDependencies:
+      ajv: ^8.0.0
+    peerDependenciesMeta:
+      ajv:
+        optional: true
+
+  ajv@8.20.0:
+    resolution: {integrity: sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==}
+
   ansi-escapes@4.3.2:
     resolution: {integrity: sha512-gKXj5ALrKWQLsYG9jlTRmR/xKluxHV+Z9QEwNIgCfM1/uwPMCuzVVnh5mwTd+OuBZcwSIMbqssNWRm1lE51QaQ==}
     engines: {node: '>=8'}
@@ -567,6 +631,10 @@ packages:
     resolution: {integrity: sha512-35JEvJ5/KKlbCHjMCsONI2w6HE88STjVdHk+C7d8LtcFxUjZR1KeLP9izofn2qs0KUxX5r4z73bwH/rd+JHacw==}
     engines: {node: '>=6.0.0'}
     hasBin: true
+
+  better-sqlite3@13.0.3:
+    resolution: {integrity: sha512-RbOBxmLBG8uvFUc15X9+9SFemKcQ0WBuISBVkpuiaUB2qblC8UWlHEjdWVoZ8AdhSwmoEgsiXKfopX0CQxaACQ==}
+    engines: {node: '>=22'}
 
   brace-expansion@1.1.18:
     resolution: {integrity: sha512-Edep/X9fGqVNmzKBVsDYIOtD+z1tuezV70LBjdCst9Tqu76lsnvRiZ6oTic1n+/BIwX6QDGAO94PN4N2SADvtw==}
@@ -720,8 +788,14 @@ packages:
     resolution: {integrity: sha512-PMARsyh/JtqC20HoGqlFcIlQAyqUtW4PlI1rup1uhYJtKuwAjbvWi3GQMAn+STdHum/dk8xrKfUM1+5SAwpolA==}
     engines: {node: ^18.14.0 || ^20.0.0 || ^22.0.0 || >=24.0.0}
 
+  fast-deep-equal@3.1.3:
+    resolution: {integrity: sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==}
+
   fast-json-stable-stringify@2.1.0:
     resolution: {integrity: sha512-lhd/wF+Lk98HZoTCtlVraHtfh5XYijIjalXck7saUtuanSDyLMxnHhSXEDJqHxD7msR8D0uCmqlkwjCV8xvwHw==}
+
+  fast-uri@3.1.7:
+    resolution: {integrity: sha512-dOvZVzjdZdz7phd9v6jCbwxrBW3fK6n8Rc0CtdmM4bumzMnxywBYhuph6J819RRw/ku+rLbelwfMunktuzVVHg==}
 
   fb-watchman@2.0.2:
     resolution: {integrity: sha512-p5161BqbuCaSnB8jIbzQHOlpgsPmK5rJVDfDKO91Axs5NC1uu3HRQm6wt9cd9/+GtQQIO53JdGXXoyDpTAsgYA==}
@@ -785,6 +859,10 @@ packages:
   human-signals@2.1.0:
     resolution: {integrity: sha512-B4FFZ6q/T2jhhksgkbEW3HBvWIfDW85snkQgawt07S7J5QXTk6BkNV+0yAeZrM5QpMAdYlocGoljn0sJ/WQkFw==}
     engines: {node: '>=10.17.0'}
+
+  ignore@5.3.2:
+    resolution: {integrity: sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==}
+    engines: {node: '>= 4'}
 
   import-local@3.2.0:
     resolution: {integrity: sha512-2SPlun1JUPWoM6t3F0dw0FkCF/jWY8kttcY4f599GLTSjh2OCuuhdTkJQsEcZzBqbXZGKMK2OqW1oZsjtf/gQA==}
@@ -986,6 +1064,9 @@ packages:
   json-parse-even-better-errors@2.3.1:
     resolution: {integrity: sha512-xyFwyhro/JEof6Ghe2iz2NcXoj2sloNsWr/XsERDK/oiPCfaNhl5ONfp+jQdAZRQQ0IJWNzH9zIZF7li91kh2w==}
 
+  json-schema-traverse@1.0.0:
+    resolution: {integrity: sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==}
+
   json5@2.2.3:
     resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
     engines: {node: '>=6'}
@@ -1055,6 +1136,10 @@ packages:
 
   neo-async@2.6.2:
     resolution: {integrity: sha512-Yd3UES5mWCSqR+qNT93S3UoYUkqAZ9lLg8a7g9rimsWmYGK8cVToA4/sF3RrshdyV3sAGMXVUmpMYOw+dLpOuw==}
+
+  node-addon-api@8.9.2:
+    resolution: {integrity: sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==}
+    engines: {node: ^18 || ^20 || >= 21}
 
   node-int64@0.4.0:
     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
@@ -1151,6 +1236,10 @@ packages:
 
   require-directory@2.1.1:
     resolution: {integrity: sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q==}
+    engines: {node: '>=0.10.0'}
+
+  require-from-string@2.0.2:
+    resolution: {integrity: sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==}
     engines: {node: '>=0.10.0'}
 
   resolve-cwd@3.0.0:
@@ -1942,6 +2031,69 @@ snapshots:
   '@unrs/resolver-binding-win32-x64-msvc@1.12.2':
     optional: true
 
+  '@vaultcompass/conductor@0.2.0':
+    dependencies:
+      ajv: 8.20.0
+      commander: 12.1.0
+      yaml: 2.9.0
+
+  '@vaultcompass/dep-guard-core@0.2.1':
+    dependencies:
+      yaml: 2.9.0
+
+  '@vaultcompass/dep-guard@0.2.1':
+    dependencies:
+      '@vaultcompass/dep-guard-core': 0.2.1
+      commander: 12.1.0
+
+  '@vaultcompass/intent-guard-core@1.2.1':
+    dependencies:
+      '@vaultcompass/intent-guard-schema': 1.2.1
+      yaml: 2.9.0
+
+  '@vaultcompass/intent-guard-schema@1.2.1':
+    dependencies:
+      ajv: 8.20.0
+      ajv-formats: 3.0.1(ajv@8.20.0)
+
+  '@vaultcompass/intent-guard-skill@1.2.1':
+    dependencies:
+      '@vaultcompass/intent-guard-core': 1.2.1
+      '@vaultcompass/intent-guard-schema': 1.2.1
+      yaml: 2.9.0
+
+  '@vaultcompass/intent-guard@1.2.1':
+    dependencies:
+      '@vaultcompass/intent-guard-skill': 1.2.1
+
+  '@vaultcompass/vault-guard-core@1.4.6':
+    dependencies:
+      ignore: 5.3.2
+
+  '@vaultcompass/vault-guard-telemetry@1.4.6':
+    dependencies:
+      '@vaultcompass/vault-guard-core': 1.4.6
+    optionalDependencies:
+      better-sqlite3: 13.0.3
+
+  '@vaultcompass/vault-guard@1.4.6':
+    dependencies:
+      '@vaultcompass/vault-guard-core': 1.4.6
+      '@vaultcompass/vault-guard-telemetry': 1.4.6
+      chalk: 4.1.2
+      commander: 12.1.0
+
+  ajv-formats@3.0.1(ajv@8.20.0):
+    optionalDependencies:
+      ajv: 8.20.0
+
+  ajv@8.20.0:
+    dependencies:
+      fast-deep-equal: 3.1.3
+      fast-uri: 3.1.7
+      json-schema-traverse: 1.0.0
+      require-from-string: 2.0.2
+
   ansi-escapes@4.3.2:
     dependencies:
       type-fest: 0.21.3
@@ -2022,6 +2174,11 @@ snapshots:
   balanced-match@1.0.2: {}
 
   baseline-browser-mapping@2.11.10: {}
+
+  better-sqlite3@13.0.3:
+    dependencies:
+      node-addon-api: 8.9.2
+    optional: true
 
   brace-expansion@1.1.18:
     dependencies:
@@ -2150,7 +2307,11 @@ snapshots:
       jest-mock: 30.4.1
       jest-util: 30.4.1
 
+  fast-deep-equal@3.1.3: {}
+
   fast-json-stable-stringify@2.1.0: {}
+
+  fast-uri@3.1.7: {}
 
   fb-watchman@2.0.2:
     dependencies:
@@ -2213,6 +2374,8 @@ snapshots:
   html-escaper@2.0.2: {}
 
   human-signals@2.1.0: {}
+
+  ignore@5.3.2: {}
 
   import-local@3.2.0:
     dependencies:
@@ -2597,6 +2760,8 @@ snapshots:
 
   json-parse-even-better-errors@2.3.1: {}
 
+  json-schema-traverse@1.0.0: {}
+
   json5@2.2.3: {}
 
   leven@3.1.0: {}
@@ -2648,6 +2813,9 @@ snapshots:
   natural-compare@1.4.0: {}
 
   neo-async@2.6.2: {}
+
+  node-addon-api@8.9.2:
+    optional: true
 
   node-int64@0.4.0: {}
 
@@ -2727,6 +2895,8 @@ snapshots:
   react-is@19.2.8: {}
 
   require-directory@2.1.1: {}
+
+  require-from-string@2.0.2: {}
 
   resolve-cwd@3.0.0:
     dependencies:
