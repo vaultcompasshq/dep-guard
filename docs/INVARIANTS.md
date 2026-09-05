@@ -536,6 +536,81 @@ ran") and what the yarn and bun loaders promise users ("lockfile-backed
 checks fall back to manifest evidence"). The format gate belongs where the
 resolution comparison begins, and nowhere above it.
 
+Being specifier-only makes those two signals STATE signals, and both
+halves of that word are load-bearing. They say what a dependency IS, never
+that anything happened between two revisions, which has two consequences
+the code now spells out where it used to get both wrong.
+
+The first is severity, and the exact scope of the softening is the whole
+point, because getting it one predicate too wide reopens the check's
+headline attack.
+
+A git source pinned to a full commit object id -- 40 hex characters for
+sha1, 64 for the sha256 object format git is migrating to -- names bytes
+that cannot change. One on a branch, a tag, an abbreviated SHA, or no ref
+at all names bytes whoever controls the repository can replace under a
+dependent with nothing in the manifest moving. Reporting both at one
+unconditional critical hard-blocked the first commit of any repository
+with a long-standing pinned git dependency, which is a legitimate
+configuration, and the finding fires whether or not anything changed, so
+there was no revision to get past it on.
+
+The demotion that fixes that belongs to the STATE case alone: `low`
+requires a full commit object id AND the absence of a comparison base.
+A pin says the bytes cannot change FROM HERE. It says nothing about
+whether moving to them was the change under review, and an attacker's
+fork pinned to a commit is still an attacker's fork -- the pin makes it
+more attractive, not less, because it looks deliberate and reviewed. A
+first version of this fix read the pin off the specifier alone, and so
+reported `"^4.17.21"` rewritten to `github:attacker/lodash#<40 hex>` at
+low with exit 0: the precise shape this check's own header names as the
+attack it exists for, converted into a note. With a comparison base every
+branch here blocks, `added` as well as `changed`, because with a base
+`added` means genuinely newly added and deserves the look; without one,
+everything reads as added falsely, which is the situation the demotion
+covers and the only one.
+
+The mutable case keeps `critical` in both modes, deliberately and unlike
+the `ambiguous-critical` escalation above: that one is softened to high
+because it cannot assert its fact, whereas this one is certain -- the
+dependency really does install whatever that ref points at today. The pin
+is git-only: a url source names a tarball at a URL whose bytes can be
+swapped however hex-shaped its fragment looks.
+
+That makes three messages, not two, and the third is not decoration. A
+pinned source in delta mode carries a blocking severity, so it must not
+carry reassuring wording: a critical whose text says the commit "cannot
+change under you" is the same self-contradiction the host-changed rule
+avoids by naming full origins, and a reader told that the severity and the
+text disagree believes the text. The low variant says instead that the
+scan has no earlier revision and therefore cannot tell whether the pin is
+new.
+
+The second is `kind`. With no comparison base every dependency reads as
+`added`, and a state signal spelling that as `added` told a first-time
+adopter their years-old pinned dependency had just been introduced. These
+two signals report `kind: 'present'` when `hasComparisonBase` is false, the
+same word install-script uses in that mode; the comparison-derived signals
+are genuine events and keep their own kind. This is the "may report facts,
+never events" rule applied to the rule it bit second.
+
+`present` is the state-signal value of `details.kind`, and it is the third
+member of a set that is `added | changed` everywhere else in the engine.
+`ReportedKind` in `checks/tamper.ts` declares it, and the expression that
+produces it is annotated against that type, because `details` is a
+`Record<string, unknown>` that would accept any string at all and a value
+this contract-bearing should not rest on one un-checked template.
+`ComparisonSubject.kind` stays `added | changed`: the comparison signals
+describe events and must never acquire the third value.
+
+None of that may touch `details.signal`. The severity, the message, the new
+`commitPinned` detail and `kind` are all outside the fingerprint by design,
+so a baseline recorded against one of these findings survives every one of
+these changes. A test pins the literal sha256 that dep-guard 0.2.2 produced
+for a real pinned git dependency, because folding the pin into the signal
+string is exactly the tempting refactor that would silently invalidate
+every such baseline.
+
 ## Path spellings have one source
 
 Every path in a finding, a diagnostic, or a config match is anchored to the
@@ -574,6 +649,74 @@ pnpm's workspace-wide `onlyBuiltDependencies` findings are anchored to the
 root manifest, because the setting really is a property of the workspace
 root and can live in that very file.
 
+## A pnpm lockfile is a YAML stream, and which document is the project's is a rule, not a guess
+
+`pnpm-lock.yaml` is not one YAML document. pnpm 12 self-manages the pnpm
+binary and records that as its own document in the same file, separated by
+a bare `---`, alongside the project's real lockfile. The parser used
+`yaml`'s `parse()`, which throws `MULTIPLE_DOCS` on such a file, and the
+throw arrived as `lockfile-parse` -- so every scan of a pnpm 12
+repository was a could-not-run exit 2 that the umbrella turned into a
+block on every commit, with no way around it. It reads the stream with
+`parseAllDocuments` now.
+
+Two things about that library call are load-bearing and neither is
+obvious. `parseAllDocuments` does not throw for a malformed document the
+way `parse()` does: it collects the failures on each `Document`'s own
+`errors` array and returns the stream regardless, so an unread `errors`
+array would let a document that failed to compose arrive as an ordinary
+empty mapping and satisfy every lockfile-backed check against a tree
+nothing read. Every document's errors are checked, and any of them is the
+same `lockfile-parse` throw a single-document failure has always been. And
+every document in the stream must be a mapping, not merely the one that
+gets selected, for the same reason: understanding half a file is how a
+partial read gets reported as a whole one.
+
+The selection rule, in this order, because the order is the whole trick:
+
+1. A stream of one document IS the lockfile, whatever shape it has. A
+   repository whose only dependency is pnpm itself has exactly one
+   document and it is the self-management block.
+2. Otherwise the self-management documents are discarded FIRST. A
+   self-management document is recognised the way pnpm writes it: it has
+   importers, every one of them carries a `packageManagerDependencies`
+   block, and none of them declares `dependencies`, `devDependencies` or
+   `optionalDependencies`. Both halves of that test are required --
+   "carries `packageManagerDependencies`" alone would misfile a project
+   document that records its own packageManager field, and "declares no
+   dependencies" alone would misfile a genuinely empty project.
+3. Among what is left, the project lockfile is the document whose
+   importers carry the `.` (root project) importer.
+4. Absent any `.` importer, it is the document with the most importers,
+   and only where that maximum is unique.
+5. Anything else -- no candidate document at all, two candidates each
+   claiming `.`, a tie on importer count, no document carrying importers
+   -- is a `lockfile-parse` failure whose message names the ambiguity.
+
+Step 2 has to precede step 3, and the reason is the exact shape of a real
+pnpm 12 file rather than tidiness: BOTH documents claim a `.` importer
+there, because pnpm's self-managed binary is recorded as a dependency of
+the root project in its own document. A rule that reached for `.` first
+would call every such lockfile ambiguous and keep failing precisely the
+scans this exists to fix. This is the standing trap for anyone
+re-deriving the rule from the format description instead of from a file.
+
+The self-management document's own packages are deliberately NOT scanned.
+They are genuinely installed dependencies and reading them would be real
+coverage, and it is deferred rather than bundled here so that the fix for
+the exit-2 failure is not carrying a coverage change nobody asked for.
+`pnpm-multi-document-lockfile` names how many documents the file held and
+how many were not scanned, so the omission cannot read as a clean scan of
+the whole file. Scanning both importer sets, attributed, is the open
+follow-up.
+
+That diagnostic counts every UNSELECTED document, and it says exactly
+that rather than calling them self-management documents. Step 4 of the
+rule can select on importer count alone, in which case a discarded
+document was never classified as self-management at all, and a message
+naming a cause its own number does not support is the failure these
+diagnostics exist to prevent.
+
 ## Diagnostics never change the exit code
 
 The exit code comes from findings and the `fail_on` threshold, and from
@@ -605,6 +748,7 @@ Current diagnostic codes: `audit-anchor-differs`,
 `npmrc-pin-unparseable`, `online-check-unreachable`,
 `online-deadline-exceeded`,
 `path-outside-root`, `pnpm-lockfile-invalid-entry`,
+`pnpm-multi-document-lockfile`,
 `pnpm-no-install-script-flag`, `symlink-cycle`,
 `tamper-resolution-unreadable`, `workspace-dir-unreadable`,
 `workspace-duplicate-directory`, `workspace-glob-unsupported`.
@@ -640,7 +784,9 @@ The codes, and what each one means:
 - `manifest-parse` -- a manifest is present and unparseable.
 - `lockfile-parse` -- a lockfile is present and unparseable, including a
   lockfile that declares a format version whose required structure is
-  missing. This case is a throw and not a diagnostic on purpose: falling
+  missing, and a multi-document pnpm lockfile whose documents leave the
+  selection rule below no single project document to read. This case is a
+  throw and not a diagnostic on purpose: falling
   back would leave the entries map empty and every lockfile-backed check
   silently satisfied.
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
