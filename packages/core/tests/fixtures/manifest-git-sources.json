@@ -1,0 +1,12 @@
+{
+  "name": "git-sources-fixture",
+  "version": "0.0.0",
+  "dependencies": {
+    "pinned-sha1": "github:owner/repo#49103de6ed70804e940637bf3e9e29e4a3f54e64",
+    "pinned-sha256": "git+https://git.example.test/owner/repo.git#8b1a9953c4611296a827abf8c47804d7c470c39cf17b2a4d1e2f7e5a2c0d3b6f",
+    "tag-ref": "git+https://git.example.test/owner/repo.git#v1.2.3",
+    "branch-ref": "git+https://git.example.test/owner/repo.git#main",
+    "no-ref": "git+https://git.example.test/owner/repo.git",
+    "url-source": "https://tarballs.example.test/pkg-1.0.0.tgz"
+  }
+}

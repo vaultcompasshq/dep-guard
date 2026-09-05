@@ -58,7 +58,14 @@ Six rules, all offline and deterministic (plus three optional online checks
   them is not a finding, or every `npm update` would be noise.
 - **Lockfile tamper** -- resolutions moving to another host, integrity
   hashes removed, forged, or downgraded to a weaker algorithm, and tarballs
-  repointed within the same host.
+  repointed within the same host. It also reads the declared specifier, so a
+  dependency pointed at a git or url source instead of the registry is
+  reported even in a repository whose lockfile format this tool cannot
+  parse. A git source pinned to a full commit SHA reports at `low`: it
+  bypasses the registry's integrity guarantees, which is worth knowing, but
+  the commit cannot change under you. A git source on a branch, a tag, or no
+  ref at all, and any url source, block at `critical`, because the code they
+  install can change without your manifest changing.
 - **Version hygiene** -- wildcard and `latest` specifiers on new
   dependencies. Demoted rather than exempted on `@types/*` packages: a
   DefinitelyTyped package ships no runtime code, so an unpinned range on one

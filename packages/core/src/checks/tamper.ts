@@ -152,6 +152,32 @@ function hostOf(url: string): string | null {
   }
 }
 
+// A git specifier's ref is whatever follows the first "#". A full commit
+// object id -- 40 hex characters for sha1, 64 for the sha256 object format
+// git repositories are migrating to -- names bytes that cannot change. Any
+// other ref (a branch, a tag, an abbreviated SHA, or no ref at all) names
+// bytes that whoever controls the repository can replace under a
+// dependent, with nothing in the manifest moving.
+//
+// Deliberately git only. A url source names a tarball at a URL, and the
+// bytes behind a URL can be swapped however hex-shaped its fragment
+// happens to look, so there is no pin to recognise there.
+//
+// The ref is read to classify the pin and never echoed anywhere. A
+// specifier is where a credential appears, and userinfo sits before the
+// host, so it can never reach this function's return value -- but nothing
+// downstream prints the ref either, which is what keeps that true if the
+// parsing ever changes.
+const IMMUTABLE_GIT_REF = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
+function isCommitPinnedGitSpecifier(specifier: string): boolean {
+  const hashIndex = specifier.indexOf('#');
+  if (hashIndex === -1) {
+    return false;
+  }
+  return IMMUTABLE_GIT_REF.test(specifier.slice(hashIndex + 1));
+}
+
 // The resolvedUrl comparison below cannot reuse hostOf: its
 // empty-host-to-null collapse is correct for a message but wrong for an
 // equality check -- a file: URL legitimately has an empty host, so a
@@ -706,21 +732,64 @@ export const tamperCheck: Check = (ctx) => {
       // falling back to the raw text.
       const host = hostOf(change.specifier);
       const named = host === null ? `a ${change.protocol} source` : `a ${change.protocol} source ("${host}")`;
+      // A git source pinned to a full commit object id is a different
+      // fact from one on a branch or a tag, and reporting both at one
+      // unconditional critical hard-blocked the first commit of every
+      // repository with a long-standing pinned git dependency. Pinning to
+      // a commit still bypasses the registry's integrity guarantees --
+      // that is worth saying, and the finding stays -- but the bytes
+      // cannot be swapped afterwards, so it reports at low, under the
+      // default medium gate, the same place install-script's `present`
+      // sits for the same reason.
+      //
+      // A mutable ref keeps critical. The severity is not softened for it:
+      // unlike the ambiguous-critical escalation, which cannot assert its
+      // fact, this one is certain -- the dependency really does install
+      // whatever that ref points at today, and whoever controls the
+      // repository can change that without a line of this manifest
+      // moving. What the message owes is saying which of the two cases it
+      // is, so the reader can tell an accepted pin from a live exposure.
+      const pinned = change.protocol === 'git' && isCommitPinnedGitSpecifier(change.specifier);
       report({
         ruleId: 'lockfile-tamper',
-        severity: 'critical',
+        severity: pinned ? 'low' : 'critical',
         packageName: change.registryName,
-        message: `"${change.registryName}" resolves via ${named} instead of the registry.`,
+        message: pinned
+          ? `"${change.registryName}" resolves via ${named} instead of the registry, pinned to an ` +
+            'immutable commit. That bypasses the integrity guarantees a registry resolution carries, ' +
+            'but the commit it installs cannot change under you.'
+          : `"${change.registryName}" resolves via ${named} instead of the registry, on a reference ` +
+            'that is not a pinned commit, so the code it installs can change without this manifest ' +
+            'changing.',
         manifestPath: change.manifestPath,
         details: {
           // Two git sources are two different facts, so the host the
           // dependency now comes from is part of the signal. A shorthand
           // with no host of its own keeps the bare signal rather than
           // borrowing the raw specifier, which is where credentials live.
+          //
+          // Neither the severity split nor the kind below may touch this
+          // string: the fingerprint is a sha256 over exactly the rule id,
+          // the package name, the manifest path and this signal, so a
+          // change here would silently invalidate every stored baseline
+          // holding one of these findings.
           signal: `${change.protocol === 'git' ? 'git-source' : 'url-source'}${host === null ? '' : `:${host}`}`,
           protocol: change.protocol,
-          kind: change.kind,
+          // These two signals read a manifest specifier and nothing else,
+          // so they are state signals: they say what a dependency IS,
+          // never that anything happened between two revisions. With no
+          // earlier revision behind the scan every dependency reads as
+          // added, and spelling that as `added` told a first-time adopter
+          // their years-old pinned dependency had just been introduced.
+          // The same `present` install-script reports in that mode, for
+          // the same reason. The comparison-derived signals below are
+          // genuine events and keep their own kind.
+          kind: delta.hasComparisonBase ? change.kind : 'present',
           host,
+          // Whether the git ref is a full commit object id. The ref itself
+          // is never carried: a specifier is where a credential lives.
+          // git only -- a url source has no pin to record.
+          ...(change.protocol === 'git' ? { commitPinned: pinned } : {}),
         },
       });
     }

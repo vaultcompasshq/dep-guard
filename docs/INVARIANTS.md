@@ -536,6 +536,48 @@ ran") and what the yarn and bun loaders promise users ("lockfile-backed
 checks fall back to manifest evidence"). The format gate belongs where the
 resolution comparison begins, and nowhere above it.
 
+Being specifier-only makes those two signals STATE signals, and both
+halves of that word are load-bearing. They say what a dependency IS, never
+that anything happened between two revisions, which has two consequences
+the code now spells out where it used to get both wrong.
+
+The first is severity. A git source pinned to a full commit object id --
+40 hex characters for sha1, 64 for the sha256 object format git is
+migrating to -- names bytes that cannot change. One on a branch, a tag, an
+abbreviated SHA, or no ref at all names bytes whoever controls the
+repository can replace under a dependent with nothing in the manifest
+moving. Reporting both at one unconditional critical hard-blocked the
+first commit of any repository with a long-standing pinned git dependency,
+which is a legitimate configuration, and the finding fires whether or not
+anything changed, so there was no revision to get past it on. The pinned
+case reports `low` now -- the finding stays, because bypassing the
+registry's integrity guarantees is worth saying, and low sits under the
+default medium gate for the same reason install-script's `present` does.
+The mutable case keeps `critical`, deliberately and unlike the
+`ambiguous-critical` escalation above: that one is softened to high
+because it cannot assert its fact, whereas this one is certain -- the
+dependency really does install whatever that ref points at today. What the
+message owes is naming which of the two cases it is, so a reader can tell
+an accepted pin from a live exposure. The pin is git-only: a url source
+names a tarball at a URL whose bytes can be swapped however hex-shaped its
+fragment looks.
+
+The second is `kind`. With no comparison base every dependency reads as
+`added`, and a state signal spelling that as `added` told a first-time
+adopter their years-old pinned dependency had just been introduced. These
+two signals report `kind: 'present'` when `hasComparisonBase` is false, the
+same word install-script uses in that mode; the comparison-derived signals
+are genuine events and keep their own kind. This is the "may report facts,
+never events" rule applied to the rule it bit second.
+
+None of that may touch `details.signal`. The severity, the message, the new
+`commitPinned` detail and `kind` are all outside the fingerprint by design,
+so a baseline recorded against one of these findings survives every one of
+these changes. A test pins the literal sha256 that dep-guard 0.2.2 produced
+for a real pinned git dependency, because folding the pin into the signal
+string is exactly the tempting refactor that would silently invalidate
+every such baseline.
+
 ## Path spellings have one source
 
 Every path in a finding, a diagnostic, or a config match is anchored to the
