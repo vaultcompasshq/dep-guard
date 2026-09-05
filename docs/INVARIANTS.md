@@ -574,6 +574,67 @@ pnpm's workspace-wide `onlyBuiltDependencies` findings are anchored to the
 root manifest, because the setting really is a property of the workspace
 root and can live in that very file.
 
+## A pnpm lockfile is a YAML stream, and which document is the project's is a rule, not a guess
+
+`pnpm-lock.yaml` is not one YAML document. pnpm 12 self-manages the pnpm
+binary and records that as its own document in the same file, separated by
+a bare `---`, alongside the project's real lockfile. The parser used
+`yaml`'s `parse()`, which throws `MULTIPLE_DOCS` on such a file, and the
+throw arrived as `lockfile-parse` -- so every scan of a pnpm 12
+repository was a could-not-run exit 2 that the umbrella turned into a
+block on every commit, with no way around it. It reads the stream with
+`parseAllDocuments` now.
+
+Two things about that library call are load-bearing and neither is
+obvious. `parseAllDocuments` does not throw for a malformed document the
+way `parse()` does: it collects the failures on each `Document`'s own
+`errors` array and returns the stream regardless, so an unread `errors`
+array would let a document that failed to compose arrive as an ordinary
+empty mapping and satisfy every lockfile-backed check against a tree
+nothing read. Every document's errors are checked, and any of them is the
+same `lockfile-parse` throw a single-document failure has always been. And
+every document in the stream must be a mapping, not merely the one that
+gets selected, for the same reason: understanding half a file is how a
+partial read gets reported as a whole one.
+
+The selection rule, in this order, because the order is the whole trick:
+
+1. A stream of one document IS the lockfile, whatever shape it has. A
+   repository whose only dependency is pnpm itself has exactly one
+   document and it is the self-management block.
+2. Otherwise the self-management documents are discarded FIRST. A
+   self-management document is recognised the way pnpm writes it: it has
+   importers, every one of them carries a `packageManagerDependencies`
+   block, and none of them declares `dependencies`, `devDependencies` or
+   `optionalDependencies`. Both halves of that test are required --
+   "carries `packageManagerDependencies`" alone would misfile a project
+   document that records its own packageManager field, and "declares no
+   dependencies" alone would misfile a genuinely empty project.
+3. Among what is left, the project lockfile is the document whose
+   importers carry the `.` (root project) importer.
+4. Absent any `.` importer, it is the document with the most importers,
+   and only where that maximum is unique.
+5. Anything else -- no candidate document at all, two candidates each
+   claiming `.`, a tie on importer count, no document carrying importers
+   -- is a `lockfile-parse` failure whose message names the ambiguity.
+
+Step 2 has to precede step 3, and the reason is the exact shape of a real
+pnpm 12 file rather than tidiness: BOTH documents claim a `.` importer
+there, because pnpm's self-managed binary is recorded as a dependency of
+the root project in its own document. A rule that reached for `.` first
+would call every such lockfile ambiguous and keep failing precisely the
+scans this exists to fix. This is the standing trap for anyone
+re-deriving the rule from the format description instead of from a file.
+
+The self-management document's own packages are deliberately NOT scanned.
+They are genuinely installed dependencies and reading them would be real
+coverage, which is exactly why they are not read here: new findings about
+packages no previous release looked at are a coverage change, and this
+shipped in a patch. `pnpm-multi-document-lockfile` names the count of
+documents and says which were not scanned, so the omission cannot read as
+a clean scan of the whole file. Scanning both importer sets, attributed,
+is the open follow-up and belongs in a minor.
+
 ## Diagnostics never change the exit code
 
 The exit code comes from findings and the `fail_on` threshold, and from
@@ -605,6 +666,7 @@ Current diagnostic codes: `audit-anchor-differs`,
 `npmrc-pin-unparseable`, `online-check-unreachable`,
 `online-deadline-exceeded`,
 `path-outside-root`, `pnpm-lockfile-invalid-entry`,
+`pnpm-multi-document-lockfile`,
 `pnpm-no-install-script-flag`, `symlink-cycle`,
 `tamper-resolution-unreadable`, `workspace-dir-unreadable`,
 `workspace-duplicate-directory`, `workspace-glob-unsupported`.
@@ -640,7 +702,9 @@ The codes, and what each one means:
 - `manifest-parse` -- a manifest is present and unparseable.
 - `lockfile-parse` -- a lockfile is present and unparseable, including a
   lockfile that declares a format version whose required structure is
-  missing. This case is a throw and not a diagnostic on purpose: falling
+  missing, and a multi-document pnpm lockfile whose documents leave the
+  selection rule below no single project document to read. This case is a
+  throw and not a diagnostic on purpose: falling
   back would leave the entries map empty and every lockfile-backed check
   silently satisfied.
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped

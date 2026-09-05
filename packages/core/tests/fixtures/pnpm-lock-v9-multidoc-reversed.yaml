@@ -1,0 +1,68 @@
+---
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: false
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      lodash:
+        specifier: ^4.17.21
+        version: 4.17.21
+
+  packages/app:
+    dependencies:
+      malicious-pkg:
+        specifier: ^1.0.0
+        version: 1.0.0
+
+packages:
+
+  lodash@4.17.21:
+    resolution: {integrity: sha512-v2kDEe57lecTulaDIuNTPy3Ry4/GNQBALk5xz1CtLwjmpfKUZ0BX57iZfIuA1G+VuHrf1qJUkG5ycOHkQaqQdA==}
+    engines: {node: '>=4'}
+
+  malicious-pkg@1.0.0:
+    resolution: {tarball: https://evil.example.com/x.tgz}
+
+snapshots:
+
+  lodash@4.17.21: {}
+
+  malicious-pkg@1.0.0: {}
+
+---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    configDependencies: {}
+    packageManagerDependencies:
+      pnpm:
+        specifier: 12.2.1
+        version: 12.2.1
+
+packages:
+
+  '@pnpm/exe.darwin-arm64@12.2.1':
+    resolution: {integrity: sha512-selfmanageA2fL0faATnagmWPqcGuwh/T99YnOOsqIHU87E5xxD2ZJthH+D3ZoZ5663vOl7p43442ZPqLyBnihg==}
+    cpu: [arm64]
+    os: [darwin]
+
+  pnpm@12.2.1:
+    resolution: {integrity: sha512-selfmanageB2fL0faATnagmWPqcGuwh/T99YnOOsqIHU87E5xxD2ZJthH+D3ZoZ5663vOl7p43442ZPqLyBnihg==}
+    engines: {node: '>=18.*'}
+    hasBin: true
+
+snapshots:
+
+  '@pnpm/exe.darwin-arm64@12.2.1':
+    optional: true
+
+  pnpm@12.2.1:
+    optionalDependencies:
+      '@pnpm/exe.darwin-arm64': 12.2.1

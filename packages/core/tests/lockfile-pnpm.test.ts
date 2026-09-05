@@ -14,6 +14,19 @@ const WORKSPACE_FIXTURE_PATH = fileURLToPath(
 );
 const WORKSPACE_FIXTURE_CONTENT = readFileSync(WORKSPACE_FIXTURE_PATH, 'utf8');
 
+// pnpm 12 self-manages the pnpm binary and records that as a SECOND YAML
+// document in the same pnpm-lock.yaml. Both orderings exist as fixtures
+// because nothing in the format promises which document comes first, and a
+// selection rule that quietly means "the last one" would be a coin flip.
+const MULTIDOC_FIXTURE_CONTENT = readFileSync(
+  fileURLToPath(new URL('./fixtures/pnpm-lock-v9-multidoc.yaml', import.meta.url)),
+  'utf8'
+);
+const MULTIDOC_REVERSED_FIXTURE_CONTENT = readFileSync(
+  fileURLToPath(new URL('./fixtures/pnpm-lock-v9-multidoc-reversed.yaml', import.meta.url)),
+  'utf8'
+);
+
 function expectLockfileParse(fn: () => void): void {
   try {
     fn();
@@ -437,5 +450,144 @@ describe('parseOnlyBuilt', () => {
       ]);
       expect(result).toEqual(['x']);
     });
+  });
+});
+
+// A single-document lockfile with two importers, used as the "project
+// lockfile" half of the hand-built multi-document cases below.
+const PROJECT_DOC = [
+  "lockfileVersion: '9.0'",
+  '',
+  'importers:',
+  '',
+  '  .:',
+  '    dependencies:',
+  '      lodash:',
+  "        specifier: ^4.17.21",
+  '        version: 4.17.21',
+  '',
+  'packages:',
+  '',
+  '  lodash@4.17.21:',
+  '    resolution: {integrity: sha512-projectdoc}',
+  '',
+].join('\n');
+
+// The pnpm 12 self-management block: importers that carry only
+// packageManagerDependencies, and packages that are only pnpm's own
+// binaries.
+const SELF_MANAGEMENT_DOC = [
+  "lockfileVersion: '9.0'",
+  '',
+  'importers:',
+  '',
+  '  .:',
+  '    configDependencies: {}',
+  '    packageManagerDependencies:',
+  '      pnpm:',
+  '        specifier: 12.2.1',
+  '        version: 12.2.1',
+  '',
+  'packages:',
+  '',
+  '  pnpm@12.2.1:',
+  '    resolution: {integrity: sha512-selfmanagement}',
+  '',
+].join('\n');
+
+describe('parsePnpmLockfile: multi-document lockfiles (pnpm 12 self-management)', () => {
+  test('a two-document lockfile parses instead of throwing lockfile-parse', () => {
+    expect(() => parsePnpmLockfile(PATH, MULTIDOC_FIXTURE_CONTENT)).not.toThrow();
+  });
+
+  test('the project document supplies the entries and the self-management document does not', () => {
+    const result = parsePnpmLockfile(PATH, MULTIDOC_FIXTURE_CONTENT);
+    expect([...result.entries.keys()].sort()).toEqual(['lodash', 'malicious-pkg']);
+    expect(result.entries.has('pnpm')).toBe(false);
+    expect(result.entries.has('@pnpm/exe.darwin-arm64')).toBe(false);
+  });
+
+  test('the root importer dependencies of the project document are the ones read', () => {
+    const result = parsePnpmLockfile(PATH, MULTIDOC_FIXTURE_CONTENT);
+    expect(only(result, 'lodash')).toMatchObject({
+      version: '4.17.21',
+      integrity:
+        'sha512-v2kDEe57lecTulaDIuNTPy3Ry4/GNQBALk5xz1CtLwjmpfKUZ0BX57iZfIuA1G+VuHrf1qJUkG5ycOHkQaqQdA==',
+    });
+  });
+
+  // Nothing in the format promises the self-management document comes
+  // first. Taking the first or the last document would pass one of these
+  // two orderings and silently read pnpm's own binaries as the whole
+  // dependency tree in the other.
+  test('the same entries are found when the two documents are in the other order', () => {
+    const result = parsePnpmLockfile(PATH, MULTIDOC_REVERSED_FIXTURE_CONTENT);
+    expect([...result.entries.keys()].sort()).toEqual(['lodash', 'malicious-pkg']);
+    expect(result.entries.has('pnpm')).toBe(false);
+  });
+
+  // Silence about a document that was present and not read is
+  // indistinguishable from a clean read of the whole file.
+  test('the document that was not read is named in a diagnostic', () => {
+    const result = parsePnpmLockfile(PATH, MULTIDOC_FIXTURE_CONTENT);
+    const notes = result.diagnostics.filter((d) => d.code === 'pnpm-multi-document-lockfile');
+    expect(notes).toHaveLength(1);
+    expect(notes[0].message).toContain('2');
+    expect(notes[0].message).toContain('not scanned');
+  });
+
+  test('an ordinary single-document lockfile raises no multi-document diagnostic', () => {
+    const result = parsePnpmLockfile(PATH, FIXTURE_CONTENT);
+    expect(result.diagnostics.filter((d) => d.code === 'pnpm-multi-document-lockfile')).toEqual([]);
+  });
+
+  // A single-document parse failure throws today, because parse() throws
+  // when the document it composed carries errors. parseAllDocuments does
+  // not throw -- it hands the broken document back with its errors on the
+  // side -- so an unread errors array would let a document that failed to
+  // compose arrive as an ordinary mapping.
+  //
+  // The broken document here is deliberately the one that would NOT be
+  // selected: a project document sits beside it and parses cleanly, so
+  // this can only fail closed by reading the errors of a document the
+  // selection rule was going to discard anyway. A broken document in the
+  // selected position would fail closed for an unrelated reason and prove
+  // nothing.
+  test('a YAML error in a document the selection rule discards still fails closed', () => {
+    expectLockfileParse(() =>
+      parsePnpmLockfile(PATH, `lockfileVersion: '9.0'\nsettings:\n  a: 1\n  a: 2\n---\n${PROJECT_DOC}`)
+    );
+  });
+
+  test('a document in the stream that is not a mapping fails closed', () => {
+    expectLockfileParse(() => parsePnpmLockfile(PATH, `${PROJECT_DOC}---\n- a\n- b\n`));
+  });
+
+  // Two project-shaped documents is a file shape dep-guard has no rule
+  // for, and guessing between them would mean scanning half a tree.
+  test('two documents that both look like the project lockfile fail closed', () => {
+    expectLockfileParse(() => parsePnpmLockfile(PATH, `${PROJECT_DOC}---\n${PROJECT_DOC}`));
+  });
+
+  test('the ambiguity failure names how many documents claimed to be the project lockfile', () => {
+    try {
+      parsePnpmLockfile(PATH, `${PROJECT_DOC}---\n${PROJECT_DOC}`);
+      throw new Error('expected call to throw');
+    } catch (err) {
+      expect((err as DepGuardError).message).toContain('2 of them');
+      expect((err as DepGuardError).message).toContain('cannot tell');
+    }
+  });
+
+  test('a stream in which no document carries importers fails closed', () => {
+    expectLockfileParse(() =>
+      parsePnpmLockfile(PATH, "packages:\n  a@1.0.0:\n    resolution: {integrity: x}\n---\npackages:\n  b@1.0.0:\n    resolution: {integrity: y}\n")
+    );
+  });
+
+  test('a lockfile that is only the self-management document is read as the project lockfile', () => {
+    const result = parsePnpmLockfile(PATH, SELF_MANAGEMENT_DOC);
+    expect([...result.entries.keys()]).toEqual(['pnpm']);
+    expect(result.diagnostics.filter((d) => d.code === 'pnpm-multi-document-lockfile')).toEqual([]);
   });
 });

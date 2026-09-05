@@ -1,4 +1,4 @@
-import { parse as parseYaml } from 'yaml';
+import { parse as parseYaml, parseAllDocuments } from 'yaml';
 import { DepGuardError, type Diagnostic } from '../types.js';
 import type { LockEntry, ParsedLockfile } from './types.js';
 import type { ParsedManifest } from '../manifest.js';
@@ -33,6 +33,150 @@ function parseYamlDocument(path: string, content: string): unknown {
   } catch {
     throw new DepGuardError(`${path}: not valid YAML`, 'lockfile-parse');
   }
+}
+
+// A pnpm-lock.yaml is a YAML STREAM, not a single document. pnpm 12
+// self-manages the pnpm binary and writes that as its own document,
+// separated by a bare "---" line, alongside the project's real lockfile.
+// `parse()` throws MULTIPLE_DOCS on such a file, which arrived here as
+// lockfile-parse and made every scan of such a repository a
+// could-not-run exit 2 with no way around it.
+//
+// parseAllDocuments does not throw for a malformed document the way
+// parse() does: it collects the failures on each Document's own `errors`
+// array and hands the stream back regardless. So the errors have to be
+// read and rethrown, or a document that failed to compose would arrive
+// here as an empty mapping and every lockfile-backed check would be
+// silently satisfied against a tree that was never read -- the exact
+// fail-open this parser's throw exists to prevent.
+function parseYamlStream(path: string, content: string): unknown[] {
+  let documents;
+  try {
+    documents = parseAllDocuments(content);
+  } catch {
+    throw new DepGuardError(`${path}: not valid YAML`, 'lockfile-parse');
+  }
+  const values: unknown[] = [];
+  for (const document of documents) {
+    if (document.errors.length > 0) {
+      throw new DepGuardError(`${path}: not valid YAML`, 'lockfile-parse');
+    }
+    values.push(document.toJS());
+  }
+  // An empty stream (an empty or comment-only file) yields no documents at
+  // all. parse() returns null for the same input, and the caller's
+  // "not a YAML mapping" throw is what handled that before, so one null
+  // document keeps that path exactly as it was.
+  return values.length === 0 ? [null] : values;
+}
+
+// The importer sections that mean "a real project declared a dependency
+// here". pnpm's self-management importer carries packageManagerDependencies
+// and configDependencies and none of these.
+const PROJECT_IMPORTER_SECTIONS = ['dependencies', 'devDependencies', 'optionalDependencies'];
+
+function importersOf(document: Record<string, unknown>): Record<string, unknown> | undefined {
+  return isPlainObject(document.importers) ? document.importers : undefined;
+}
+
+// pnpm's self-management document, recognised the way pnpm writes it: it
+// has importers, every one of them records a packageManagerDependencies
+// block, and none of them declares an ordinary dependency section. Both
+// halves are required. "carries packageManagerDependencies" alone would
+// misfile a project document that happens to record its own packageManager
+// field, and "declares no dependencies" alone would misfile a genuinely
+// empty project.
+function isSelfManagementDocument(document: Record<string, unknown>): boolean {
+  const importers = importersOf(document);
+  if (importers === undefined) {
+    return false;
+  }
+  const values = Object.values(importers).filter(isPlainObject);
+  if (values.length === 0) {
+    return false;
+  }
+  return values.every(
+    (importer) =>
+      importer.packageManagerDependencies !== undefined &&
+      PROJECT_IMPORTER_SECTIONS.every((section) => importer[section] === undefined)
+  );
+}
+
+// Which document in the stream is the project's own lockfile.
+//
+// The rule, in order, because the order is what makes it work on a real
+// pnpm 12 file:
+//
+//  1. A stream of one document is that document, whatever shape it has.
+//     A repository whose only dependency is pnpm itself has exactly one
+//     document and it is the self-management block; that IS its lockfile.
+//  2. Otherwise, discard the self-management documents first. This step
+//     has to come before the "." rule below, because in a real pnpm 12
+//     lockfile BOTH documents claim a "." importer -- pnpm's self-managed
+//     binary is recorded as a root-project dependency of its own -- so a
+//     rule that reached for "." first would call every such file ambiguous
+//     and keep failing exactly the scans this exists to fix.
+//  3. Among what is left, the project lockfile is the document whose
+//     importers carry the "." (root project) importer.
+//  4. Absent any "." importer, it is the document with the most importers,
+//     and only when that maximum is unique.
+//  5. Anything else -- no candidate document at all, two candidates each
+//     claiming ".", a tie on importer count, no document carrying
+//     importers -- is a lockfile-parse failure whose message names the
+//     ambiguity. Guessing here would mean scanning part of a dependency
+//     tree and reporting the result as if it were the whole one.
+//
+// The self-management document's own packages are deliberately NOT
+// scanned, and the caller says so in a diagnostic. They are real installed
+// dependencies and reading them would be a coverage improvement, but it is
+// a coverage improvement -- new findings on packages no previous release
+// looked at -- and this fix ships in a patch, which fixes wrong verdicts
+// and never adds coverage. The diagnostic is what keeps the omission from
+// reading as a clean scan of the whole file.
+function selectProjectDocument(
+  path: string,
+  documents: Record<string, unknown>[]
+): { document: Record<string, unknown>; skipped: number } {
+  if (documents.length === 1) {
+    return { document: documents[0], skipped: 0 };
+  }
+  const candidates = documents.filter((document) => !isSelfManagementDocument(document));
+  const rooted = candidates.filter((document) => {
+    const importers = importersOf(document);
+    return importers !== undefined && Object.hasOwn(importers, '.');
+  });
+  if (rooted.length === 1) {
+    return { document: rooted[0], skipped: documents.length - 1 };
+  }
+  if (rooted.length > 1) {
+    throw new DepGuardError(
+      `${path}: this lockfile holds ${documents.length} YAML documents and ${rooted.length} of them ` +
+        'declare a "." root importer, so dep-guard cannot tell which one the project installs from',
+      'lockfile-parse'
+    );
+  }
+  const importerCount = (document: Record<string, unknown>): number =>
+    Object.keys(importersOf(document) ?? {}).length;
+  const withImporters = candidates.filter((document) => importerCount(document) > 0);
+  if (withImporters.length === 0) {
+    throw new DepGuardError(
+      `${path}: this lockfile holds ${documents.length} YAML documents and none of them declares ` +
+        'the importers that identify a project lockfile, so dep-guard cannot tell which one the ' +
+        'project installs from',
+      'lockfile-parse'
+    );
+  }
+  const most = Math.max(...withImporters.map(importerCount));
+  const largest = withImporters.filter((document) => importerCount(document) === most);
+  if (largest.length === 1) {
+    return { document: largest[0], skipped: documents.length - 1 };
+  }
+  throw new DepGuardError(
+    `${path}: this lockfile holds ${documents.length} YAML documents and ${largest.length} of them ` +
+      'declare the same number of importers, so dep-guard cannot tell which one the project ' +
+      'installs from',
+    'lockfile-parse'
+  );
 }
 
 // A packages-map key identifies a resolved package as name, version, and
@@ -122,10 +266,20 @@ function lockEntriesEqual(a: LockEntry, b: LockEntry): boolean {
 }
 
 export function parsePnpmLockfile(path: string, content: string): ParsedLockfile {
-  const parsed = parseYamlDocument(path, content);
-  if (!isPlainObject(parsed)) {
-    throw new DepGuardError(`${path}: lockfile is not a YAML mapping`, 'lockfile-parse');
+  const documents = parseYamlStream(path, content);
+  // Every document in the stream has to be a mapping, not only the one
+  // that gets selected: a stream carrying a scalar or a sequence document
+  // is a file this parser does not understand, and understanding half of
+  // it is how a partial read gets reported as a whole one.
+  for (const document of documents) {
+    if (!isPlainObject(document)) {
+      throw new DepGuardError(`${path}: lockfile is not a YAML mapping`, 'lockfile-parse');
+    }
   }
+  const { document: parsed, skipped } = selectProjectDocument(
+    path,
+    documents as Record<string, unknown>[]
+  );
 
   const diagnostics: Diagnostic[] = [
     // pnpm v9 removed the per-package hasInstallScript flag from the
@@ -139,6 +293,18 @@ export function parsePnpmLockfile(path: string, content: string): ParsedLockfile
       message: `${path}: pnpm lockfiles do not record install-script metadata; the install-script check is skipped for this lockfile`,
     },
   ];
+  if (skipped > 0) {
+    // Coverage the engine did not provide has to say so. The packages in
+    // the documents this parser passed over are really installed, and
+    // nothing else in the scan will mention them.
+    diagnostics.push({
+      code: 'pnpm-multi-document-lockfile',
+      message:
+        `${path}: this lockfile holds ${skipped + 1} YAML documents; the project lockfile document ` +
+        `was read and ${skipped} pnpm self-management document(s) were not scanned, so the pnpm ` +
+        'binaries they install are not covered by this scan',
+    });
+  }
   const entries = new Map<string, LockEntry[]>();
 
   const packages = parsed.packages;
