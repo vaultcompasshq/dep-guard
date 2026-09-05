@@ -30,24 +30,6 @@ gates:
   # and by the dogfood bench over real public repositories. What this gate
   # is here for is the other job: catching a bad dependency added to this
   # repository.
-  #
-  # TEMPORARY, and this is the only place the reason can live.
-  # .dep-guard.json carries one allow entry, for @vaultcompass/conductor.
-  # That package was published 2026-09-04, after the corpus bundled in
-  # dep-guard 0.2.1 was built, so the offline check cannot know it and
-  # reports it as an unknown package. JSON has no comments and dep-guard's
-  # allow list is an array of names with no field for a reason, so the
-  # reason is here.
-  #
-  # The alternative, "online": true for this gate, was rejected on
-  # dep-guard's own guidance: online resolution belongs in CI and scheduled
-  # audits and not in a hook, and neither this file nor .dep-guard.json can
-  # scope that option to one stage, so switching it on would put a network
-  # call in every developer's pre-commit hook.
-  #
-  # The real fix is a dep-guard release whose corpus post-dates that
-  # publish, which is a release decision rather than a config one. Remove
-  # the allow entry when one ships.
   dependencies:
     product: dep-guard
     enabled: true
