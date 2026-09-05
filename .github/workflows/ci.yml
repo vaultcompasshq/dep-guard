@@ -45,3 +45,57 @@ jobs:
 
     - name: Run tests
       run: pnpm test
+
+  # The guardrail gates, run through the conductor umbrella at the ci stage.
+  # A job of its own rather than steps inside ci: it needs
+  # security-events: write to upload a SARIF log, and the test job has no
+  # business carrying that permission. It is not a required check. It reports.
+  guardrails:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        # Required. The intent gate measures this branch against its merge
+        # base, and a shallow checkout has no merge base to diff against.
+        # That gate fails closed rather than checking an empty path set,
+        # because an empty path set is what a passing gate looks like.
+        fetch-depth: 0
+
+    - name: Setup pnpm
+      uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+    - name: Setup Node.js
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      with:
+        node-version: 22.x
+        cache: 'pnpm'
+
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+
+    - name: Run the guardrail gates
+      id: conductor
+      uses: vaultcompasshq/conductor@486de740dfbb1d63783061df715eb30b15bb3313 # v0.2.0
+      with:
+        output: conductor.sarif
+
+    - name: Upload the SARIF log
+      uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+      # Always: the log is most worth having on the run that failed.
+      if: always()
+      # The sarif path is published BEFORE the gates run, so on the exit 2
+      # cases that fail before anything is written (a policy error, an
+      # unknown stage, an unwritable output path) it names a file that was
+      # never created. Publishing early is the right trade for the common
+      # case, which is exit 1 with a real log; this step just has to tolerate
+      # the file being missing rather than failing the job a second time
+      # over it.
+      continue-on-error: true
+      with:
+        sarif_file: ${{ steps.conductor.outputs.sarif }}
