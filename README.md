@@ -20,7 +20,7 @@ report.
 <!-- /guardrails-family -->
 
 **Status: published.** [`@vaultcompass/dep-guard`](https://www.npmjs.com/package/@vaultcompass/dep-guard)
-is on npm, covered by 1162 tests, and works out of the box: the package
+is on npm, covered by 1176 tests, and works out of the box: the package
 name corpus ships inside
 [`@vaultcompass/dep-guard-core`](https://www.npmjs.com/package/@vaultcompass/dep-guard-core),
 so a scan needs no `--corpus-dir` and no setup. Building your own corpus
@@ -318,6 +318,15 @@ something newer than the last release's walk or to work on the corpus
 machinery itself. `packages/core/fixtures/corpus` holds a small
 development corpus useful for tests and useless for real work -- it knows
 fifty package names.
+
+The bundled corpus has a cadence, because it decays: every name published
+after its walk reads as unknown until the next one. The release workflow
+rebuilds it from a live registry walk on every release, and a release
+carrying a fresh corpus goes out at least once a month while development is
+active, on a minor version as the
+[stability policy](docs/release/stability-policy.md) describes. Every scan
+records the walk's date as `corpusBuiltAt` in its JSON output, so a scan
+against a corpus older than that promise is visible rather than silent.
 
 `scripts/build-corpus.mjs` walks the public registry replica for the names
 and reads the popularity list from `scripts/data/top-packages.txt`, which is
