@@ -1,0 +1,79 @@
+# Guardrail policy. One file for every gate this repository runs.
+#
+# Gates are keyed by the ROLE they fill, and the product filling that role
+# is one line inside it. Swapping or renaming a product is a one-line edit
+# rather than a rename of the key your CI reads.
+#
+# There is deliberately no shared severity threshold. Each gate keeps its
+# own, spelled the way that gate spells it, inside its own options block.
+#
+# stage says when a gate runs: commit, push, or ci. Stages are cumulative,
+# so a gate runs at its own stage and at every later one, and a run at ci
+# runs everything enabled. The values below are the defaults.
+#
+# enforce defaults to true. Add enforce: false to a gate to make it run
+# and report without ever changing the exit code, which is how a gate is
+# adopted before anybody is ready to have it refuse a commit.
+version: 1
+
+gates:
+  # what comes in: hallucinated names, typosquats, tampered lockfile entries
+  #
+  # This repository is dep-guard itself, and the gate below runs the
+  # PUBLISHED dep-guard out of node_modules rather than the build in the
+  # working tree. That is deliberate. The corpus the scanner reads is
+  # gitignored and built once per release, so a checkout never has one and
+  # a workspace build exits 2 with "corpus-missing" on every commit and
+  # every CI run. The published tarball bundles a corpus, so it runs.
+  #
+  # Nothing is lost by that. The working tree is covered by the test suite
+  # and by the dogfood bench over real public repositories. What this gate
+  # is here for is the other job: catching a bad dependency added to this
+  # repository.
+  #
+  # TEMPORARY, and this is the only place the reason can live.
+  # .dep-guard.json carries one allow entry, for @vaultcompass/conductor.
+  # That package was published 2026-09-04, after the corpus bundled in
+  # dep-guard 0.2.1 was built, so the offline check cannot know it and
+  # reports it as an unknown package. JSON has no comments and dep-guard's
+  # allow list is an array of names with no field for a reason, so the
+  # reason is here.
+  #
+  # The alternative, "online": true for this gate, was rejected on
+  # dep-guard's own guidance: online resolution belongs in CI and scheduled
+  # audits and not in a hook, and neither this file nor .dep-guard.json can
+  # scope that option to one stage, so switching it on would put a network
+  # call in every developer's pre-commit hook.
+  #
+  # The real fix is a dep-guard release whose corpus post-dates that
+  # publish, which is a release decision rather than a config one. Remove
+  # the allow entry when one ships.
+  dependencies:
+    product: dep-guard
+    enabled: true
+    stage: commit
+    # Handed to this gate unchanged. Keys are its own long flags,
+    # without the leading dashes. Example: fail-on: high
+    options: {}
+  # what goes out: credentials about to be committed
+  secrets:
+    product: vault-guard
+    enabled: true
+    stage: commit
+    # Handed to this gate unchanged. Keys are its own long flags,
+    # without the leading dashes. Example: fail-on: high
+    options: {}
+  # what was approved: drift from a frozen intent contract, and change budgets
+  intent:
+    product: intent-guard
+    enabled: true
+    stage: ci
+    # Adoption ramp: intent runs and reports in CI but never fails the run.
+    # Flip to true once a few pull requests show the signal is worth blocking on.
+    enforce: false
+    # Handed to this gate unchanged. Keys are its own long flags,
+    # without the leading dashes. Example: fail-on: high
+    options: {}
+
+report:
+  format: text

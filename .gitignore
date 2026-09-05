@@ -30,6 +30,8 @@ bench/repos.local.json
 bench/baseline.local.json
 bench/results.local.json
 
-# The umbrella's local policy file and hook manifest, written on this machine while that tool is unpublished.
-.guardrails.yaml
+# The umbrella's hook manifest. It records absolute paths on the machine that
+# ran init, so it belongs to that machine rather than to a commit. The policy
+# file beside it, .guardrails.yaml, is tracked: it is the configuration CI
+# reads, and a gate policy nobody can review is not a policy.
 .guardrails/
