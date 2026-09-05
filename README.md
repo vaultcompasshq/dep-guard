@@ -209,7 +209,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v5
-  - uses: vaultcompasshq/dep-guard@v0.2.1
+  - uses: vaultcompasshq/dep-guard@v0.2.2
     with:
       path: .
       online: 'true'

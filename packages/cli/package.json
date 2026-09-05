@@ -1,6 +1,6 @@
 {
   "name": "@vaultcompass/dep-guard",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "description": "Command-line gate that blocks risky dependency changes -- typosquats, tampered lockfile entries, newly acquired install scripts, and hallucinated package names -- before install, before commit, before CI.",
   "license": "MIT",
