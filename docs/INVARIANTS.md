@@ -658,19 +658,38 @@ a bare `---`, alongside the project's real lockfile. The parser used
 throw arrived as `lockfile-parse` -- so every scan of a pnpm 12
 repository was a could-not-run exit 2 that the umbrella turned into a
 block on every commit, with no way around it. It reads the stream with
-`parseAllDocuments` now.
+`yaml`'s streaming `Parser`/`Composer` now, capped.
 
-Two things about that library call are load-bearing and neither is
-obvious. `parseAllDocuments` does not throw for a malformed document the
-way `parse()` does: it collects the failures on each `Document`'s own
-`errors` array and returns the stream regardless, so an unread `errors`
-array would let a document that failed to compose arrive as an ordinary
-empty mapping and satisfy every lockfile-backed check against a tree
-nothing read. Every document's errors are checked, and any of them is the
-same `lockfile-parse` throw a single-document failure has always been. And
-every document in the stream must be a mapping, not merely the one that
-gets selected, for the same reason: understanding half a file is how a
-partial read gets reported as a whole one.
+The cap is a security property, not tidiness. A real pnpm 12 lockfile has
+exactly two documents; anyone who can write the lockfile can instead make
+it a stream of arbitrarily many, and a file of nothing but bare `---`
+separators up to the 64 MB ceiling the git-diff path already imposes
+composes one `Document` per separator and then materialises each with
+`toJS()`, turning tens of megabytes into millions of Documents and array
+entries before one is validated. So the stream is composed lazily and
+fails closed the instant a document past the fourth appears -- four is
+generous for a two-document format -- and nothing beyond the cap is ever
+composed, nor anything materialised with `toJS()` until the whole stream is
+known to be within the cap. `parseAllDocuments` is eager (it builds the
+whole array before returning), which is why the streaming API is used
+instead. The over-cap refusal is the same `lockfile-parse` throw every
+other unreadable lockfile is, and its message names the cap. The
+alias-bomb variant -- one document whose anchors expand combinatorially
+under `toJS()` -- is bounded separately by `yaml`'s `maxAliasCount`, which
+defaults to 100 (confirmed in yaml 2.9.0) and throws once expansion
+exceeds it; `toJS()` is called with no options, so that default applies.
+
+Two more things about the streaming read are load-bearing and neither is
+obvious. The composer, like `parseAllDocuments`, does not throw for a
+malformed document the way `parse()` does: it collects the failures on each
+`Document`'s own `errors` array and hands the document back regardless, so
+an unread `errors` array would let a document that failed to compose arrive
+as an ordinary empty mapping and satisfy every lockfile-backed check
+against a tree nothing read. Every document's errors are checked, and any
+of them is the same `lockfile-parse` throw a single-document failure has
+always been. And every document in the stream must be a mapping, not merely
+the one that gets selected, for the same reason: understanding half a file
+is how a partial read gets reported as a whole one.
 
 The selection rule, in this order, because the order is the whole trick:
 
@@ -760,6 +779,56 @@ the checks for every string literal assigned to a diagnostic's `code`)
 whenever a code is added, rather than trusted as current because it is
 checked in.
 
+## A suppressed decision is reported, allow among them, and every count prints even at zero
+
+The three ways a user tells the gate to stand a finding down are the
+baseline, `ignorePaths`, and an `allow` entry, and each is the user's own
+earlier decision rather than the engine's silence. A report that omitted
+them would be byte-identical to a scan that found nothing, which is the
+exact footgun the separate `suppressed` and `ignored` counts already
+close: `suppressed` is the baseline's specifically, `ignored` is
+`ignorePaths`'s specifically, and collapsing either into the other re-hides
+what it hid. `allowed` is the third of that family and obeys the same rule.
+All three are printed even at zero -- in the text summary line, in the JSON
+result object, and (a SARIF result being only ever an emitted finding, so a
+cleared name has no result to attach to) on the SARIF run's `properties` --
+because a decision that only shows up when it happens to be non-zero is a
+decision a reader cannot audit for.
+
+`allowed` counts distinct package NAMES an `allow` entry cleared this scan,
+not the number of rules that would have fired for them: an allowed package
+that trips several checks is one decision the user made, and `allowedNames`
+carries those names so the count is attributable rather than a bare number.
+The count is a new report field rather than folded into `suppressed`
+on purpose -- the stability policy freezes an existing JSON field's
+meaning, so widening `suppressed` to also mean "or allow" would be a
+breaking change, while a new additive field is the minor-safe path and
+keeps the three decisions three distinct numbers.
+
+The recording is done by `allowClears` in `checks/allow.ts`, which every
+check calls in place of the bare `isAllowed` predicate -- and it is called
+at the FINDING point, past the condition that decides a finding, not at the
+top of the loop over changes. That placement is the whole of what keeps the
+count honest: it records a clearance only where a finding would otherwise
+have been reported, never merely because an allow-listed name appeared as a
+change. `hygiene` and `install-script` gate after their own would-be-finding
+tests; `existence` records only past the corpus and internal-name gates,
+and `typosquat` only past `matchName`, because a name that is corpus-known
+or bears no resemblance was never going to be a finding, so allow-listing it
+cleared nothing. The two candidate-fed checks record at their own emission
+points rather than in the shared `newRegistryNames` builder for exactly this
+reason: the builder has not yet judged the name, so dropping (and recording)
+an allowed name there would count a clean, corpus-known, correctly-pinned
+dependency as a clearance that never happened. `confusion` runs both its
+rules first and records once if either would have fired. This also cannot
+broaden which rules `allow` covers -- it changes nothing about the dropping,
+`lockfile-tamper` is still not subject to `allow` for the reason
+`checks/allow.ts` states, and a rule that does not consult `allow` still
+records nothing. A future check that silences a package by `allow` records
+it for free by using `allowClears` at its finding point; one that calls it
+before the finding condition, or reaches for `isAllowed` directly there, is
+the over-count this placement exists to prevent.
+
 ## Failing closed, and the error codes that do it
 
 Anything the engine cannot parse or trust stops the scan with a
@@ -784,8 +853,10 @@ The codes, and what each one means:
 - `manifest-parse` -- a manifest is present and unparseable.
 - `lockfile-parse` -- a lockfile is present and unparseable, including a
   lockfile that declares a format version whose required structure is
-  missing, and a multi-document pnpm lockfile whose documents leave the
-  selection rule below no single project document to read. This case is a
+  missing, a multi-document pnpm lockfile whose documents leave the
+  selection rule below no single project document to read, and a pnpm
+  lockfile stream holding more documents than the parser will read before
+  it fails closed (four; a real file has two). This case is a
   throw and not a diagnostic on purpose: falling
   back would leave the entries map empty and every lockfile-backed check
   silently satisfied.

@@ -34,6 +34,14 @@ export interface CheckContext {
   delta: DependencyDelta;
   npmrcRegistryPins: Map<string, string>;
   diagnostics: Diagnostic[];
+  // A second write-only sink, alongside `diagnostics`. A check that drops a
+  // would-be finding because an `allow` entry covers the package pushes the
+  // package name here (via allowClears in allow.ts), so an allow entry --
+  // the user's earlier decision, exactly like a baseline or ignorePaths
+  // entry -- leaves a trace in the report instead of the finding simply
+  // being absent. scan() de-duplicates these into a count of distinct names
+  // cleared, printed even at zero like suppressed and ignored.
+  allowed: string[];
 }
 
 // Fingerprints are computed centrally so that every rule hashes the same

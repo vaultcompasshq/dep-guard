@@ -1,6 +1,5 @@
 import type { DepChange } from '../delta.js';
 import type { Protocol } from '../manifest.js';
-import { isAllowed } from './allow.js';
 import type { CheckContext } from './types.js';
 
 // The dependencies the two name-based checks (existence, typosquat) judge,
@@ -85,9 +84,15 @@ export function newRegistryNames(ctx: CheckContext): NewName[] {
       continue;
     }
 
-    if (isAllowed(registryName, ctx.config.allow)) {
-      continue;
-    }
+    // An allow entry is NOT applied here. This builder feeds existence and
+    // typosquat, and neither has judged the name yet; dropping an allowed
+    // name at the candidate stage would silence it before either check
+    // decided whether it was a finding at all, so an allowed but perfectly
+    // clean name (corpus-known, no resemblance) would be recorded as a
+    // clearance that never happened. Each consuming check applies allow at
+    // its own finding point instead (existence.ts, typosquat.ts), the same
+    // place hygiene and install-script already do, so a name is recorded as
+    // cleared only where a finding would otherwise have been reported.
 
     // The same package added to both dependencies and devDependencies of
     // one manifest is one decision to review, not two. Keyed by

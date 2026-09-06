@@ -1,7 +1,7 @@
 import type { DepChange } from '../delta.js';
 import type { Finding } from '../types.js';
 import { agreementAcrossCandidates } from './agreement.js';
-import { isAllowed } from './allow.js';
+import { allowClears } from './allow.js';
 import type { Check, CheckContext } from './types.js';
 
 // Install-script escalation: a dependency that now runs an npm lifecycle
@@ -166,7 +166,7 @@ function passThroughDiagnostic(ctx: CheckContext): void {
 }
 
 export const installScriptCheck: Check = (ctx) => {
-  const { delta, config } = ctx;
+  const { delta } = ctx;
   const findings: Omit<Finding, 'fingerprint'>[] = [];
 
   if (delta.lockfileFormat === 'npm') {
@@ -190,7 +190,7 @@ export const installScriptCheck: Check = (ctx) => {
     };
 
     for (const change of delta.changes) {
-      if (!acquiredInstallScript(change) || isAllowed(change.registryName, config.allow)) {
+      if (!acquiredInstallScript(change) || allowClears(ctx, change.registryName)) {
         continue;
       }
       // 'added' and 'flag-acquired' are genuinely different signals
@@ -261,7 +261,7 @@ export const installScriptCheck: Check = (ctx) => {
           continue;
         }
       }
-      if (isAllowed(entryChange.packageName, config.allow)) {
+      if (allowClears(ctx, entryChange.packageName)) {
         continue;
       }
       const shape = presenceReport(
@@ -286,7 +286,7 @@ export const installScriptCheck: Check = (ctx) => {
 
   if (delta.lockfileFormat === 'pnpm') {
     for (const name of delta.onlyBuiltAdded) {
-      if (isAllowed(name, config.allow)) {
+      if (allowClears(ctx, name)) {
         continue;
       }
       // Same rule as the npm branch, in the sibling code path: with no

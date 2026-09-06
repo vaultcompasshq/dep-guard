@@ -60,6 +60,7 @@ function makeContext(
     },
     npmrcRegistryPins: new Map<string, string>(),
     diagnostics: [] as Diagnostic[],
+    allowed: [] as string[],
   };
 }
 

@@ -243,6 +243,113 @@ describe('scan', () => {
     });
   });
 
+  // An allow entry is a user's earlier decision exactly like a baseline
+  // entry or an ignorePaths entry, but before this counter it left no trace
+  // at all: the finding was simply absent and the header still read
+  // "suppressed 0, ignored 0". A cleared name is now counted and named, so
+  // the decision is visible rather than silent.
+  describe('allowed count', () => {
+    test('an allow entry that clears a finding is counted in "allowed" and names the cleared package, separately from suppressed and ignored', async () => {
+      await write('.dep-guard.json', JSON.stringify({ allow: ['reeact-definitely-not-real'] }));
+      await write('package.json', manifestJson({}));
+      await commitAll('first');
+      await write('package.json', manifestJson({ 'reeact-definitely-not-real': '1.0.0' }));
+      await git('add', '-A');
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result.allowed).toBe(1);
+      expect(result.allowedNames).toEqual(['reeact-definitely-not-real']);
+      expect(result.suppressed).toBe(0); // cleared by the allow list, not the baseline
+      expect(result.ignored).toBe(0); // and not by ignorePaths
+      expect(result.run.blockingMatches).toBe(0);
+      expect(result.exitCode).toBe(0);
+    });
+
+    test('an empty allow list prints the counter at zero while the finding fires', async () => {
+      await write('package.json', manifestJson({}));
+      await commitAll('first');
+      await write('package.json', manifestJson({ 'reeact-definitely-not-real': '1.0.0' }));
+      await git('add', '-A');
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(1);
+      expect(result.allowed).toBe(0);
+      expect(result.allowedNames).toEqual([]);
+    });
+
+    // allowed counts distinct package NAMES the allow list cleared, not the
+    // number of rules that would have fired for them: an allowed name that
+    // trips several checks is one decision the user made, not several.
+    test('a name cleared from more than one check is counted once', async () => {
+      await write('.dep-guard.json', JSON.stringify({ allow: ['@acme/internal-thing'] }));
+      await write(
+        'package.json',
+        JSON.stringify({ name: 'root', dependencies: {} })
+      );
+      await write(
+        '.dep-guard.json',
+        JSON.stringify({ allow: ['@acme/internal-thing'], internalScopes: ['@acme'] })
+      );
+      await commitAll('first');
+      await write(
+        'package.json',
+        JSON.stringify({ name: 'root', dependencies: { '@acme/internal-thing': '1.0.0' } })
+      );
+      await git('add', '-A');
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.allowed).toBe(1);
+      expect(result.allowedNames).toEqual(['@acme/internal-thing']);
+    });
+
+    // The counter records a clearance only where an allow entry actually
+    // suppressed a finding that would otherwise have been reported -- never
+    // merely because an allow-listed name appeared as a change. A clean,
+    // corpus-known, correctly-pinned dependency produces no finding from any
+    // check, so allow-listing it clears nothing and must count zero, even
+    // though the name still flows through the candidate, confusion, and
+    // hygiene loops.
+    test('an allow entry for a clean corpus-known correctly-pinned dependency records nothing', async () => {
+      await write('.dep-guard.json', JSON.stringify({ allow: ['react'] }));
+      await write('package.json', manifestJson({}));
+      await commitAll('first');
+      await write('package.json', manifestJson({ react: '^18.2.0' }));
+      await git('add', '-A');
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result.allowed).toBe(0);
+      expect(result.allowedNames).toEqual([]);
+    });
+
+    // The counterpart: an allow-listed name the dependency-confusion check
+    // WOULD have flagged (an internal-scope name resolving as a public
+    // registry install) is a real clearance and is recorded -- and recorded
+    // at the confusion finding point, not the top of the loop, which is what
+    // the clean-dependency test above pins down.
+    test('an allow entry that clears a confusion internal-name finding is recorded', async () => {
+      await write(
+        '.dep-guard.json',
+        JSON.stringify({ allow: ['@acme/widget'], internalScopes: ['@acme'] })
+      );
+      await write('package.json', manifestJson({}));
+      await commitAll('first');
+      await write('package.json', manifestJson({ '@acme/widget': '^1.0.0' }));
+      await git('add', '-A');
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result.allowed).toBe(1);
+      expect(result.allowedNames).toEqual(['@acme/widget']);
+    });
+  });
+
   // The matcher's whole-path, segment-for-segment semantics are kept
   // (that precision is the point -- see git-source.ts), but a config
   // entry that never matched anything is exactly the kind of silent

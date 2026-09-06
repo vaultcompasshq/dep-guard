@@ -1,4 +1,4 @@
-import { parse as parseYaml, parseAllDocuments } from 'yaml';
+import { parse as parseYaml, Composer, Parser, type Document } from 'yaml';
 import { DepGuardError, type Diagnostic } from '../types.js';
 import type { LockEntry, ParsedLockfile } from './types.js';
 import type { ParsedManifest } from '../manifest.js';
@@ -42,18 +42,62 @@ function parseYamlDocument(path: string, content: string): unknown {
 // lockfile-parse and made every scan of such a repository a
 // could-not-run exit 2 with no way around it.
 //
-// parseAllDocuments does not throw for a malformed document the way
-// parse() does: it collects the failures on each Document's own `errors`
-// array and hands the stream back regardless. So the errors have to be
-// read and rethrown, or a document that failed to compose would arrive
-// here as an empty mapping and every lockfile-backed check would be
-// silently satisfied against a tree that was never read -- the exact
-// fail-open this parser's throw exists to prevent.
+// The stream is composed lazily and capped. A real pnpm 12 lockfile has
+// exactly two documents (the project lockfile and pnpm's self-management
+// block); anyone who can write the lockfile can instead make it a stream of
+// arbitrarily many documents -- a file of nothing but bare "---" separators,
+// up to the 64 MB ceiling the git-diff path already imposes, composes one
+// Document per separator and then materialises each with toJS(), turning a
+// few tens of megabytes into millions of Documents and array entries before
+// a single one is validated. So the stream is read with the streaming
+// Parser/Composer rather than parseAllDocuments (which is eager: it builds
+// the whole array before returning) and fails closed the instant a document
+// past MAX_LOCKFILE_DOCUMENTS appears -- nothing beyond the cap is ever
+// composed, and nothing is materialised with toJS() until the whole stream
+// is known to be within the cap. Four is generous for a format whose real
+// files carry two.
+//
+// The alias-bomb variant -- a single document whose anchors expand
+// combinatorially when materialised -- is bounded separately by the yaml
+// library's maxAliasCount, which defaults to 100 in yaml 2.9 (confirmed in
+// yaml 2.9.0: nodes/Node.js#toJS uses 100 when none is passed, and
+// nodes/Alias.js throws once count * aliasCount exceeds it). toJS() below is
+// called with no options, so that default applies and the cap on document
+// count above does not need to also reason about intra-document expansion.
+//
+// Composing lazily also preserves the fail-closed reading of per-document
+// errors: the composer, like parseAllDocuments, does not throw for a
+// malformed document -- it hands the document back with the failures on its
+// own `errors` array -- so a document that failed to compose would otherwise
+// arrive here as an empty mapping and satisfy every lockfile-backed check
+// against a tree that was never read. Every document's errors are read and
+// rethrown.
+const MAX_LOCKFILE_DOCUMENTS = 4;
+
 function parseYamlStream(path: string, content: string): unknown[] {
-  let documents;
+  const documents: Document[] = [];
   try {
-    documents = parseAllDocuments(content);
-  } catch {
+    const composer = new Composer();
+    const parser = new Parser();
+    for (const document of composer.compose(parser.parse(content))) {
+      documents.push(document);
+      if (documents.length > MAX_LOCKFILE_DOCUMENTS) {
+        throw new DepGuardError(
+          `${path}: this lockfile holds more than ${MAX_LOCKFILE_DOCUMENTS} YAML documents, which ` +
+            'dep-guard refuses to read; a pnpm lockfile has at most a project document and a ' +
+            'self-management document',
+          'lockfile-parse'
+        );
+      }
+    }
+  } catch (err) {
+    // The cap throw is a deliberate DepGuardError and is re-raised as-is;
+    // anything else out of the streaming parser is a malformed stream and
+    // becomes the same "not valid YAML" lockfile-parse a single-document
+    // failure has always been.
+    if (err instanceof DepGuardError) {
+      throw err;
+    }
     throw new DepGuardError(`${path}: not valid YAML`, 'lockfile-parse');
   }
   const values: unknown[] = [];

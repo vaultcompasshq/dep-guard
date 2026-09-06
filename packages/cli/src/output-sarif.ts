@@ -196,6 +196,21 @@ export function renderSarif(result: ScanResult, version: string): string {
     runs: [
       {
         tool: { driver: { name: 'dep-guard', version, informationUri: 'https://github.com/vaultcompasshq/dep-guard', rules } },
+        // The three suppression counts a text or JSON report already shows,
+        // carried on the run so a SARIF consumer sees the same picture: how
+        // many findings the baseline and ignorePaths removed, and how many
+        // package names an allow entry cleared (with those names, so the
+        // count is attributable). Present even at zero, like the other two
+        // formats, because an allow entry is the user's earlier decision and
+        // a run that silently omits it reads identical to one with none. A
+        // SARIF result is only ever an emitted finding, so these decisions
+        // have nowhere else to live in this document.
+        properties: {
+          suppressed: result.suppressed,
+          ignored: result.ignored,
+          allowed: result.allowed,
+          allowedNames: result.allowedNames,
+        },
         results: result.findings.map((finding) =>
           toResult(finding, result.run.failOn, syntheticAnchor)
         ),

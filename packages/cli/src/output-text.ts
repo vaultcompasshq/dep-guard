@@ -81,15 +81,32 @@ export function renderText(result: ScanResult): string {
     }
   }
 
-  // ignored and suppressed are two different facts -- one dropped by
-  // ignorePaths, one absorbed by the baseline -- and are printed as two
-  // separate numbers here for the same reason ScanResult carries them as
-  // two separate fields: collapsing them back into one count would re-hide
-  // the exact footgun the core fixed.
+  // suppressed, ignored and allowed are three different facts -- dropped by
+  // the baseline, by ignorePaths, and by an allow entry -- and are printed
+  // as three separate numbers here for the same reason ScanResult carries
+  // them as three separate fields: collapsing any of them into another
+  // count would re-hide the exact footgun the core fixed. allowed is
+  // printed even at zero like the other two, because an allow entry is the
+  // user's earlier decision and a scan that silently omits it reads
+  // identical to one with no allow entries at all.
+  //
+  // Which names the allow list cleared is spelled out on its own line when
+  // there are any, so the count is attributable rather than a bare number;
+  // the names come from repository-controlled config, so each is sanitized
+  // the same way a finding's package name is.
+  if (result.allowedNames.length > 0) {
+    lines.push('');
+    lines.push(
+      `Cleared by the allow list (${result.allowed}): ` +
+        result.allowedNames.map(sanitizeText).join(', ')
+    );
+  }
+
   lines.push('');
   lines.push(
     `dep-guard ${result.run.mode}: ${result.findings.length} finding(s), ` +
       `${result.suppressed} suppressed, ${result.ignored} ignored, ` +
+      `${result.allowed} allowed, ` +
       `fail-on=${result.run.failOn}, blocking=${result.run.blockingMatches}, ` +
       `exit=${result.exitCode}`
   );

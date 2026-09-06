@@ -363,6 +363,59 @@ describe('dep-guard scan --format text', () => {
     expect(run.stdout).toContain('1 ignored');
   }, CLI_TIMEOUT_MS);
 
+  test('an allow entry that clears a finding is reported as an "allowed" count and names the cleared package', async () => {
+    await write('.dep-guard.json', JSON.stringify({ allow: ['reeact-definitely-not-real'] }));
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    await write('package.json', manifestJson({ 'reeact-definitely-not-real': '1.0.0' }));
+    await git('add', '-A');
+
+    const run = await runCli(
+      ['scan', '--staged', '--format', 'text', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    // The finding is cleared, so the scan is clean, but the allow decision
+    // is not silent: the count reads 1 and the cleared name is spelled out.
+    expect(run.exitCode).toBe(0);
+    expect(run.stdout).toContain('1 allowed');
+    expect(run.stdout).toContain('Cleared by the allow list (1): reeact-definitely-not-real');
+    expect(run.stdout).toContain('0 suppressed');
+    expect(run.stdout).toContain('0 ignored');
+  }, CLI_TIMEOUT_MS);
+
+  test('a scan with no allow entry prints the allowed counter at zero', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    await write('package.json', manifestJson({ 'reeact-definitely-not-real': '1.0.0' }));
+    await git('add', '-A');
+
+    const run = await runCli(
+      ['scan', '--staged', '--format', 'text', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    expect(run.stdout).toContain('0 allowed');
+    expect(run.stdout).not.toContain('Cleared by the allow list');
+  }, CLI_TIMEOUT_MS);
+
+  test('an allow entry that clears a finding is reported in the JSON output, printed at zero when empty', async () => {
+    await write('.dep-guard.json', JSON.stringify({ allow: ['reeact-definitely-not-real'] }));
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    await write('package.json', manifestJson({ 'reeact-definitely-not-real': '1.0.0' }));
+    await git('add', '-A');
+
+    const run = await runCli(
+      ['scan', '--staged', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    const result = JSON.parse(run.stdout.trim()) as ScanResult;
+    expect(result.allowed).toBe(1);
+    expect(result.allowedNames).toEqual(['reeact-definitely-not-real']);
+  }, CLI_TIMEOUT_MS);
+
   test('a hostile diagnostic string is sanitized before it reaches the terminal', async () => {
     const escape = String.fromCharCode(27);
     const hostile = `vendor/${escape}[31mFAKE${escape}[0m\ninjected-line`;

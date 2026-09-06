@@ -92,6 +92,7 @@ function makeContext(changes: DepChange[]): CheckContext {
     },
     npmrcRegistryPins: new Map(),
     diagnostics: [] as Diagnostic[],
+    allowed: [] as string[],
   };
 }
 
