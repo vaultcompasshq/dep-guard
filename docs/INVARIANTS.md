@@ -658,19 +658,38 @@ a bare `---`, alongside the project's real lockfile. The parser used
 throw arrived as `lockfile-parse` -- so every scan of a pnpm 12
 repository was a could-not-run exit 2 that the umbrella turned into a
 block on every commit, with no way around it. It reads the stream with
-`parseAllDocuments` now.
+`yaml`'s streaming `Parser`/`Composer` now, capped.
 
-Two things about that library call are load-bearing and neither is
-obvious. `parseAllDocuments` does not throw for a malformed document the
-way `parse()` does: it collects the failures on each `Document`'s own
-`errors` array and returns the stream regardless, so an unread `errors`
-array would let a document that failed to compose arrive as an ordinary
-empty mapping and satisfy every lockfile-backed check against a tree
-nothing read. Every document's errors are checked, and any of them is the
-same `lockfile-parse` throw a single-document failure has always been. And
-every document in the stream must be a mapping, not merely the one that
-gets selected, for the same reason: understanding half a file is how a
-partial read gets reported as a whole one.
+The cap is a security property, not tidiness. A real pnpm 12 lockfile has
+exactly two documents; anyone who can write the lockfile can instead make
+it a stream of arbitrarily many, and a file of nothing but bare `---`
+separators up to the 64 MB ceiling the git-diff path already imposes
+composes one `Document` per separator and then materialises each with
+`toJS()`, turning tens of megabytes into millions of Documents and array
+entries before one is validated. So the stream is composed lazily and
+fails closed the instant a document past the fourth appears -- four is
+generous for a two-document format -- and nothing beyond the cap is ever
+composed, nor anything materialised with `toJS()` until the whole stream is
+known to be within the cap. `parseAllDocuments` is eager (it builds the
+whole array before returning), which is why the streaming API is used
+instead. The over-cap refusal is the same `lockfile-parse` throw every
+other unreadable lockfile is, and its message names the cap. The
+alias-bomb variant -- one document whose anchors expand combinatorially
+under `toJS()` -- is bounded separately by `yaml`'s `maxAliasCount`, which
+defaults to 100 (confirmed in yaml 2.9.0) and throws once expansion
+exceeds it; `toJS()` is called with no options, so that default applies.
+
+Two more things about the streaming read are load-bearing and neither is
+obvious. The composer, like `parseAllDocuments`, does not throw for a
+malformed document the way `parse()` does: it collects the failures on each
+`Document`'s own `errors` array and hands the document back regardless, so
+an unread `errors` array would let a document that failed to compose arrive
+as an ordinary empty mapping and satisfy every lockfile-backed check
+against a tree nothing read. Every document's errors are checked, and any
+of them is the same `lockfile-parse` throw a single-document failure has
+always been. And every document in the stream must be a mapping, not merely
+the one that gets selected, for the same reason: understanding half a file
+is how a partial read gets reported as a whole one.
 
 The selection rule, in this order, because the order is the whole trick:
 
@@ -784,8 +803,10 @@ The codes, and what each one means:
 - `manifest-parse` -- a manifest is present and unparseable.
 - `lockfile-parse` -- a lockfile is present and unparseable, including a
   lockfile that declares a format version whose required structure is
-  missing, and a multi-document pnpm lockfile whose documents leave the
-  selection rule below no single project document to read. This case is a
+  missing, a multi-document pnpm lockfile whose documents leave the
+  selection rule below no single project document to read, and a pnpm
+  lockfile stream holding more documents than the parser will read before
+  it fails closed (four; a real file has two). This case is a
   throw and not a diagnostic on purpose: falling
   back would leave the entries map empty and every lockfile-backed check
   silently satisfied.

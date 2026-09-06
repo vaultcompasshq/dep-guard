@@ -27,6 +27,23 @@ const MULTIDOC_REVERSED_FIXTURE_CONTENT = readFileSync(
   'utf8'
 );
 
+// A stream of more documents than the parser will read before it fails
+// closed (five: one project document plus four self-management documents),
+// and a stream at exactly the cap (four: one project plus three
+// self-management). WITHOUT the cap both select cleanly -- the
+// self-management documents are discarded and the single "." project
+// document is chosen -- so the over-cap fixture's only reason to throw is
+// the cap itself, which is what makes the cap observable at a small
+// document count instead of by building millions.
+const OVERCAP_FIXTURE_CONTENT = readFileSync(
+  fileURLToPath(new URL('./fixtures/pnpm-lock-v9-overcap.yaml', import.meta.url)),
+  'utf8'
+);
+const ATCAP_FIXTURE_CONTENT = readFileSync(
+  fileURLToPath(new URL('./fixtures/pnpm-lock-v9-atcap.yaml', import.meta.url)),
+  'utf8'
+);
+
 function expectLockfileParse(fn: () => void): void {
   try {
     fn();
@@ -494,6 +511,43 @@ const SELF_MANAGEMENT_DOC = [
   '    resolution: {integrity: sha512-selfmanagement}',
   '',
 ].join('\n');
+
+// A pnpm-lock.yaml is a YAML STREAM, and an attacker who can write the
+// lockfile can make it a stream of unboundedly many documents -- a file of
+// nothing but "---" separators up to the 64 MB git-output ceiling composes
+// one document per separator and then materialises each with toJS(), which
+// is a denial-of-service surface. The parser caps the stream at four
+// documents (a real pnpm 12 file carries two) and fails closed the moment a
+// document past the cap appears, before composing or materialising anything
+// beyond it.
+describe('parsePnpmLockfile: multi-document cap (fail closed on an oversized stream)', () => {
+  test('a stream past the cap fails closed with a lockfile-parse whose message names the cap', () => {
+    // Removing the cap makes this fixture select cleanly (four
+    // self-management documents discarded, one "." project document read),
+    // so the throw asserted here can only come from the cap. That is the
+    // mutation signal: drop the cap and this call returns a result instead
+    // of throwing, and the test goes red.
+    let thrown: unknown;
+    try {
+      parsePnpmLockfile(PATH, OVERCAP_FIXTURE_CONTENT);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(DepGuardError);
+    expect((thrown as DepGuardError).code).toBe('lockfile-parse');
+    expect((thrown as DepGuardError).message).toContain('more than 4 YAML documents');
+  });
+
+  test('a stream at exactly the cap still parses', () => {
+    const result = parsePnpmLockfile(PATH, ATCAP_FIXTURE_CONTENT);
+    expect([...result.entries.keys()]).toEqual(['lodash']);
+    expect(result.entries.has('pnpm')).toBe(false);
+  });
+
+  test('a normal two-document lockfile is well within the cap and still parses', () => {
+    expect(() => parsePnpmLockfile(PATH, MULTIDOC_FIXTURE_CONTENT)).not.toThrow();
+  });
+});
 
 describe('parsePnpmLockfile: multi-document lockfiles (pnpm 12 self-management)', () => {
   test('a two-document lockfile parses instead of throwing lockfile-parse', () => {
