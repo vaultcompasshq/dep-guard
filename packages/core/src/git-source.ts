@@ -84,6 +84,18 @@ const ABSENT_BLOB_MESSAGES = [
 // anything of that shape is refused before it reaches git.
 const SAFE_REF = /^[^-\s:\u0000-\u001f][^\s:\u0000-\u001f]*$/;
 
+/**
+ * True when `ref` is safe to hand to git as an argument.
+ *
+ * Exported so trust-base.ts screens --trust-base against the SAME rule
+ * --base is screened against, rather than keeping a second copy of the
+ * pattern. Two independently maintained copies of an argument-injection
+ * guard is how one entry point ends up hardened and the other not.
+ */
+export function isUsableRef(ref: string): boolean {
+  return SAFE_REF.test(ref);
+}
+
 // Errors that mean "this path is not a readable file here", as opposed to
 // a permission or I/O failure that has to stay loud.
 const MISSING_PATH_CODES = new Set(['ENOENT', 'ENOTDIR', 'EISDIR']);
@@ -744,7 +756,14 @@ async function loadLockfile(source: FileSource): Promise<ParsedLockfile | null> 
 
 const ROOT_MANIFEST = 'package.json';
 const WORKSPACE_YAML = 'pnpm-workspace.yaml';
-const NPMRC = '.npmrc';
+// Exported so trust-base.ts reads the same path out of the base ref that
+// loadState reads from the scanned side. .npmrc is a CONTROL INPUT, not a
+// subject: its scope pins are what decides whether the
+// dependency-confusion pin-mismatch rule fires at all, so on a
+// pull-request run it has to come from the base like the config and the
+// baseline do. See docs/INVARIANTS.md, "A control input is not read from
+// the tree being judged".
+export const NPMRC = '.npmrc';
 
 async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise<RepoState> {
   const rootManifestContent = await source.read(ROOT_MANIFEST);
@@ -981,7 +1000,7 @@ export async function loadStates(repoRoot: string, mode: ScanMode): Promise<Stat
     return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
 
-  if (!SAFE_REF.test(mode.ref)) {
+  if (!isUsableRef(mode.ref)) {
     throw new DepGuardError(`base ref "${mode.ref}" is not a usable git ref`, 'git-error');
   }
   const before = await loadState(refSource(root, mode.ref), diagnostics);

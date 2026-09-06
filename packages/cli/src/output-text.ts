@@ -102,6 +102,40 @@ export function renderText(result: ScanResult): string {
     );
   }
 
+  // Pull-request mode, printed only when the run was actually in it, so a
+  // report without --trust-base is byte-identical to what it was before
+  // the flag existed.
+  //
+  // Placed AFTER the allow line on purpose. The two say different things
+  // and a reviewer needs both: the allow line is what the BASE allow list
+  // actually cleared on this run, and the proposals below are what the
+  // pull request asked for and did not get. Read in that order they say
+  // "here is what the approved config did" and then "here is what this
+  // change wanted instead".
+  //
+  // Every proposal is sanitized. A proposal names package names and
+  // ignorePaths entries straight out of a config file the pull request
+  // wrote, which is exactly the repository-controlled content the finding
+  // and diagnostic renderers above already sanitize; a proposal line is no
+  // safer a place for an ANSI escape than a finding message is.
+  //
+  // The no-proposals case prints a line rather than nothing, for the
+  // reason `allowed` prints at zero: a run that says nothing about its
+  // control inputs is indistinguishable from a run that was never in
+  // pull-request mode at all, and that is the state this whole feature
+  // exists to make visible.
+  if (result.trustBase !== undefined) {
+    lines.push('');
+    lines.push(`Pull-request mode: control inputs from ${sanitizeText(result.trustBase.ref)}`);
+    if (result.trustBase.proposals.length === 0) {
+      lines.push('  no control input changed in this pull request');
+    } else {
+      for (const proposal of result.trustBase.proposals) {
+        lines.push(`  ${sanitizeText(proposal)}`);
+      }
+    }
+  }
+
   lines.push('');
   lines.push(
     `dep-guard ${result.run.mode}: ${result.findings.length} finding(s), ` +

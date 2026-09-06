@@ -1718,3 +1718,116 @@ output shape. It fits the stability policy's patch case (a security defect
 in dep-guard itself: a corpus that fails open was accepted), but it rides
 the same release as the tamper-signal minor above, so it ships as part of
 that minor.
+
+## A control input is not read from the tree being judged (0.6.0)
+
+There are exactly two kinds of file dep-guard reads from a repository, and
+conflating them is what made a muting pull request work. A SUBJECT is what
+is being judged: manifests and lockfiles. A CONTROL INPUT is what decides
+how the judging goes: `.dep-guard.json`, `.dep-guard.local.json`,
+`.dep-guard.baseline.json`, and `.npmrc`. Concretely the control surface is
+`failOn`, `allow`, `ignorePaths`, `internalScopes`, `internalPrefixes`,
+`extraAliases`, `online`, the baseline fingerprint list, and the `.npmrc`
+scope-to-registry pins.
+
+**The test for which kind a file is: does a rule READ it to decide whether
+to fire, or does a rule JUDGE what is in it?** `.npmrc` fails that test in
+the way that is easy to miss, and it was miscategorised here until a
+reviewer caught it. Its dependency lines are nothing; its scope pins are
+the entire precondition of the dependency-confusion pin-mismatch rule
+(`checks/confusion.ts`, `pinMismatch`), which fires only for a scope that
+HAS a pin. So a pull request that deleted `.npmrc` deleted the rule. That
+was live and it was worse than silent: the run reported "no control input
+changed in this pull request" while a control input had just been removed.
+A file being repository content, and being read by `loadStates` alongside
+the manifests, does not make it a subject.
+
+Outside pull-request mode both kinds come from the same place, and that is
+correct: a pre-commit hook and a direct CLI run on a developer's own
+checkout are inside the trust boundary already. In pull-request mode
+(`--trust-base <ref>`) the subject stays the head tree and every control
+input comes from `<ref>`.
+
+The rule generalises to any control input added later, but only the
+ENFORCEMENT half generalises for free. A new config key is a control input
+by default and is covered the moment it is read off the base-ref config,
+because the whole config object comes from `<ref>`. The reporting half does
+not: `describeConfigChange` in `trust-base.ts` enumerates keys by hand to
+build its parenthetical, so a key added without touching that function will
+be correctly IGNORED for the run but summarised as a bare `config changed
+in this pull request` with nothing naming it. Adding a config key means
+adding it there too.
+
+The corpus is deliberately outside all of this: it is not a repository
+file, and its own load-time fill-ratio guard is the backstop that covers
+it.
+
+Three consequences hold and are each pinned by a test:
+
+- The head-side value is never silently obeyed. It is ignored, and the
+  report says it was proposed. Where there is no base counterpart at all
+  (first adoption) the run uses the DEFAULTS and says `config added`,
+  rather than trusting the head because it is the only copy there is.
+- Both sides of the base-versus-head comparison are read through git, never
+  one through git and one off disk. `readFileSync` follows a symlink and
+  `git show` does not, so a mixed pair compares a link's target text
+  against the linked file's contents and reports a symlinked control input
+  as unchanged. That is the first half of a two-step whose second half
+  never shows the control path in its diff at all.
+- Failing to read a control input is could-not-run, exit 2, never a
+  fallback. That covers an unresolvable trust base, a trust base that IS
+  the tree being judged (same commit, or a different commit with an
+  identical tree, which is what a merge ref looks like), and a base-side
+  config or baseline that will not validate. Every one of those has a
+  tempting quiet fallback and every one of those fallbacks is reachable by
+  whoever opens the pull request.
+
+The reason this is stated as an invariant rather than left to the
+implementation: the hole was not one bug, it was one CATEGORY of bug
+reproduced five times over five different config keys, plus `.npmrc` on top
+of that, and the next control input will make seven unless the rule is
+written down where someone adding one will read it.
+
+### Known open, in this same category (0.6.0)
+
+Three things sit in this category and are NOT closed. They are recorded
+here rather than fixed because each fix has a cost that needs deciding
+rather than assuming, and an unrecorded known-open is indistinguishable
+from an oversight.
+
+**Workspace-local names are read from the head.** `candidates.ts` skips any
+name in `delta.workspaceLocalNames`, which `delta.ts` takes from the AFTER
+state, so a pull request that adds a workspace package named after the
+dependency it is introducing makes the existence check skip that name. The
+fix is not simply to read the set from the base: a pull request that
+legitimately adds a workspace package would then have its own new package
+reported as an unknown dependency, which is a false positive on an
+extremely ordinary change; a union of both sides is probably the right
+shape, and that is a design decision rather than a patch.
+
+There is no mitigating factor, and an earlier draft of this entry claimed
+one. It said the attack required committing a whole package directory and
+manifest under the chosen name, and that is false: `lockfiles/npm.ts` adds
+the name to `workspaceLocalNames` from a lockfile entry carrying
+`"link": true` and nothing else, and no code reads the directory to confirm
+it exists. So the cost is three lines inside `package-lock.json`, in the
+very file the pull request is already rewriting to add the dependency. That
+makes this QUIETER than the `.npmrc` hole, not louder: no separate file is
+touched, and the report affirms that no control input was proposed while
+the finding is gone.
+
+**Workspace globs are read from the head**, in `package.json`'s
+`workspaces` and in `pnpm-workspace.yaml`. These decide which manifests are
+DISCOVERED, so de-listing a directory hides its manifest from the scan
+entirely. Reading them from the base has the mirror-image cost: a pull
+request adding a new workspace package would have that package's manifest
+go undiscovered, which hides the very thing the gate should be looking at.
+Discovery inputs may need a different rule from control inputs, namely the
+union of both sides rather than either one.
+
+**The composite Action never passes `--base`**, so a CI run scans in audit
+mode and the comparison-based lockfile-tamper signals (integrity-changed,
+tarball-repointed, and the rest of the list in the `delta-new-lock-entries`
+diagnostic) never evaluate. Pre-existing in 0.5.0 and not introduced by
+pull-request mode; recorded here because the trust-boundary work is what
+made the gap legible.

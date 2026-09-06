@@ -220,7 +220,12 @@ permissions:
 
 steps:
   - uses: actions/checkout@v5
-  - uses: vaultcompasshq/dep-guard@v0.5.0
+    with:
+      # Required on pull_request runs: pull-request mode reads the config
+      # and the baseline from the base branch, which a shallow checkout
+      # does not have.
+      fetch-depth: 0
+  - uses: vaultcompasshq/dep-guard@v0.6.0
     with:
       path: .
       online: 'true'
@@ -230,13 +235,140 @@ steps:
 Inputs: `path` (default `.`), `online` (`true`/`false`, default `false`),
 `fail-on` (`critical|high|medium|low|none`, unset means dep-guard's own
 default), plus `version` (the npm dist-tag or version to run, default
-`latest`), `sarif-output` (default `dep-guard-results.sarif`), and
-`upload-sarif` (set `false` to write the file without uploading it, for a
-repository that does not have code scanning enabled).
+`latest`), `trust-base` (see below), `sarif-output` (default
+`dep-guard-results.sarif`), and `upload-sarif` (set `false` to write the
+file without uploading it, for a repository that does not have code
+scanning enabled).
 
 The SARIF is uploaded *before* the run is failed, so a scan that found
 something still gets its findings into code scanning. `security-events:
 write` is required for the upload; `actions/checkout` must run first.
+
+## Pull-request mode (`--trust-base`)
+
+**On a pull-request run dep-guard takes every control input from the base
+ref, and the head tree is the thing being judged.**
+
+Without that rule a pull request can turn the gate off in the same commit
+that carries what the gate exists to catch. `.dep-guard.json`,
+`.dep-guard.local.json`, `.dep-guard.baseline.json` and `.npmrc` all live
+in the tree under judgment, so one commit could add a hallucinated
+dependency and, in the same diff, add its name to `allow`, add its manifest
+to `ignorePaths`, raise `failOn` above the finding's severity, or write the
+finding's own fingerprint into the baseline. Every one of those exits 0
+today.
+
+`.npmrc` belongs on that list for a reason worth spelling out, because it
+is the one people miss: its scope-to-registry pins are the entire
+precondition of the dependency-confusion pin-mismatch rule, which fires
+only for a scope that *has* a pin. So a pull request that adds
+`@scope/package` resolving from the public registry **and deletes
+`.npmrc`** removes the rule rather than passing it.
+
+```
+dep-guard scan --base origin/main --trust-base origin/main
+```
+
+The config, the baseline and the `.npmrc` pins are read from `<ref>` with
+`git ls-tree` and `git show`. Nothing is checked out, nothing is written
+into the repository. A head-side change to any of them never takes effect
+for the run and is reported instead:
+
+```
+Pull-request mode: control inputs from origin/main
+  config changed in this pull request (proposed: allow some-package)
+  baseline changed in this pull request (1 baseline entries added)
+  npmrc changed in this pull request (proposed: unpin @scope)
+```
+
+Only the scope pins are compared in `.npmrc`, not the file text, so a
+rotated auth token or a changed default registry is not reported as an
+attempt to loosen the gate.
+
+A control input the head carries and the base does not reads `config added
+in this pull request`, and the run uses the defaults rather than the head's
+proposal. The allow counter keeps reporting what the *base* allow list
+cleared, so the two lines answer two different questions: what the approved
+config did, and what this change wanted instead.
+
+`--trust-base` is not `--base`, and neither implies the other. `--base`
+decides what the change is compared against; `--trust-base` decides by
+whose rules it is judged. They usually name the same ref in CI, because the
+base branch is both the state you diverged from and the state whose rules
+were approved, but either can be passed without the other.
+
+The gate fails closed, exit 2, with nothing scanned, when the ref does not
+resolve, when it resolves to HEAD's own commit, and when it is a different
+commit carrying HEAD's tree. That last one is not a hypothetical: what
+GitHub publishes as `refs/pull/N/merge` is a merge commit whose tree, when
+the base has not moved since the fork, *is* the head branch's tree, so
+`--trust-base` pointed at the merge or head SHA would read every control
+input straight back out of the tree under judgment. Pass the base *branch*.
+
+`--format json` gains a `trustBase` block (`ref`, `proposals`,
+`configChanged`, `baselineChanged`, `npmrcChanged`, `configShapeChange`,
+`baselineShapeChange`, `npmrcShapeChange`), and SARIF carries each proposal as a
+`toolExecutionNotification` rather than as a result, because a proposal is
+a fact about the run and not a finding about the code.
+
+Outside pull-request mode nothing changes. A pre-commit hook and a direct
+CLI run on your own checkout are already inside the trust boundary, so they
+never pass the flag and their output is byte for byte what it was.
+
+### In the Action
+
+The composite action passes the flag for you on a `pull_request` event, and
+on no other event, using `origin/$GITHUB_BASE_REF`. The only thing your
+workflow has to do is give `actions/checkout` `fetch-depth: 0`, because the
+base branch has to be present to be read. Set `trust-base` to a ref to
+point pull-request mode at a different base.
+
+There is deliberately **no value that turns pull-request mode off**, and
+`trust-base: off` is refused with an error rather than quietly ignored. An
+opt-out input would be settable by the pull request itself, for exactly the
+reason in the next section: on a same-repository `pull_request` event the
+workflow file runs from the pull request's own head. A knob the untrusted
+side can turn is not a boundary, so base-ref judging is the floor rather
+than a setting. If you need the old behaviour while you arrange
+`fetch-depth: 0`, stay pinned to `@v0.5.0` until you have arranged it.
+
+### Protecting the workflow file itself
+
+One thing pull-request mode cannot do for you. On a **same-repository**
+`pull_request` event the workflow file runs from the pull request's own
+head, so a pull request can edit the workflow that runs the gate: delete
+the step, pin the action back to a version that had no pull-request mode,
+or drop `fetch-depth: 0`. Reading the control inputs from the base ref does
+not help against any of those, because by then the gate was either never
+invoked or never reached its own inputs.
+
+This is also the reason `trust-base` has no opt-out value. A workflow-level
+switch is reachable by a pull request on this event, so shipping one would
+have handed the attack a supported spelling instead of making it edit the
+workflow in ways a reviewer and a required check will notice.
+
+Close that in branch protection, not in this repository's files: make the
+dep-guard job a **required status check** on the protected branch, so a
+pull request that deletes it cannot merge, or call it through a **reusable
+workflow pinned to a ref on a protected branch**, so the pull request's own
+copy is not what runs. Pull requests from forks do not have this problem in
+the same way, since their workflow changes need approval to run at all.
+
+### Requiring a human approval
+
+Some teams want more than "the base ref decided": they want a person to
+have approved a config or baseline change before it takes effect. That is
+an add-on, and it belongs in **GitHub branch protection plus a CODEOWNERS
+entry** for `.dep-guard.json`, `.dep-guard.local.json` and
+`.dep-guard.baseline.json`, so a change to any of them needs a review from
+the named owners before it can land on the base branch.
+
+It is deliberately not a setting in `.dep-guard.json`. A mode selector that
+lives in the file a pull request controls is a knob a pull request flips to
+whichever mode is weaker; base-ref loading is the floor precisely because
+it is the one thing a pull request cannot write. An add-on that can only
+make the gate stricter is safe to offer, and this one lives where the pull
+request cannot reach it.
 
 ## SARIF output (`--format sarif`)
 
@@ -281,7 +413,15 @@ dep-guard scan --base main --corpus-dir <dir>  # what this branch adds
 dep-guard scan --corpus-dir <dir>              # audit the whole tree
 dep-guard check <name> --corpus-dir <dir>      # is this one safe to add
 dep-guard init                                 # install the pre-commit hook
+
+dep-guard scan --base origin/main --trust-base origin/main   # judging a pull request
 ```
+
+`--trust-base <ref>` is pull-request mode, on both `scan` and `check`: the
+config and the baseline come from `<ref>` rather than from the tree being
+judged, and a head-side change to either is reported and ignored. It is a
+different question from `--base`, which only decides what the change is
+compared against. See the pull-request section above.
 
 `--format json` prints a single result object on stdout with diagnostics on
 stderr, so a consumer can parse stdout alone. `--format sarif` does the
@@ -318,6 +458,13 @@ which is a fact about where bytes come from rather than about the package.
 And `ignorePaths` drops findings before the gate sees them, so a pattern
 broad enough to match everything would switch the tool off; patterns made
 only of wildcards are rejected for that reason.
+
+Every key here, the baseline file beside it, and the scope pins in
+`.npmrc`, are **control inputs**: they decide what dep-guard reports rather
+than what dep-guard is looking at. On a pull-request run they are read from
+the base ref, not from the branch under judgment, so a pull request cannot
+loosen the gate in the commit the gate is weighing. See the pull-request
+section above.
 
 ## Building a corpus
 

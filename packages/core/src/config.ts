@@ -10,8 +10,12 @@ import { DepGuardError, type FailOn } from './types.js';
 // drifting apart.
 export type { ResolvedConfig };
 
-const CONFIG_FILE = '.dep-guard.json';
-const LOCAL_CONFIG_FILE = '.dep-guard.local.json';
+// Exported so trust-base.ts reads the SAME two paths out of the base ref
+// that loadConfig reads off disk. A second spelling of either name would
+// let pull-request mode read a file the ordinary load never looks at, or
+// miss one it does.
+export const CONFIG_FILE = '.dep-guard.json';
+export const LOCAL_CONFIG_FILE = '.dep-guard.local.json';
 
 const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'failOn',
@@ -101,6 +105,25 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
 }
 
+// JSON-parses one config file's CONTENT. Split out of readJsonFile so
+// that a config read from a git ref (trust-base.ts, pull-request mode)
+// and a config read off disk go through the identical parse and the
+// identical two failure messages -- a base-ref config that is malformed
+// has to be refused in exactly the same words as an on-disk one, or the
+// two loaders are two policies.
+function parseJsonConfig(content: string, label: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    throw new DepGuardError(`${label}: not valid JSON`, 'config-invalid');
+  }
+  if (!isPlainObject(parsed)) {
+    throw new DepGuardError(`${label}: config is not a JSON object`, 'config-invalid');
+  }
+  return parsed;
+}
+
 // Reads and JSON-parses one config file. Missing is not an error (the
 // caller treats it as "nothing to overlay"); anything else that goes
 // wrong reading or parsing it is a config-invalid DepGuardError, since a
@@ -117,16 +140,7 @@ function readJsonFile(filePath: string, label: string): Record<string, unknown> 
     throw new DepGuardError(`${label}: could not be read (${(error as Error).message})`, 'config-invalid');
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    throw new DepGuardError(`${label}: not valid JSON`, 'config-invalid');
-  }
-  if (!isPlainObject(parsed)) {
-    throw new DepGuardError(`${label}: config is not a JSON object`, 'config-invalid');
-  }
-  return parsed;
+  return parseJsonConfig(content, label);
 }
 
 function validateExtraAliases(value: unknown, label: string): Record<string, string[]> {
@@ -220,13 +234,57 @@ function validateSection(raw: Record<string, unknown>, label: string): Partial<R
 export function loadConfig(repoRoot: string): ResolvedConfig {
   const base = readJsonFile(path.join(repoRoot, CONFIG_FILE), CONFIG_FILE);
   const local = readJsonFile(path.join(repoRoot, LOCAL_CONFIG_FILE), LOCAL_CONFIG_FILE);
+  return resolveConfig(base, CONFIG_FILE, local, LOCAL_CONFIG_FILE);
+}
 
+// The overlay itself, once both sides have been parsed. loadConfig and
+// loadConfigFromTexts share it so pull-request mode cannot end up with a
+// different precedence rule than the on-disk load: "local wins, shallow"
+// is one decision, written once.
+function resolveConfig(
+  base: Record<string, unknown> | null,
+  baseLabel: string,
+  local: Record<string, unknown> | null,
+  localLabel: string
+): ResolvedConfig {
   let config: ResolvedConfig = defaultConfig();
   if (base !== null) {
-    config = { ...config, ...validateSection(base, CONFIG_FILE) };
+    config = { ...config, ...validateSection(base, baseLabel) };
   }
   if (local !== null) {
-    config = { ...config, ...validateSection(local, LOCAL_CONFIG_FILE) };
+    config = { ...config, ...validateSection(local, localLabel) };
   }
   return config;
+}
+
+/**
+ * The same config, built from two blobs rather than two files.
+ *
+ * Pull-request mode reads .dep-guard.json and .dep-guard.local.json out of
+ * the base ref through git, so it has text where loadConfig has paths. It
+ * still gets the same validation, the same overlay order, and the same
+ * config-invalid failures -- only the source of the bytes differs. The
+ * local overlay is read from the base ref too: on a pull-request run a
+ * committed .dep-guard.local.json is just as much a control input the
+ * head could rewrite as .dep-guard.json is, and reading one from base
+ * while trusting the other from head would leave the hole open one file
+ * over.
+ *
+ * `label` is the ref, so a malformed base config names where it came from
+ * ("origin/main:.dep-guard.json: not valid JSON") rather than reading as
+ * a complaint about the file in the user's working tree.
+ */
+export function loadConfigFromTexts(
+  baseText: string | null,
+  localText: string | null,
+  label: string
+): ResolvedConfig {
+  const baseLabel = `${label}:${CONFIG_FILE}`;
+  const localLabel = `${label}:${LOCAL_CONFIG_FILE}`;
+  return resolveConfig(
+    baseText === null ? null : parseJsonConfig(baseText, baseLabel),
+    baseLabel,
+    localText === null ? null : parseJsonConfig(localText, localLabel),
+    localLabel
+  );
 }

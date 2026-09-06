@@ -17,6 +17,8 @@ import { fingerprintFinding } from './fingerprint.js';
 import { evaluateGate, severityAtLeast } from './gate.js';
 import { assertScannablePath, loadStates, matchGlobPath, resolveScanRoot } from './git-source.js';
 import type { ScanMode } from './git-source.js';
+import { loadTrustedControls } from './trust-base.js';
+import type { ControlShapeChange, TrustedControls } from './trust-base.js';
 import { DepGuardError } from './types.js';
 import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
 import { applyTyposquatAsymmetry } from './online/asymmetry.js';
@@ -58,6 +60,27 @@ const DEFAULT_CORPUS_DIR = path.join(
   'corpus'
 );
 
+// What a pull-request run says about the control inputs it did NOT obey.
+// The umbrella sums `proposals` across its children, so that field is a
+// plain string array with one entry per proposed change and nothing
+// nested; the flags beside it let a consumer act on the kind of change
+// without parsing the prose.
+export interface TrustBaseReport {
+  ref: string;
+  proposals: string[];
+  configChanged: boolean;
+  baselineChanged: boolean;
+  // .npmrc is a control input, not a subject: its scope pins are what
+  // decide whether the dependency-confusion pin-mismatch rule has anything
+  // to compare against, so a pull request that deletes .npmrc deletes a
+  // rule. Reported separately from the config because it is a separate
+  // file a reviewer will look for by name.
+  npmrcChanged: boolean;
+  configShapeChange: ControlShapeChange | null;
+  baselineShapeChange: ControlShapeChange | null;
+  npmrcShapeChange: ControlShapeChange | null;
+}
+
 export interface ScanResult {
   findings: Finding[]; // baseline-suppressed and ignorePaths-dropped findings excluded
   suppressed: number; // count removed by the baseline, specifically (not ignorePaths)
@@ -74,6 +97,13 @@ export interface ScanResult {
   // leaving it silent is the footgun this field closes.
   allowed: number;
   allowedNames: string[]; // sorted, de-duplicated across checks
+  // Present ONLY on a pull-request run (--trust-base). Absent, not null,
+  // on every other run: JSON.stringify drops an undefined property
+  // outright, so a scan without the flag serialises to exactly the bytes
+  // it serialised to before this field existed. That byte-for-byte parity
+  // is the point -- pull-request mode is a mode you enter, and a consumer
+  // that never enters it should not have to learn a new key.
+  trustBase?: TrustBaseReport;
   run: {
     mode: 'staged' | 'base' | 'audit';
     failOn: FailOn;
@@ -520,7 +550,8 @@ function buildResult(
   ignored: number,
   allowedNames: string[],
   config: ResolvedConfig,
-  info: RunInfo
+  info: RunInfo,
+  controls: TrustedControls | null
 ): ScanResult {
   const { blockingMatches, exitCode } = evaluateGate(findings, config.failOn);
   const distinctAllowed = [...new Set(allowedNames)].sort();
@@ -531,6 +562,25 @@ function buildResult(
     ignored,
     allowed: distinctAllowed.length,
     allowedNames: distinctAllowed,
+    // Spread rather than assigned, so the key is genuinely ABSENT outside
+    // pull-request mode rather than present-and-undefined. The two
+    // serialise the same through JSON.stringify but not through a deep
+    // equality assertion, and the no-flag parity test asserts on the
+    // object.
+    ...(controls === null
+      ? {}
+      : {
+          trustBase: {
+            ref: controls.ref,
+            proposals: controls.proposals,
+            configChanged: controls.configChanged,
+            baselineChanged: controls.baselineChanged,
+            npmrcChanged: controls.npmrcChanged,
+            configShapeChange: controls.configShapeChange,
+            baselineShapeChange: controls.baselineShapeChange,
+            npmrcShapeChange: controls.npmrcShapeChange,
+          },
+        }),
     run: {
       mode: info.mode,
       failOn: config.failOn,
@@ -553,6 +603,12 @@ export async function scan(opts: {
   corpusDir?: string;
   failOn?: FailOn;
   online?: boolean;
+  // Pull-request mode. When set, .dep-guard.json, .dep-guard.local.json
+  // and the baseline are read from this ref through git and the head tree
+  // is the thing judged; a head-side change to any of them is reported and
+  // ignored. Independent of opts.mode.ref: --base decides WHAT changed,
+  // --trust-base decides by WHOSE RULES it is judged. See trust-base.ts.
+  trustBase?: string;
 }): Promise<ScanResult> {
   const startedAt = Date.now();
   // Checked before anything else touches opts.repoRoot -- resolveScanRoot
@@ -575,17 +631,39 @@ export async function scan(opts: {
   // opts.repoRoot and can still raise its own scan-anchor-differs notice
   // when the two disagree.
   const root = await resolveScanRoot(opts.repoRoot, opts.mode);
-  const config = applyFailOnOverride(loadConfig(root), opts.failOn);
+  // Runs before the corpus is loaded and before any state is read, so an
+  // unusable trust base is could-not-run with NOTHING scanned, which is
+  // what the exit-2 message promises. Null outside pull-request mode, and
+  // then every line below reads exactly as it did before this flag
+  // existed.
+  const controls =
+    opts.trustBase === undefined ? null : await loadTrustedControls(root, opts.trustBase);
+  const config = applyFailOnOverride(controls?.config ?? loadConfig(root), opts.failOn);
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const statePair = await loadStates(opts.repoRoot, opts.mode);
   const delta = computeDelta(statePair.before, statePair.after);
-  const baseline = loadBaseline(root);
+  // Left at this point in the sequence deliberately for the no-flag case:
+  // moving the on-disk read earlier would change which error a repository
+  // with BOTH a malformed baseline and an unreadable base ref reports, and
+  // outside pull-request mode nothing about this function changes.
+  const baseline = controls === null ? loadBaseline(root) : controls.baseline;
 
+  // The scope pins are a CONTROL INPUT, so in pull-request mode they come
+  // from the base ref like the config and the baseline do.
+  //
+  // statePair.after is the tree under judgment, and the pin-mismatch rule
+  // fires only for a scope that HAS a pin, so sourcing the pins from there
+  // meant a pull request could delete .npmrc and delete the rule along
+  // with it. That was live, and it was worse than silent: the run reported
+  // "no control input changed in this pull request" while a control input
+  // had just been removed. loadStates still reads the head-side .npmrc as
+  // it always did; its pins are simply not what the rule is judged
+  // against here.
   const { findings: checkedFindings, ctx } = runChecks(
     corpus,
     config,
     delta,
-    statePair.after.npmrcRegistryPins
+    controls === null ? statePair.after.npmrcRegistryPins : controls.npmrcPins
   );
   const rawFindings = resolveOnline(config, opts.online)
     ? await enrichOnline(checkedFindings, ctx)
@@ -594,13 +672,21 @@ export async function scan(opts: {
   const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
   const { findings, suppressed, ignored } = applyPathFilters(rawFindings, config, baseline, diagnostics);
 
-  return buildResult(findings, suppressed, ignored, ctx.allowed, config, {
-    mode: statePair.mode.kind,
-    lockfileFormat: delta.lockfileFormat,
-    corpusBuiltAt: corpus.builtAt,
-    diagnostics,
-    startedAt,
-  });
+  return buildResult(
+    findings,
+    suppressed,
+    ignored,
+    ctx.allowed,
+    config,
+    {
+      mode: statePair.mode.kind,
+      lockfileFormat: delta.lockfileFormat,
+      corpusBuiltAt: corpus.builtAt,
+      diagnostics,
+      startedAt,
+    },
+    controls
+  );
 }
 
 const SYNTHETIC_MANIFEST_PATH = 'package.json';
@@ -687,6 +773,14 @@ export async function checkSingle(opts: {
   corpusDir?: string;
   failOn?: FailOn;
   online?: boolean;
+  // The same pull-request mode scan() takes, and for the same reason:
+  // "is this name safe to add" is answered against `allow`,
+  // `internalScopes`, `internalPrefixes` and `failOn`, every one of which
+  // a pull request can rewrite in the commit that adds the name. The
+  // baseline is loaded and REPORTED here as well but, as always for
+  // checkSingle, is not applied -- a synthetic manifest path makes a
+  // fingerprint match meaningless (see applyPathFilters above).
+  trustBase?: string;
 }): Promise<ScanResult> {
   // An empty (or whitespace-only) name has no meaningful answer. Reporting
   // "safe" for it -- which an empty name would otherwise do, via a
@@ -712,7 +806,9 @@ export async function checkSingle(opts: {
   // (audit-mode) way: checkSingle must not require being inside a git
   // repository just to read config.
   const root = await resolveScanRoot(opts.repoRoot, { kind: 'audit' });
-  const config = applyFailOnOverride(loadConfig(root), opts.failOn);
+  const controls =
+    opts.trustBase === undefined ? null : await loadTrustedControls(root, opts.trustBase);
+  const config = applyFailOnOverride(controls?.config ?? loadConfig(root), opts.failOn);
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const delta = syntheticDelta(opts.name);
 
@@ -723,11 +819,19 @@ export async function checkSingle(opts: {
 
   const findings = skipPathFilters(rawFindings);
 
-  return buildResult(findings, 0, 0, ctx.allowed, config, {
-    mode: 'audit',
-    lockfileFormat: delta.lockfileFormat,
-    corpusBuiltAt: corpus.builtAt,
-    diagnostics: [...ctx.diagnostics, NAME_ONLY_DIAGNOSTIC],
-    startedAt,
-  });
+  return buildResult(
+    findings,
+    0,
+    0,
+    ctx.allowed,
+    config,
+    {
+      mode: 'audit',
+      lockfileFormat: delta.lockfileFormat,
+      corpusBuiltAt: corpus.builtAt,
+      diagnostics: [...ctx.diagnostics, NAME_ONLY_DIAGNOSTIC],
+      startedAt,
+    },
+    controls
+  );
 }

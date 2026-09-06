@@ -33,8 +33,14 @@
 // by running the script test suite (scripts/tests/*.test.mjs, which import
 // core this same relative-path way) after "exports" was added: unaffected.
 export { checkSingle, scan, CHECK_SINGLE_DIAGNOSTIC_CODE } from './scan.js';
-export type { ScanResult } from './scan.js';
+export type { ScanResult, TrustBaseReport } from './scan.js';
 export type { ScanMode } from './git-source.js';
+// Pull-request mode's public types. The CLI renders a proposal list and a
+// shape change, and a consumer reading trustBase out of the JSON should
+// get a named union rather than four string literals it has to rediscover
+// from the docs. Widening "exports" this way is backward compatible; see
+// the note at the top of this file.
+export type { ControlShapeChange } from './trust-base.js';
 export { FAIL_ON_LEVELS, loadConfig } from './config.js';
 export type { ResolvedConfig } from './config.js';
 // The gate's per-finding decision, exported for the CLI's SARIF renderer

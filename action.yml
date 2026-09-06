@@ -38,6 +38,38 @@ inputs:
       whatever .dep-guard.json configures.
     required: false
     default: ''
+  trust-base:
+    description: |
+      Pull-request mode. dep-guard reads `.dep-guard.json`,
+      `.dep-guard.local.json` and `.dep-guard.baseline.json` from this git
+      ref instead of from the tree it is judging, so a pull request cannot
+      turn the gate off in the same commit that carries what the gate exists
+      to catch. A head-side change to any of them is reported and ignored.
+
+      Left at the default, this is decided by the event: on a
+      `pull_request` event the action passes `origin/$GITHUB_BASE_REF`, and
+      on any other event it passes nothing and behaviour is unchanged. Set
+      it to a ref to point pull-request mode at a different base.
+
+      There is deliberately NO value that turns pull-request mode off, and
+      `off` is refused with an error rather than ignored. On a
+      same-repository `pull_request` event the workflow file runs from the
+      pull request's own head, so an opt-out input would be settable by the
+      very pull request whose control inputs it governs, which is the
+      switch this mode exists to take away. Base-ref judging is the floor,
+      not a knob. A repository that needs the old behaviour while it
+      arranges `fetch-depth: 0` should stay pinned to `@v0.5.0` until it
+      has arranged it.
+
+      A pull_request run using this REQUIRES `actions/checkout` with
+      `fetch-depth: 0`, so the base branch is present to read. Without it
+      dep-guard exits 2 and the job fails, which is deliberate: a missing
+      base is never a reason to fall back to trusting the head.
+
+      Same charset rules as `path`, and additionally may not begin with
+      `-`, so it cannot be read as a git option.
+    required: false
+    default: ''
   sarif-output:
     description: |
       Where to write the SARIF file, relative to the workspace root. Same
@@ -86,6 +118,7 @@ runs:
         DG_FAIL_ON: ${{ inputs.fail-on }}
         DG_SARIF_OUTPUT: ${{ inputs.sarif-output }}
         DG_UPLOAD: ${{ inputs.upload-sarif }}
+        DG_TRUST_BASE: ${{ inputs.trust-base }}
       run: |
         set -euo pipefail
 
@@ -155,6 +188,43 @@ runs:
         validate_path "path" "${DG_PATH}"
         validate_path "sarif-output" "${DG_SARIF_OUTPUT}"
 
+        # There is no opt-out value, and `off` is refused BY NAME rather
+        # than left to fail the charset check with a confusing message.
+        #
+        # An earlier draft of this action accepted `off` to disable
+        # pull-request mode. That was wrong, and the reason is the same
+        # reason the mode exists: on a same-repository `pull_request` event
+        # the workflow file runs from the pull request's own head, so the
+        # pull request whose config and baseline are being held at arm's
+        # length could add `trust-base: off` to the workflow in the very
+        # commit being judged, and the boundary would be back to being a
+        # setting the untrusted side controls. Base-ref judging is the
+        # floor, not a knob. Refusing loudly, with the alternative in the
+        # message, is what keeps someone from quietly re-adding it.
+        if [[ "${DG_TRUST_BASE}" == "off" ]]; then
+          printf '::error::dep-guard: `trust-base: off` is not supported. Pull-request mode is not optional: on a same-repository pull_request event the workflow file runs from the pull request head, so an opt-out input would be settable by the pull request it governs.\n'
+          printf '::error::To keep pre-0.6.0 behaviour while you add `fetch-depth: 0` to actions/checkout, pin this action to @v0.5.0.\n'
+          exit 1
+        fi
+
+        # trust-base is a git ref, not a path, but the same charset serves:
+        # a ref is letters, digits, dots, dashes, underscores and slashes.
+        # Empty means "decide from the event", so it is not validated as a
+        # ref.
+        #
+        # The leading-dash check is the one that is not about paths. A ref
+        # beginning with `-` would be read as an OPTION by whichever git
+        # command dep-guard hands it to, which is why core screens it too;
+        # this catches it a layer earlier, where the message can name the
+        # workflow input that produced it.
+        if [[ -n "${DG_TRUST_BASE}" ]]; then
+          validate_path "trust-base" "${DG_TRUST_BASE}"
+          if [[ "${DG_TRUST_BASE}" == -* ]]; then
+            printf '::error::dep-guard: `trust-base` must not begin with a dash: %q\n' "${DG_TRUST_BASE}"
+            exit 1
+          fi
+        fi
+
     - name: Run dep-guard
       id: run
       shell: bash
@@ -164,6 +234,7 @@ runs:
         DG_ONLINE: ${{ inputs.online }}
         DG_FAIL_ON: ${{ inputs.fail-on }}
         DG_SARIF_OUTPUT: ${{ inputs.sarif-output }}
+        DG_TRUST_BASE: ${{ inputs.trust-base }}
       run: |
         # NOT "set -uo pipefail". GitHub invokes a composite bash step as
         # `bash --noprofile --norc -eo pipefail {0}`, so errexit is
@@ -198,6 +269,29 @@ runs:
         fi
         if [[ -n "${DG_FAIL_ON}" ]]; then
           ARGS+=(--fail-on "${DG_FAIL_ON}")
+        fi
+
+        # Pull-request mode. GITHUB_BASE_REF is set by GitHub on, and only
+        # on, a pull_request event, which is exactly the run where the tree
+        # being judged is written by someone who is not yet trusted. So the
+        # event decides the default and no workflow has to remember to.
+        #
+        # origin/ prefixed, not bare: GITHUB_BASE_REF is a branch NAME
+        # ("main"), and after actions/checkout only the remote-tracking ref
+        # exists locally. A bare "main" would resolve to nothing on a
+        # detached-HEAD checkout and dep-guard would exit 2, which is safe
+        # but for the wrong reason and with a message about fetching that
+        # the user has already done.
+        #
+        # There is no opt-out branch here on purpose: an explicit ref
+        # REDIRECTS pull-request mode, it never disables it, and the
+        # validate step refuses `off` before this line is reached. Empty on
+        # a non-pull_request event simply passes nothing, so push and
+        # schedule runs are unchanged.
+        if [[ -n "${DG_TRUST_BASE}" ]]; then
+          ARGS+=(--trust-base "${DG_TRUST_BASE}")
+        elif [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+          ARGS+=(--trust-base "origin/${GITHUB_BASE_REF}")
         fi
 
         # SARIF goes to stdout and nothing else does, so this redirects
