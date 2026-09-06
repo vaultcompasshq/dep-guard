@@ -1023,6 +1023,72 @@ describe('tamperCheck: a same-origin repoint with no before integrity', () => {
     });
     expect(tamperCheck(context)).toEqual([]);
   });
+
+  // A forge host is not the same thing as a forge. gitlab.com serves
+  // GitLab's real npm package registry under /api/v4/, so treating the bare
+  // host as a git source classified a genuine registry tarball as git and
+  // silently dropped this repoint: project 1234 to project 9999, version
+  // held, no integrity. The exclusion has to be narrow enough to be about
+  // the SHAPE npm and pnpm actually write for a git source, not about who
+  // owns the domain.
+  test('a GitLab package-registry repoint between projects is a registry repoint and fires', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: {
+          version: '1.0.0',
+          resolvedUrl: 'https://gitlab.com/api/v4/projects/1234/packages/npm/a/-/a-1.0.0.tgz',
+        },
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'https://gitlab.com/api/v4/projects/9999/packages/npm/a/-/a-1.0.0.tgz',
+        },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+    expect(findings[0].details?.signal).toBe('tarball-repointed-unverified:https://gitlab.com');
+    expect(findings[0].details?.beforePath).not.toBe(findings[0].details?.afterPath);
+  });
+
+  // Two more real registries that happen to sit on forge-adjacent hostnames.
+  // Neither is a source archive, and both must stay in scope.
+  test('a GitHub Packages npm registry repoint fires', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: 'https://npm.pkg.github.com/a/-/a-1.0.0.tgz' },
+        after: { version: '1.0.0', resolvedUrl: 'https://npm.pkg.github.com/evil/-/evil-1.0.0.tgz' },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+    expect(String(findings[0].details?.signal)).toMatch(/^tarball-repointed-unverified:/);
+  });
+
+  test('a self-hosted GitLab registry repoint fires', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: {
+          version: '1.0.0',
+          resolvedUrl: 'https://gitlab.corp.test/api/v4/projects/1/packages/npm/a/-/a-1.0.0.tgz',
+        },
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'https://gitlab.corp.test/api/v4/projects/2/packages/npm/a/-/a-1.0.0.tgz',
+        },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+  });
 });
 
 describe('tamperCheck: scheme change on an unchanged host', () => {

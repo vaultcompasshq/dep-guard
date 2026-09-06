@@ -66,26 +66,40 @@ const GIT_SCHEMES: ReadonlySet<string> = new Set([
   'ssh:',
 ]);
 
-// Hosts that serve a git forge's source archive over ordinary https, where
+// Hosts that serve a git forge's SOURCE ARCHIVE over ordinary https, where
 // the scheme alone cannot tell a git source from a registry tarball. pnpm
 // records a github dependency as a codeload tarball --
 // `https://codeload.github.com/o/r/tar.gz/<sha>` -- and there the sha rides
-// in the PATH, so a commit bump moves the pathname exactly the way a
-// repoint does. None of these hosts is ever an npm registry, so excluding
-// them costs no registry coverage.
+// in the PATH, so a commit bump moves the pathname exactly the way a repoint
+// does. That one shape is the whole reason this set exists.
 //
-// This is an exclusion list, and being a list it is the kind of thing this
-// codebase distrusts (see "derive, do not describe" in docs/INVARIANTS.md).
-// It is tolerable here only because of which way an omission fails: a forge
-// missing from it is classified `registry`, which can cost a FALSE POSITIVE
-// on a commit bump, never a missed repoint. Add to it when one shows up;
-// nothing silently loses coverage if it is incomplete.
-const GIT_FORGE_ARCHIVE_HOSTS: ReadonlySet<string> = new Set([
-  'codeload.github.com',
-  'github.com',
-  'gitlab.com',
-  'bitbucket.org',
-]);
+// It holds exactly one host, and adding another needs more care than it
+// looks, because the two directions of error are NOT symmetric:
+//
+//   - A host MISSING from this set is classified `registry`. The worst that
+//     costs is a false positive on a commit bump.
+//   - A host wrongly IN this set is classified `git`, which silently removes
+//     a real registry from the repoint signal's scope. That is lost
+//     coverage, and it is silent.
+//
+// So an over-broad entry is the expensive mistake, and this set had three of
+// them: bare `github.com`, `gitlab.com` and `bitbucket.org`. They bought no
+// coverage for either supported lockfile format -- pnpm's github shape is
+// codeload, and npm writes a `git+` scheme for all of these, which
+// GIT_SCHEMES already catches -- while `gitlab.com` actively cost some,
+// because `https://gitlab.com/api/v4/projects/<id>/packages/npm/<pkg>/-/...`
+// is GitLab's real npm package REGISTRY. A hashless held-version repoint
+// from one project id to another on that host produced no finding at all.
+//
+// The earlier version of this comment claimed "none of these hosts is ever
+// an npm registry" (false for gitlab.com) and that an omission "can only
+// cost a false positive, never a missed repoint" (true of hosts missing
+// FROM the list, false of over-broad entries IN it). Both are recorded here
+// as mistakes rather than quietly deleted, because a forge domain looks like
+// an obvious thing to add and the reasoning that makes it wrong is not.
+// Match the archive SHAPE npm and pnpm actually write, never the domain of
+// whoever happens to own the forge.
+const GIT_FORGE_ARCHIVE_HOSTS: ReadonlySet<string> = new Set(['codeload.github.com']);
 
 export function resolutionKindOf(resolution: Resolution): ResolutionKind {
   if (GIT_SCHEMES.has(resolution.protocol)) {

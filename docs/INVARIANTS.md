@@ -514,10 +514,27 @@ demotion of a pinned git source. A git source's integrity is git's own, and
 judging it is `git-source`'s job. `resolutionKindOf` in `resolution.ts` is
 where that classification lives -- the resolution-side counterpart of
 manifest.ts's `Protocol`, kept there for the same reason `resolutionOf` is:
-the lockfile walk has no manifest line to read a protocol off. Its
-http(s)-forge host set is an exclusion list, and the direction of an omission
-is why that is tolerable: a forge missing from it classifies as `registry`
-and can cost a false positive on a commit bump, never a missed repoint.
+the lockfile walk has no manifest line to read a protocol off.
+
+Its http(s)-forge host set holds exactly one entry, `codeload.github.com`,
+and the two directions of error are NOT symmetric -- which is the part an
+earlier version of this file got wrong. A host MISSING from the set
+classifies as `registry`, and the worst that costs is a false positive on a
+commit bump. A host wrongly IN the set classifies as `git`, which silently
+removes a real registry from this signal's scope: that is lost coverage, and
+it is silent. So an over-broad entry is the expensive mistake, and this file
+previously blessed three of them. Bare `github.com`, `gitlab.com` and
+`bitbucket.org` were listed and bought no coverage for either supported
+lockfile format -- pnpm's github shape is codeload, and npm writes a `git+`
+scheme for all of them, which the scheme set already catches -- while
+`gitlab.com` actively cost some, because
+`https://gitlab.com/api/v4/projects/<id>/packages/npm/<pkg>/-/...` is
+GitLab's real npm package REGISTRY, so a hashless held-version repoint from
+one project id to another produced no finding at all. The rule is to match
+the archive SHAPE npm and pnpm actually write, never the domain of whoever
+owns the forge; a forge domain looks like an obvious thing to add and the
+reasoning that makes it wrong is not, which is why the mistake is recorded
+here rather than quietly deleted.
 
 The audit-mode exclusion is STRUCTURAL, not a guard, and the distinction
 matters to anyone auditing this rule. Nothing here consults
