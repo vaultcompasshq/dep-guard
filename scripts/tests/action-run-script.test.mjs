@@ -189,6 +189,60 @@ describe('action.yml "Run dep-guard", under GitHub bash flags', () => {
     expect(invoke('true')).toContain('--online');
     expect(invoke('true')).not.toContain('--no-online');
   });
+
+  test('passes --trust-base on a pull_request event and nowhere else', () => {
+    // Same shape as the online test above, and for the same reason: the
+    // argument assembly is proven as executed rather than by reading
+    // action.yml. GITHUB_BASE_REF is set by GitHub on, and only on, a
+    // pull_request event, so it is what decides the default here.
+    const binDir = mkdtempSync(path.join(tmpdir(), 'depguard-action-bin-'));
+    const stub = path.join(binDir, 'npx');
+    writeFileSync(stub, `#!/bin/sh\necho "$@"\nexit 0\n`);
+    chmodSync(stub, 0o755);
+
+    const script = extractRunScript('Run dep-guard');
+    const workspace = mkdtempSync(path.join(tmpdir(), 'depguard-action-ws-'));
+    const outputFile = path.join(workspace, 'github-output');
+    writeFileSync(outputFile, '');
+    const scriptFile = path.join(workspace, 'step.sh');
+    writeFileSync(scriptFile, script);
+
+    const invoke = (env) => {
+      execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', scriptFile], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          PATH: `${binDir}:${process.env.PATH ?? ''}`,
+          GITHUB_WORKSPACE: workspace,
+          GITHUB_OUTPUT: outputFile,
+          DG_VERSION: 'latest',
+          DG_PATH: '.',
+          DG_ONLINE: 'false',
+          DG_FAIL_ON: '',
+          DG_TRUST_BASE: '',
+          DG_SARIF_OUTPUT: 'args.txt',
+          ...env,
+        },
+      });
+      return readFileSync(path.join(workspace, 'args.txt'), 'utf8');
+    };
+
+    // A push or schedule run: no base ref, no flag, behaviour unchanged.
+    expect(invoke({})).not.toContain('--trust-base');
+
+    // A pull_request run: the base branch's remote-tracking ref. Bare
+    // "main" would not resolve after a detached-HEAD checkout, so the
+    // origin/ prefix is part of what this asserts.
+    expect(invoke({ GITHUB_BASE_REF: 'main' })).toContain('--trust-base origin/main');
+
+    // An explicit input wins over the event default.
+    expect(
+      invoke({ GITHUB_BASE_REF: 'main', DG_TRUST_BASE: 'origin/release' })
+    ).toContain('--trust-base origin/release');
+
+    // And `off` opts out even on a pull_request event.
+    expect(invoke({ GITHUB_BASE_REF: 'main', DG_TRUST_BASE: 'off' })).not.toContain('--trust-base');
+  });
 });
 
 describe('action.yml "Report dep-guard result", under GitHub bash flags', () => {

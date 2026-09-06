@@ -1718,3 +1718,49 @@ output shape. It fits the stability policy's patch case (a security defect
 in dep-guard itself: a corpus that fails open was accepted), but it rides
 the same release as the tamper-signal minor above, so it ships as part of
 that minor.
+
+## A control input is not read from the tree being judged (0.6.0)
+
+There are exactly two kinds of file dep-guard reads from a repository, and
+conflating them is what made a muting pull request work. A SUBJECT is what
+is being judged: manifests, lockfiles, `.npmrc`. A CONTROL INPUT is what
+decides how the judging goes: `.dep-guard.json`, `.dep-guard.local.json`,
+and `.dep-guard.baseline.json`. Concretely the control surface is `failOn`,
+`allow`, `ignorePaths`, `internalScopes`, `internalPrefixes`,
+`extraAliases`, `online`, and the baseline fingerprint list.
+
+Outside pull-request mode both come from the same place, and that is
+correct: a pre-commit hook and a direct CLI run on a developer's own
+checkout are inside the trust boundary already. In pull-request mode
+(`--trust-base <ref>`) the subject stays the head tree and every control
+input comes from `<ref>`. The rule generalises to any control input added
+later: **a new config key is a control input by default, and adding one
+means adding it to the base-ref read, not only to `loadConfig`.** The
+corpus is deliberately outside this: it is not a repository file, and its
+own load-time fill-ratio guard is the backstop that covers it.
+
+Three consequences hold and are each pinned by a test:
+
+- The head-side value is never silently obeyed. It is ignored, and the
+  report says it was proposed. Where there is no base counterpart at all
+  (first adoption) the run uses the DEFAULTS and says `config added`,
+  rather than trusting the head because it is the only copy there is.
+- Both sides of the base-versus-head comparison are read through git, never
+  one through git and one off disk. `readFileSync` follows a symlink and
+  `git show` does not, so a mixed pair compares a link's target text
+  against the linked file's contents and reports a symlinked control input
+  as unchanged. That is the first half of a two-step whose second half
+  never shows the control path in its diff at all.
+- Failing to read a control input is could-not-run, exit 2, never a
+  fallback. That covers an unresolvable trust base, a trust base that IS
+  the tree being judged (same commit, or a different commit with an
+  identical tree, which is what a merge ref looks like), and a base-side
+  config or baseline that will not validate. Every one of those has a
+  tempting quiet fallback and every one of those fallbacks is reachable by
+  whoever opens the pull request.
+
+The reason this is stated as an invariant rather than left to the
+implementation: the hole was not one bug, it was one CATEGORY of bug
+reproduced five times over five different config keys, and the next config
+key will make six unless the rule is written down where someone adding one
+will read it.
