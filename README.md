@@ -20,7 +20,7 @@ report.
 <!-- /guardrails-family -->
 
 **Status: published.** [`@vaultcompass/dep-guard`](https://www.npmjs.com/package/@vaultcompass/dep-guard)
-is on npm, covered by 1176 tests, and works out of the box: the package
+is on npm, covered by 1232 tests, and works out of the box: the package
 name corpus ships inside
 [`@vaultcompass/dep-guard-core`](https://www.npmjs.com/package/@vaultcompass/dep-guard-core),
 so a scan needs no `--corpus-dir` and no setup. Building your own corpus
@@ -220,7 +220,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v5
-  - uses: vaultcompasshq/dep-guard@v0.3.0
+  - uses: vaultcompasshq/dep-guard@v0.4.0
     with:
       path: .
       online: 'true'
