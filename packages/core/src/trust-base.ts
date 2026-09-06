@@ -718,6 +718,7 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
   assertBaseIsRegularFile(baseConfig, ref, 'config-invalid');
   assertBaseIsRegularFile(baseLocal, ref, 'config-invalid');
   assertBaseIsRegularFile(baseBaselineFile, ref, 'baseline-invalid');
+  assertBaseIsRegularFile(baseNpmrcFile, ref, 'npmrc-invalid');
 
   const config = loadConfigFromTexts(
     baseConfig === null ? null : baseConfig.text,
@@ -729,17 +730,12 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
       ? new Set<string>()
       : parseBaseline(baseBaselineFile.text, `${ref}:${BASELINE_FILE}`);
 
-  // A base-side .npmrc that is not a regular file is NOT refused, unlike a
-  // config or a baseline that is not one. parseNpmrcPins cannot fail: it
-  // reads the lines it recognises and ignores everything else, so a link's
-  // target text simply yields no pins. Refusing here would turn an odd but
-  // harmless base-side file into a could-not-run for every pull request
-  // against that branch, and the direction of the resulting error is the
-  // safe one anyway: no pins means the pin-mismatch rule stays silent
-  // rather than firing wrongly.
-  const npmrcPins = parseNpmrcPins(
-    baseNpmrcFile !== null && isRegularFileMode(baseNpmrcFile.mode) ? baseNpmrcFile.text : null
-  );
+  // Refused exactly like the config and the baseline. parseNpmrcPins
+  // cannot throw, which is what made "just read it leniently" tempting,
+  // but not throwing is not the same as failing safe: see the note on
+  // assertBaseIsRegularFile for why an empty pin set is the loosest
+  // possible outcome rather than the safest.
+  const npmrcPins = parseNpmrcPins(baseNpmrcFile === null ? null : baseNpmrcFile.text);
   const headNpmrcPins = parseNpmrcPins(
     headNpmrcFile !== null && isRegularFileMode(headNpmrcFile.mode) ? headNpmrcFile.text : null
   );
@@ -835,13 +831,35 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
   };
 }
 
+/**
+ * Refuse a base-side control input that is not a regular file.
+ *
+ * Every control input goes through this, .npmrc included. An earlier
+ * version let .npmrc past on the reasoning that parseNpmrcPins cannot fail
+ * and no pins is therefore the safe direction. That reasoning is
+ * backwards, and the mistake is worth leaving written down: the
+ * pin-mismatch rule fires only for a scope that HAS a pin, so an empty pin
+ * set does not fail safe, it turns the rule off for every scope at once.
+ * The same head that exited 1 against a readable base .npmrc exited 0
+ * against a linked one, and the report blamed the head for a pin the base
+ * was still holding through the link.
+ *
+ * The wording says whose problem it is. This sits on the PROTECTED base
+ * branch, which a pull request cannot write, so it is a misconfiguration
+ * to go and fix rather than a pull request to reject, and a message that
+ * read like an accusation would send someone hunting through the wrong
+ * diff.
+ */
 function assertBaseIsRegularFile(file: ControlFile | null, ref: string, code: string): void {
   if (file === null || isRegularFileMode(file.mode)) {
     return;
   }
   throw new DepGuardError(
     `${ref}:${file.path} is not a regular file at the trust base (git mode ${file.mode}); ` +
-      'dep-guard reads its control inputs as files. Nothing was checked.',
+      'dep-guard reads its control inputs as files, and cannot judge a pull request against ' +
+      'one it cannot read. This is a misconfiguration on the base branch rather than ' +
+      `something the pull request did: fix ${file.path} on the base branch. Nothing was ` +
+      'checked.',
     code
   );
 }

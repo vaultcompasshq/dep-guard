@@ -409,6 +409,41 @@ describe('pull-request mode: .npmrc scope pins are a control input', () => {
     expect(result.trustBase?.proposals).toEqual([]);
   });
 
+  test('a base-side npmrc that is not a regular file is could-not-run, not no-pins', async () => {
+    // The tempting reading is that no pins is the safe direction. It is
+    // the opposite: pinMismatch returns null for a scope with no pin, so
+    // an empty pin set stops rule 1 firing for EVERY scope, and the run
+    // goes from exit 1 to exit 0 on an unchanged head. The proposal line
+    // made it worse, blaming the head for a pin the base actually holds
+    // through the link. So this fails closed, like config and baseline.
+    repo = await mkdtemp(path.join(tmpdir(), 'dep-guard-trust-'));
+    tempDirs.push(repo);
+    await git('init', '-q', '-b', 'main');
+    await git('config', 'user.email', 'test@example.invalid');
+    await git('config', 'user.name', 'dep guard test');
+    await git('config', 'commit.gpgsign', 'false');
+    await write('package.json', manifestJson({}));
+    await write('package-lock.json', lockJson({}));
+    await write('.dep-guard.json', JSON.stringify({ failOn: 'medium' }));
+    await write('elsewhere.npmrc', PRIVATE_PIN);
+    await symlink('elsewhere.npmrc', path.join(repo, '.npmrc'));
+    await commitAll('base state whose npmrc is a link');
+    await git('checkout', '-q', '-b', 'feature');
+    await addPublicScopedDependency();
+    await commitAll('add the dependency');
+
+    await expect(scanPullRequest()).rejects.toMatchObject({
+      code: 'npmrc-invalid',
+      message: expect.stringContaining('Nothing was checked'),
+    });
+    // The message has to say whose problem it is. This one sits on the
+    // protected base branch, so it is a misconfiguration to go and fix,
+    // not a pull request to reject.
+    await expect(scanPullRequest()).rejects.toMatchObject({
+      message: expect.stringContaining('on the base branch'),
+    });
+  });
+
   test('an npmrc the head turned into a symlink is reported', async () => {
     await makePinnedBase();
     await addPublicScopedDependency();

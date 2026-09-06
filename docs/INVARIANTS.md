@@ -1802,10 +1802,19 @@ dependency it is introducing makes the existence check skip that name. The
 fix is not simply to read the set from the base: a pull request that
 legitimately adds a workspace package would then have its own new package
 reported as an unknown dependency, which is a false positive on an
-extremely ordinary change. Mitigating factor, and the reason this is not
-urgent: the attack requires committing a whole package directory and
-manifest under the chosen name, which is far more visible in a diff than
-deleting a file.
+extremely ordinary change; a union of both sides is probably the right
+shape, and that is a design decision rather than a patch.
+
+There is no mitigating factor, and an earlier draft of this entry claimed
+one. It said the attack required committing a whole package directory and
+manifest under the chosen name, and that is false: `lockfiles/npm.ts` adds
+the name to `workspaceLocalNames` from a lockfile entry carrying
+`"link": true` and nothing else, and no code reads the directory to confirm
+it exists. So the cost is three lines inside `package-lock.json`, in the
+very file the pull request is already rewriting to add the dependency. That
+makes this QUIETER than the `.npmrc` hole, not louder: no separate file is
+touched, and the report affirms that no control input was proposed while
+the finding is gone.
 
 **Workspace globs are read from the head**, in `package.json`'s
 `workspaces` and in `pnpm-workspace.yaml`. These decide which manifests are

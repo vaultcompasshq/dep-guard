@@ -109,6 +109,16 @@ ref and the head tree is the thing judged.**
   reason, so a link is compared as its target text rather than as the
   linked file's contents. The four variants reported are symlink, not a
   regular file, removed, and a changed file mode.
+- **A base-side control input that is not a regular file is refused**, exit
+  2, and that includes `.npmrc`. Reading a linked `.npmrc` leniently looked
+  safe because `parseNpmrcPins` cannot fail, but not throwing is not the
+  same as failing safe: the pin-mismatch rule fires only for a scope that
+  HAS a pin, so an empty pin set turns the rule off for every scope at
+  once. The same head that exited 1 against a readable base `.npmrc` exited
+  0 against a linked one, and the report blamed the head for a pin the base
+  was still holding through the link. The message names it as a
+  misconfiguration on the base branch rather than something the pull
+  request did, because that is where the fix goes.
 - **A base config or baseline that does not validate is could-not-run**,
   exit 2, never a fall back to the defaults. The defaults may be looser
   than what the project committed, and a gate that silently loosens itself
