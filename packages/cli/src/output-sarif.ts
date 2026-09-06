@@ -66,6 +66,21 @@ export const SARIF_RULE_NAMESPACE = 'dep-guard';
 // of different things.
 export const SARIF_FINGERPRINT_KEY = 'dep-guard/v1';
 
+// The notification descriptor id every pull-request-mode proposal carries.
+//
+// A proposal is NOT a result and must never become one. A SARIF result is
+// a statement about the code under judgment; "this pull request also
+// proposes to add an allow entry" is a statement about the RUN, and
+// promoting it to a result would invent a finding for something no rule
+// found and would give a code-scanning consumer an alert with no code
+// behind it. SARIF has a place for exactly this kind of statement --
+// invocations[].toolExecutionNotifications -- and putting it there keeps
+// the results array meaning one thing. The same reasoning already keeps
+// diagnostics out of the results array (docs/INVARIANTS.md, "Diagnostics
+// never change the exit code"); a proposal is the same kind of statement
+// and gets the same treatment.
+export const SARIF_TRUST_BASE_NOTIFICATION_ID = 'dep-guard/trust-base-proposal';
+
 const SARIF_SCHEMA =
   'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json';
 
@@ -184,6 +199,10 @@ export function renderSarif(result: ScanResult, version: string): string {
     (diagnostic) => diagnostic.code === CHECK_SINGLE_DIAGNOSTIC_CODE
   );
 
+  // Read once so the notification text below cannot narrow differently
+  // from the guard that decides whether to emit the block at all.
+  const trustBaseRef = result.trustBase?.ref ?? '';
+
   const rules = (Object.keys(RULE_DESCRIPTIONS) as RuleId[]).map((ruleId) => ({
     id: `${SARIF_RULE_NAMESPACE}/${ruleId}`,
     name: ruleId,
@@ -211,6 +230,31 @@ export function renderSarif(result: ScanResult, version: string): string {
           allowed: result.allowed,
           allowedNames: result.allowedNames,
         },
+        // One notification per proposed control-input change, and the key
+        // is absent entirely outside pull-request mode so a scan without
+        // --trust-base renders the same bytes it always did.
+        //
+        // executionSuccessful is true because it describes whether the
+        // TOOL ran, not whether it found anything: a run that reports
+        // blocking findings still executed successfully. The two exit-2
+        // cases where dep-guard genuinely could not run never reach this
+        // renderer at all -- they throw before a ScanResult exists.
+        ...(result.trustBase === undefined || result.trustBase.proposals.length === 0
+          ? {}
+          : {
+              invocations: [
+                {
+                  executionSuccessful: true,
+                  toolExecutionNotifications: result.trustBase.proposals.map((proposal) => ({
+                    descriptor: { id: SARIF_TRUST_BASE_NOTIFICATION_ID },
+                    level: 'note',
+                    message: {
+                      text: `${proposal} (control inputs read from ${trustBaseRef})`,
+                    },
+                  })),
+                },
+              ],
+            }),
         results: result.findings.map((finding) =>
           toResult(finding, result.run.failOn, syntheticAnchor)
         ),

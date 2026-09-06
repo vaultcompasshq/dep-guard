@@ -117,9 +117,21 @@ function parseFormat(value: string): OutputFormat {
   return value as OutputFormat;
 }
 
+// Declared once for the two commands that take it, so the two can never
+// describe the same switch differently. The sentence has to carry the one
+// distinction users get wrong: --trust-base is not --base. --base decides
+// WHAT changed; --trust-base decides by WHOSE RULES the change is judged.
+// They commonly name the same ref in CI, and neither ever implies the
+// other.
+const TRUST_BASE_FLAG_DESCRIPTION =
+  'pull-request mode: read .dep-guard.json and the baseline from this git ref instead of ' +
+  'from the tree being judged, reporting any head-side change to them as a proposal. ' +
+  'Not the same as --base, which only decides what the change is compared against';
+
 interface ScanCliOptions {
   staged?: boolean;
   base?: string;
+  trustBase?: string;
   format: string;
   failOn?: string;
   corpusDir?: string;
@@ -131,6 +143,7 @@ interface CheckCliOptions {
   failOn?: string;
   corpusDir?: string;
   online?: boolean;
+  trustBase?: string;
 }
 
 interface InitCliOptions {
@@ -237,6 +250,7 @@ function buildProgram(): Command {
     .argument('[path]', 'repository or directory to scan', '.')
     .option('--staged', 'compare the git index against HEAD')
     .option('--base <ref>', 'compare the working tree against a git ref')
+    .option('--trust-base <ref>', TRUST_BASE_FLAG_DESCRIPTION)
     .option('--format <format>', 'output format: text, json, or sarif', 'text')
     .option(
       '--fail-on <level>',
@@ -257,6 +271,7 @@ function buildProgram(): Command {
           corpusDir: options.corpusDir,
           failOn,
           online: options.online,
+          trustBase: options.trustBase,
         });
         emit(result, format);
         process.exitCode = result.exitCode;
@@ -269,6 +284,7 @@ function buildProgram(): Command {
     .command('check')
     .description('Check whether a single package name is safe to add')
     .argument('<name>', 'package name to check')
+    .option('--trust-base <ref>', TRUST_BASE_FLAG_DESCRIPTION)
     .option('--format <format>', 'output format: text, json, or sarif', 'text')
     .option(
       '--fail-on <level>',
@@ -288,6 +304,7 @@ function buildProgram(): Command {
           corpusDir: options.corpusDir,
           failOn,
           online: options.online,
+          trustBase: options.trustBase,
         });
         emit(result, format);
         process.exitCode = result.exitCode;
