@@ -308,16 +308,31 @@ The composite action passes the flag for you on a `pull_request` event, and
 on no other event, using `origin/$GITHUB_BASE_REF`. The only thing your
 workflow has to do is give `actions/checkout` `fetch-depth: 0`, because the
 base branch has to be present to be read. Set `trust-base` to a ref to
-override the default, or to `off` to opt out.
+point pull-request mode at a different base.
+
+There is deliberately **no value that turns pull-request mode off**, and
+`trust-base: off` is refused with an error rather than quietly ignored. An
+opt-out input would be settable by the pull request itself, for exactly the
+reason in the next section: on a same-repository `pull_request` event the
+workflow file runs from the pull request's own head. A knob the untrusted
+side can turn is not a boundary, so base-ref judging is the floor rather
+than a setting. If you need the old behaviour while you arrange
+`fetch-depth: 0`, stay pinned to `@v0.5.0` until you have arranged it.
 
 ### Protecting the workflow file itself
 
 One thing pull-request mode cannot do for you. On a **same-repository**
 `pull_request` event the workflow file runs from the pull request's own
 head, so a pull request can edit the workflow that runs the gate: delete
-the step, pass `trust-base: off`, or drop `fetch-depth: 0`. Reading the
-control inputs from the base ref does not help, because by then the gate
-was never invoked.
+the step, pin the action back to a version that had no pull-request mode,
+or drop `fetch-depth: 0`. Reading the control inputs from the base ref does
+not help against any of those, because by then the gate was either never
+invoked or never reached its own inputs.
+
+This is also the reason `trust-base` has no opt-out value. A workflow-level
+switch is reachable by a pull request on this event, so shipping one would
+have handed the attack a supported spelling instead of making it edit the
+workflow in ways a reviewer and a required check will notice.
 
 Close that in branch protection, not in this repository's files: make the
 dep-guard job a **required status check** on the protected branch, so a

@@ -235,13 +235,66 @@ describe('action.yml "Run dep-guard", under GitHub bash flags', () => {
     // origin/ prefix is part of what this asserts.
     expect(invoke({ GITHUB_BASE_REF: 'main' })).toContain('--trust-base origin/main');
 
-    // An explicit input wins over the event default.
+    // An explicit input REDIRECTS pull-request mode; it never disables it.
+    // There is no value that disables it, which the validate step enforces
+    // and the describe block below pins.
     expect(
       invoke({ GITHUB_BASE_REF: 'main', DG_TRUST_BASE: 'origin/release' })
     ).toContain('--trust-base origin/release');
+  });
+});
 
-    // And `off` opts out even on a pull_request event.
-    expect(invoke({ GITHUB_BASE_REF: 'main', DG_TRUST_BASE: 'off' })).not.toContain('--trust-base');
+// Runs the REAL "Validate inputs" step rather than a copy of its logic,
+// for the same reason the run-step tests above do: a private copy would
+// keep passing long after action.yml had drifted away from it.
+describe('action.yml "Validate inputs", trust-base', () => {
+  function runValidate(trustBase) {
+    const workspace = mkdtempSync(path.join(tmpdir(), 'depguard-action-validate-'));
+    const scriptFile = path.join(workspace, 'validate.sh');
+    writeFileSync(scriptFile, extractRunScript('Validate inputs'));
+    try {
+      execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', scriptFile], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          PATH: process.env.PATH ?? '',
+          DG_VERSION: 'latest',
+          DG_PATH: '.',
+          DG_ONLINE: 'false',
+          DG_FAIL_ON: '',
+          DG_SARIF_OUTPUT: 'dep-guard-results.sarif',
+          DG_UPLOAD: 'true',
+          DG_TRUST_BASE: trustBase,
+        },
+      });
+      return { status: 0, stdout: '' };
+    } catch (err) {
+      return { status: typeof err.status === 'number' ? err.status : -1, stdout: err.stdout ?? '' };
+    }
+  }
+
+  test('refuses `off`, naming what to do instead', () => {
+    // Pull-request mode is the floor, not a knob. On a same-repository
+    // pull_request event the workflow file runs from the pull request's
+    // own head, so an opt-out input would be settable by the very pull
+    // request whose control inputs it governs. An earlier draft of this
+    // action accepted `off`; this test is what stops it coming back.
+    const run = runValidate('off');
+    expect(run.status).not.toBe(0);
+    expect(run.stdout).toContain('`trust-base: off` is not supported');
+    // A refusal with no alternative in it is a wall, so the message has to
+    // carry both halves of the answer.
+    expect(run.stdout).toContain('@v0.5.0');
+    expect(run.stdout).toContain('fetch-depth: 0');
+  });
+
+  test('accepts an empty value and a real ref', () => {
+    expect(runValidate('').status).toBe(0);
+    expect(runValidate('origin/main').status).toBe(0);
+  });
+
+  test('refuses a ref that could be read as a git option', () => {
+    expect(runValidate('--upload-pack=touch').status).not.toBe(0);
   });
 });
 

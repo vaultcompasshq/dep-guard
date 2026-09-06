@@ -44,8 +44,14 @@ ref and the head tree is the thing judged.**
   no code behind it.
 - **A `trust-base` input on the composite Action**, which passes
   `origin/$GITHUB_BASE_REF` by itself on a `pull_request` event and on no
-  other event. Set it to a ref to override, or to `off` to opt out. A
-  pull-request run needs `actions/checkout` with `fetch-depth: 0`.
+  other event. Set it to a ref to point pull-request mode at a different
+  base. A pull-request run needs `actions/checkout` with `fetch-depth: 0`.
+  There is deliberately no value that turns pull-request mode off, and
+  `off` is refused with an error naming the alternative: an opt-out input
+  would be settable by the pull request itself, because on a
+  same-repository `pull_request` event the workflow file runs from the
+  pull request's own head. A repository that needs pre-0.6.0 behaviour
+  while it arranges `fetch-depth: 0` should stay pinned to `@v0.5.0`.
 
 ### Security
 

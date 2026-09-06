@@ -49,8 +49,17 @@ inputs:
       Left at the default, this is decided by the event: on a
       `pull_request` event the action passes `origin/$GITHUB_BASE_REF`, and
       on any other event it passes nothing and behaviour is unchanged. Set
-      it to a ref to override that, or to `off` to disable pull-request
-      mode entirely.
+      it to a ref to point pull-request mode at a different base.
+
+      There is deliberately NO value that turns pull-request mode off, and
+      `off` is refused with an error rather than ignored. On a
+      same-repository `pull_request` event the workflow file runs from the
+      pull request's own head, so an opt-out input would be settable by the
+      very pull request whose control inputs it governs, which is the
+      switch this mode exists to take away. Base-ref judging is the floor,
+      not a knob. A repository that needs the old behaviour while it
+      arranges `fetch-depth: 0` should stay pinned to `@v0.5.0` until it
+      has arranged it.
 
       A pull_request run using this REQUIRES `actions/checkout` with
       `fetch-depth: 0`, so the base branch is present to read. Without it
@@ -179,17 +188,36 @@ runs:
         validate_path "path" "${DG_PATH}"
         validate_path "sarif-output" "${DG_SARIF_OUTPUT}"
 
+        # There is no opt-out value, and `off` is refused BY NAME rather
+        # than left to fail the charset check with a confusing message.
+        #
+        # An earlier draft of this action accepted `off` to disable
+        # pull-request mode. That was wrong, and the reason is the same
+        # reason the mode exists: on a same-repository `pull_request` event
+        # the workflow file runs from the pull request's own head, so the
+        # pull request whose config and baseline are being held at arm's
+        # length could add `trust-base: off` to the workflow in the very
+        # commit being judged, and the boundary would be back to being a
+        # setting the untrusted side controls. Base-ref judging is the
+        # floor, not a knob. Refusing loudly, with the alternative in the
+        # message, is what keeps someone from quietly re-adding it.
+        if [[ "${DG_TRUST_BASE}" == "off" ]]; then
+          printf '::error::dep-guard: `trust-base: off` is not supported. Pull-request mode is not optional: on a same-repository pull_request event the workflow file runs from the pull request head, so an opt-out input would be settable by the pull request it governs.\n'
+          printf '::error::To keep pre-0.6.0 behaviour while you add `fetch-depth: 0` to actions/checkout, pin this action to @v0.5.0.\n'
+          exit 1
+        fi
+
         # trust-base is a git ref, not a path, but the same charset serves:
         # a ref is letters, digits, dots, dashes, underscores and slashes.
-        # Empty means "decide from the event" and `off` means "do not pass
-        # the flag", so neither is validated as a ref.
+        # Empty means "decide from the event", so it is not validated as a
+        # ref.
         #
         # The leading-dash check is the one that is not about paths. A ref
         # beginning with `-` would be read as an OPTION by whichever git
         # command dep-guard hands it to, which is why core screens it too;
         # this catches it a layer earlier, where the message can name the
         # workflow input that produced it.
-        if [[ -n "${DG_TRUST_BASE}" && "${DG_TRUST_BASE}" != "off" ]]; then
+        if [[ -n "${DG_TRUST_BASE}" ]]; then
           validate_path "trust-base" "${DG_TRUST_BASE}"
           if [[ "${DG_TRUST_BASE}" == -* ]]; then
             printf '::error::dep-guard: `trust-base` must not begin with a dash: %q\n' "${DG_TRUST_BASE}"
@@ -255,12 +283,12 @@ runs:
         # but for the wrong reason and with a message about fetching that
         # the user has already done.
         #
-        # A literal `off` turns this off for a repository that has a reason
-        # to want the old behaviour; empty on a non-pull_request event
-        # simply passes nothing, so push and schedule runs are unchanged.
-        if [[ "${DG_TRUST_BASE}" == "off" ]]; then
-          :
-        elif [[ -n "${DG_TRUST_BASE}" ]]; then
+        # There is no opt-out branch here on purpose: an explicit ref
+        # REDIRECTS pull-request mode, it never disables it, and the
+        # validate step refuses `off` before this line is reached. Empty on
+        # a non-pull_request event simply passes nothing, so push and
+        # schedule runs are unchanged.
+        if [[ -n "${DG_TRUST_BASE}" ]]; then
           ARGS+=(--trust-base "${DG_TRUST_BASE}")
         elif [[ -n "${GITHUB_BASE_REF:-}" ]]; then
           ARGS+=(--trust-base "origin/${GITHUB_BASE_REF}")
