@@ -48,6 +48,7 @@ function makeContext(config: ResolvedConfig = makeConfig()): CheckContext {
     },
     npmrcRegistryPins: new Map(),
     diagnostics: [] as Diagnostic[],
+    allowed: [] as string[],
   };
 }
 

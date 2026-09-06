@@ -24,7 +24,34 @@
 // package.json key or an npm: alias target, so nothing here indexes an
 // object with that name.
 
+import type { CheckContext } from './types.js';
+
 const SCOPE_SUFFIX = '/*';
+
+/**
+ * True when `name` is covered by one of the configured allow entries, and --
+ * when it is -- records `name` in the context's `allowed` sink so the
+ * clearance leaves a trace in the report.
+ *
+ * Every check that would otherwise emit a finding calls THIS at the drop
+ * site rather than `isAllowed` directly, so the recording cannot drift out
+ * of step with the dropping: a future check that silences a package via
+ * allow records it for free by using this function. The behaviour is
+ * otherwise identical to `isAllowed` -- the finding is still dropped -- so
+ * which rules `allow` covers is unchanged; the only addition is the record.
+ * Callers that need the pure predicate (a non-dropping test) still use
+ * `isAllowed`.
+ *
+ * A name is recorded once per drop site; scan() de-duplicates across checks,
+ * so a package cleared from several checks counts as one name cleared.
+ */
+export function allowClears(ctx: CheckContext, name: string): boolean {
+  if (isAllowed(name, ctx.config.allow)) {
+    ctx.allowed.push(name);
+    return true;
+  }
+  return false;
+}
 
 /**
  * True when `name` is covered by one of the configured allow entries.

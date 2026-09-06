@@ -62,6 +62,18 @@ export interface ScanResult {
   findings: Finding[]; // baseline-suppressed and ignorePaths-dropped findings excluded
   suppressed: number; // count removed by the baseline, specifically (not ignorePaths)
   ignored: number; // count removed by config.ignorePaths, specifically (not the baseline)
+  // Distinct package names an `allow` entry cleared from the checks this
+  // scan, and their count. A separate field rather than folded into
+  // `suppressed` on purpose: `suppressed` means the baseline specifically,
+  // and the stability policy freezes an existing JSON field's meaning, so
+  // broadening it would be a breaking change; a new additive field is the
+  // minor-safe path and keeps the three user decisions (baseline,
+  // ignorePaths, allow) as three distinct numbers. `allowed` always equals
+  // `allowedNames.length`; both are present even at zero, like the two
+  // counts above, because an allow entry is the user's earlier decision and
+  // leaving it silent is the footgun this field closes.
+  allowed: number;
+  allowedNames: string[]; // sorted, de-duplicated across checks
   run: {
     mode: 'staged' | 'base' | 'audit';
     failOn: FailOn;
@@ -170,7 +182,7 @@ function runChecks(
   delta: DependencyDelta,
   npmrcRegistryPins: Map<string, string>
 ): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
-  const ctx: CheckContext = { corpus, config, delta, npmrcRegistryPins, diagnostics: [] };
+  const ctx: CheckContext = { corpus, config, delta, npmrcRegistryPins, diagnostics: [], allowed: [] };
   const findings: Omit<Finding, 'fingerprint'>[] = [];
   for (const check of CHECKS) {
     findings.push(...check(ctx));
@@ -497,13 +509,28 @@ function skipPathFilters(rawFindings: Omit<Finding, 'fingerprint'>[]): Finding[]
   return rawFindings.map((raw) => ({ ...raw, fingerprint: fingerprintFinding(raw) }));
 }
 
-function buildResult(findings: Finding[], suppressed: number, ignored: number, config: ResolvedConfig, info: RunInfo): ScanResult {
+// allowedNames is the raw list of names checks recorded via allowClears
+// (one push per drop site); it is de-duplicated and sorted here so the
+// result carries distinct cleared names in a stable order, and `allowed` is
+// their count. Done in one place so every ScanResult -- scan() and
+// checkSingle() alike -- reports the two the same way.
+function buildResult(
+  findings: Finding[],
+  suppressed: number,
+  ignored: number,
+  allowedNames: string[],
+  config: ResolvedConfig,
+  info: RunInfo
+): ScanResult {
   const { blockingMatches, exitCode } = evaluateGate(findings, config.failOn);
+  const distinctAllowed = [...new Set(allowedNames)].sort();
 
   return {
     findings,
     suppressed,
     ignored,
+    allowed: distinctAllowed.length,
+    allowedNames: distinctAllowed,
     run: {
       mode: info.mode,
       failOn: config.failOn,
@@ -567,7 +594,7 @@ export async function scan(opts: {
   const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
   const { findings, suppressed, ignored } = applyPathFilters(rawFindings, config, baseline, diagnostics);
 
-  return buildResult(findings, suppressed, ignored, config, {
+  return buildResult(findings, suppressed, ignored, ctx.allowed, config, {
     mode: statePair.mode.kind,
     lockfileFormat: delta.lockfileFormat,
     corpusBuiltAt: corpus.builtAt,
@@ -696,7 +723,7 @@ export async function checkSingle(opts: {
 
   const findings = skipPathFilters(rawFindings);
 
-  return buildResult(findings, 0, 0, config, {
+  return buildResult(findings, 0, 0, ctx.allowed, config, {
     mode: 'audit',
     lockfileFormat: delta.lockfileFormat,
     corpusBuiltAt: corpus.builtAt,

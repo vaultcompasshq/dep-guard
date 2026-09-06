@@ -25,6 +25,8 @@ function scanResult(findings: Finding[], overrides: Partial<ScanResult['run']> =
     findings,
     suppressed: 0,
     ignored: 0,
+    allowed: 0,
+    allowedNames: [],
     run: {
       mode: 'staged',
       failOn: 'medium',
@@ -45,6 +47,7 @@ function parse(result: ScanResult, version = '0.2.0') {
     $schema: string;
     runs: Array<{
       tool: { driver: { name: string; version: string; rules: Array<{ id: string; shortDescription: { text: string } }> } };
+      properties: { suppressed: number; ignored: number; allowed: number; allowedNames: string[] };
       results: Array<{
         ruleId: string;
         level: string;
@@ -81,6 +84,35 @@ describe('renderSarif: the envelope', () => {
     const sarif = parse(scanResult([]));
     expect(sarif.runs[0].results).toEqual([]);
     expect(sarif.runs[0].tool.driver.rules.length).toBeGreaterThan(0);
+  });
+
+  // The suppression counts live on the run because a SARIF result is only
+  // ever an emitted finding: a name cleared by an allow entry has no result
+  // to attach to, so without these run-level properties it would leave no
+  // trace in the SARIF report at all.
+  test('the run carries the suppression counts, allowed among them, with the cleared names', () => {
+    // scanResult's override argument targets the run block, so the
+    // top-level counts are set by spreading over the returned result.
+    const withCounts = parse({
+      ...scanResult([]),
+      suppressed: 2,
+      ignored: 3,
+      allowed: 1,
+      allowedNames: ['@acme/thing'],
+    });
+    expect(withCounts.runs[0].properties).toEqual({
+      suppressed: 2,
+      ignored: 3,
+      allowed: 1,
+      allowedNames: ['@acme/thing'],
+    });
+    // Present even at zero, like the text and JSON reports.
+    expect(parse(scanResult([])).runs[0].properties).toEqual({
+      suppressed: 0,
+      ignored: 0,
+      allowed: 0,
+      allowedNames: [],
+    });
   });
 
   test('every rule id is declared with a short description, and results point at declared rules', () => {

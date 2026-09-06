@@ -46,6 +46,8 @@
   ],
   "suppressed": 0,
   "ignored": 0,
+  "allowed": 0,
+  "allowedNames": [],
   "run": {
     "mode": "base",
     "failOn": "medium",

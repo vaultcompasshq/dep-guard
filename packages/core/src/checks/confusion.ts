@@ -1,5 +1,5 @@
 import type { Finding } from '../types.js';
-import { isAllowed, isInternalName } from './allow.js';
+import { allowClears, isInternalName } from './allow.js';
 import type { Check, CheckContext } from './types.js';
 
 // Dependency confusion: a scoped package resolving from somewhere other
@@ -203,7 +203,7 @@ export const confusionCheck: Check = (ctx) => {
       continue;
     }
     const { registryName } = change;
-    if (isAllowed(registryName, config.allow)) {
+    if (allowClears(ctx, registryName)) {
       continue;
     }
     // Rule 2's admission (below) mirrors candidates.ts: an added
@@ -255,7 +255,7 @@ export const confusionCheck: Check = (ctx) => {
   // The dedupe in report() collapses the two views of a declared
   // dependency, exactly as it does in tamper.ts.
   for (const entryChange of delta.lockEntryChanges) {
-    if (isAllowed(entryChange.packageName, config.allow)) {
+    if (allowClears(ctx, entryChange.packageName)) {
       continue;
     }
     const mismatch = pinMismatch(ctx, entryChange.packageName, entryChange.after.resolvedUrl, '');

@@ -779,6 +779,44 @@ the checks for every string literal assigned to a diagnostic's `code`)
 whenever a code is added, rather than trusted as current because it is
 checked in.
 
+## A suppressed decision is reported, allow among them, and every count prints even at zero
+
+The three ways a user tells the gate to stand a finding down are the
+baseline, `ignorePaths`, and an `allow` entry, and each is the user's own
+earlier decision rather than the engine's silence. A report that omitted
+them would be byte-identical to a scan that found nothing, which is the
+exact footgun the separate `suppressed` and `ignored` counts already
+close: `suppressed` is the baseline's specifically, `ignored` is
+`ignorePaths`'s specifically, and collapsing either into the other re-hides
+what it hid. `allowed` is the third of that family and obeys the same rule.
+All three are printed even at zero -- in the text summary line, in the JSON
+result object, and (a SARIF result being only ever an emitted finding, so a
+cleared name has no result to attach to) on the SARIF run's `properties` --
+because a decision that only shows up when it happens to be non-zero is a
+decision a reader cannot audit for.
+
+`allowed` counts distinct package NAMES an `allow` entry cleared this scan,
+not the number of rules that would have fired for them: an allowed package
+that trips several checks is one decision the user made, and `allowedNames`
+carries those names so the count is attributable rather than a bare number.
+The count is a new report field rather than folded into `suppressed`
+on purpose -- the stability policy freezes an existing JSON field's
+meaning, so widening `suppressed` to also mean "or allow" would be a
+breaking change, while a new additive field is the minor-safe path and
+keeps the three decisions three distinct numbers.
+
+The recording is done at the drop site, by `allowClears` in `checks/allow.ts`,
+which every check calls in place of the bare `isAllowed` predicate wherever
+it would otherwise silence a would-be finding. Recording where the drop
+already happens is what keeps the count honest: it cannot report a
+clearance that did not occur, and it cannot broaden which rules `allow`
+covers, because it changes nothing about the dropping -- `lockfile-tamper`
+is still not subject to `allow` for the reason `checks/allow.ts` states,
+and a rule that does not consult `allow` still records nothing. A future
+check that silences a package by `allow` records it for free by using
+`allowClears`; one that reaches for `isAllowed` directly at a drop site is
+the bug this centralisation exists to prevent.
+
 ## Failing closed, and the error codes that do it
 
 Anything the engine cannot parse or trust stops the scan with a

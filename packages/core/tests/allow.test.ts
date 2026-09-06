@@ -1,4 +1,12 @@
-import { isAllowed, isInternalName } from '../src/checks/allow.js';
+import { allowClears, isAllowed, isInternalName } from '../src/checks/allow.js';
+import type { CheckContext } from '../src/checks/types.js';
+
+// allowClears reads only ctx.config.allow and writes only ctx.allowed, so a
+// unit test needs just those two fields; the rest of the context is not
+// touched and is cast away rather than stubbed out.
+function stubCtx(allow: string[]): CheckContext {
+  return { config: { allow }, allowed: [] } as unknown as CheckContext;
+}
 
 // allow.ts is the shared matcher every check defers to for allow-list and
 // internal-scope decisions. It has no dedicated caller test file elsewhere
@@ -40,6 +48,26 @@ describe('isAllowed', () => {
 
   test('a plain entry that does not start with @ is never treated as a scope', () => {
     expect(isAllowed('left-pad', ['left*'])).toBe(false);
+  });
+});
+
+describe('allowClears', () => {
+  test('returns true and records the name when an allow entry covers it', () => {
+    const ctx = stubCtx(['left-pad']);
+    expect(allowClears(ctx, 'left-pad')).toBe(true);
+    expect(ctx.allowed).toEqual(['left-pad']);
+  });
+
+  test('returns false and records nothing when no allow entry covers it', () => {
+    const ctx = stubCtx(['left-pad']);
+    expect(allowClears(ctx, 'right-pad')).toBe(false);
+    expect(ctx.allowed).toEqual([]);
+  });
+
+  test('records the concrete name a scope pattern cleared', () => {
+    const ctx = stubCtx(['@acme/*']);
+    expect(allowClears(ctx, '@acme/widgets')).toBe(true);
+    expect(ctx.allowed).toEqual(['@acme/widgets']);
   });
 });
 

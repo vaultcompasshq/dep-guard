@@ -2,7 +2,7 @@ import type { DepChange } from '../delta.js';
 import { versionRangeOf } from '../delta.js';
 import type { DepType } from '../manifest.js';
 import type { Finding, Severity } from '../types.js';
-import { isAllowed } from './allow.js';
+import { allowClears } from './allow.js';
 import type { Check } from './types.js';
 
 // Version-range hygiene: a specifier that pins nothing at all. "*",
@@ -113,7 +113,7 @@ function rangeToJudge(change: DepChange): string | null {
 }
 
 export const hygieneCheck: Check = (ctx) => {
-  const { delta, config } = ctx;
+  const { delta } = ctx;
   const findings: Omit<Finding, 'fingerprint'>[] = [];
   // A registry name can reach this loop more than once: two aliases
   // retargeting the same package, or the same name declared in both
@@ -135,7 +135,7 @@ export const hygieneCheck: Check = (ctx) => {
     if (declaredSeverity === null) {
       continue;
     }
-    if (isAllowed(change.registryName, config.allow)) {
+    if (allowClears(ctx, change.registryName)) {
       continue;
     }
     const severity = isTypeOnlyPackage(change.registryName) ? 'low' : declaredSeverity;

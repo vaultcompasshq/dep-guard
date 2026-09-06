@@ -88,6 +88,7 @@ function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckC
     delta,
     npmrcRegistryPins: new Map<string, string>(),
     diagnostics: [] as Diagnostic[],
+    allowed: [] as string[],
   };
 }
 

@@ -1,6 +1,6 @@
 import type { DepChange } from '../delta.js';
 import type { Protocol } from '../manifest.js';
-import { isAllowed } from './allow.js';
+import { allowClears } from './allow.js';
 import type { CheckContext } from './types.js';
 
 // The dependencies the two name-based checks (existence, typosquat) judge,
@@ -85,7 +85,7 @@ export function newRegistryNames(ctx: CheckContext): NewName[] {
       continue;
     }
 
-    if (isAllowed(registryName, ctx.config.allow)) {
+    if (allowClears(ctx, registryName)) {
       continue;
     }
 
