@@ -292,6 +292,180 @@ describe('pull-request mode: a head-side config never takes effect', () => {
   });
 });
 
+describe('pull-request mode: .npmrc scope pins are a control input', () => {
+  // The pins are the entire precondition of the dependency-confusion
+  // pin-mismatch rule: it fires only for a scope that HAS a pin. Read from
+  // the head, that made deleting .npmrc a way to delete the rule.
+  const PINNED_SCOPE = '@sveltejs';
+  const SCOPED_PACKAGE = '@sveltejs/kit';
+  const PRIVATE_PIN = `${PINNED_SCOPE}:registry=https://npm.acme.example.com/\n`;
+
+  async function makePinnedBase(): Promise<void> {
+    repo = await mkdtemp(path.join(tmpdir(), 'dep-guard-trust-'));
+    tempDirs.push(repo);
+    await git('init', '-q', '-b', 'main');
+    await git('config', 'user.email', 'test@example.invalid');
+    await git('config', 'user.name', 'dep guard test');
+    await git('config', 'commit.gpgsign', 'false');
+    await write('package.json', manifestJson({}));
+    await write('package-lock.json', lockJson({}));
+    await write('.dep-guard.json', JSON.stringify({ failOn: 'medium' }));
+    await write('.npmrc', PRIVATE_PIN);
+    await commitAll('base state with a scope pinned to a private registry');
+    await git('checkout', '-q', '-b', 'feature');
+  }
+
+  // The scoped package resolves from the PUBLIC registry while the base
+  // pins its scope elsewhere, which is the pin-mismatch signature.
+  async function addPublicScopedDependency(): Promise<void> {
+    await write('package.json', manifestJson({ [SCOPED_PACKAGE]: '1.0.0' }));
+    await write('package-lock.json', lockJson({ [SCOPED_PACKAGE]: '1.0.0' }));
+  }
+
+  test('the pin still applies when the pull request deletes .npmrc', async () => {
+    await makePinnedBase();
+    await addPublicScopedDependency();
+    await rm(path.join(repo, '.npmrc'));
+    await commitAll('add the dependency and delete the npmrc that pinned its scope');
+
+    const result = await scanPullRequest();
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({
+      ruleId: 'dependency-confusion',
+      packageName: SCOPED_PACKAGE,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.trustBase?.npmrcChanged).toBe(true);
+    expect(result.trustBase?.npmrcShapeChange).toBe('removed');
+    expect(result.trustBase?.proposals).toContain(
+      `npmrc changed in this pull request (proposed: unpin ${PINNED_SCOPE})`
+    );
+    expect(result.trustBase?.proposals).toContain('npmrc removed in this pull request');
+  });
+
+  test('a pin the pull request repoints at the public registry is ignored and reported', async () => {
+    await makePinnedBase();
+    await addPublicScopedDependency();
+    await write('.npmrc', `${PINNED_SCOPE}:registry=https://registry.npmjs.org/\n`);
+    await commitAll('add the dependency and repoint its scope at the public registry');
+
+    const result = await scanPullRequest();
+
+    // Judged against the base pin, so the mismatch still stands.
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.ruleId).toBe('dependency-confusion');
+    expect(result.exitCode).toBe(1);
+    expect(result.trustBase?.proposals).toContain(
+      `npmrc changed in this pull request (proposed: repoint ${PINNED_SCOPE})`
+    );
+  });
+
+  test('a pin the pull request adds does not take effect and is reported', async () => {
+    await makeBase();
+    await addUnknownDependency();
+    await write('.npmrc', '@acme:registry=https://npm.acme.example.com/\n');
+    await commitAll('add the dependency and a scope pin the base never had');
+
+    const result = await scanPullRequest();
+
+    expect(result.trustBase?.npmrcChanged).toBe(true);
+    expect(result.trustBase?.proposals).toContain(
+      'npmrc added in this pull request (proposed: pin @acme)'
+    );
+  });
+
+  test('a pull request that changes only a dependency shows no npmrc proposal', async () => {
+    await makePinnedBase();
+    await addPublicScopedDependency();
+    await commitAll('add the dependency and leave the npmrc alone');
+
+    const result = await scanPullRequest();
+
+    // The finding still fires, because the base pin is intact and honoured.
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.ruleId).toBe('dependency-confusion');
+    expect(result.exitCode).toBe(1);
+    // But nothing was proposed, so the report must not cry wolf.
+    expect(result.trustBase?.npmrcChanged).toBe(false);
+    expect(result.trustBase?.npmrcShapeChange).toBeNull();
+    expect(result.trustBase?.proposals).toEqual([]);
+  });
+
+  test('an npmrc edit that touches no scope pin is not reported as a proposal', async () => {
+    await makePinnedBase();
+    await addPublicScopedDependency();
+    // A rotated auth token and a comment. Neither gates any rule, and a
+    // report that flags them is one reviewers learn to skip.
+    await write(
+      '.npmrc',
+      `# a comment\n${PRIVATE_PIN}//npm.acme.example.com/:_authToken=rotated\n`
+    );
+    await commitAll('add the dependency and rotate the auth token');
+
+    const result = await scanPullRequest();
+
+    expect(result.trustBase?.npmrcChanged).toBe(false);
+    expect(result.trustBase?.proposals).toEqual([]);
+  });
+
+  test('an npmrc the head turned into a symlink is reported', async () => {
+    await makePinnedBase();
+    await addPublicScopedDependency();
+    await write('elsewhere.npmrc', PRIVATE_PIN);
+    await rm(path.join(repo, '.npmrc'));
+    await symlink('elsewhere.npmrc', path.join(repo, '.npmrc'));
+    await commitAll('point the npmrc at another file');
+
+    const result = await scanPullRequest();
+
+    expect(result.trustBase?.npmrcShapeChange).toBe('symlink');
+    expect(result.trustBase?.proposals).toContain(
+      'npmrc is a symlink at the head commit, not a regular file'
+    );
+    // The base pin is still what judged the run.
+    expect(result.findings).toHaveLength(1);
+    expect(result.exitCode).toBe(1);
+  });
+});
+
+describe('pull-request mode: what the config parenthetical distinguishes', () => {
+  test('a pull request that only removes entries says so rather than going bare', async () => {
+    await makeBase({ failOn: 'medium', allow: ['one', 'two'], ignorePaths: ['vendor'] });
+    await addUnknownDependency();
+    await write('.dep-guard.json', JSON.stringify({ failOn: 'medium', allow: ['one'] }));
+    await commitAll('tighten the config and add the dependency');
+
+    const result = await scanPullRequest();
+
+    // A tightening is not a warning, but it must be distinguishable from a
+    // change the summary could not describe at all.
+    expect(result.trustBase?.proposals).toEqual([
+      'config changed in this pull request (2 entries removed)',
+    ]);
+    expect(result.findings).toHaveLength(1);
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('a head config that will not parse says so rather than going bare', async () => {
+    await makeBase();
+    await addUnknownDependency();
+    await write('.dep-guard.json', '{ not valid json');
+    await commitAll('add the dependency and break the config');
+
+    const result = await scanPullRequest();
+
+    expect(result.trustBase?.proposals).toEqual([
+      'config changed in this pull request (head config could not be parsed)',
+    ]);
+    // The run used the base config and is otherwise unaffected: a head
+    // config that will not parse must not be able to abort the scan.
+    expect(result.run.failOn).toBe('medium');
+    expect(result.findings).toHaveLength(1);
+    expect(result.exitCode).toBe(1);
+  });
+});
+
 describe('pull-request mode: shape changes', () => {
   test('a config the head turned into a symlink is reported and ignored', async () => {
     await makeBase({ failOn: 'medium' });

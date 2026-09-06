@@ -251,26 +251,39 @@ ref, and the head tree is the thing being judged.**
 
 Without that rule a pull request can turn the gate off in the same commit
 that carries what the gate exists to catch. `.dep-guard.json`,
-`.dep-guard.local.json` and `.dep-guard.baseline.json` all live in the tree
-under judgment, so one commit could add a hallucinated dependency and, in
-the same diff, add its name to `allow`, add its manifest to `ignorePaths`,
-raise `failOn` above the finding's severity, or write the finding's own
-fingerprint into the baseline. Every one of those exits 0 today.
+`.dep-guard.local.json`, `.dep-guard.baseline.json` and `.npmrc` all live
+in the tree under judgment, so one commit could add a hallucinated
+dependency and, in the same diff, add its name to `allow`, add its manifest
+to `ignorePaths`, raise `failOn` above the finding's severity, or write the
+finding's own fingerprint into the baseline. Every one of those exits 0
+today.
+
+`.npmrc` belongs on that list for a reason worth spelling out, because it
+is the one people miss: its scope-to-registry pins are the entire
+precondition of the dependency-confusion pin-mismatch rule, which fires
+only for a scope that *has* a pin. So a pull request that adds
+`@scope/package` resolving from the public registry **and deletes
+`.npmrc`** removes the rule rather than passing it.
 
 ```
 dep-guard scan --base origin/main --trust-base origin/main
 ```
 
-The config and the baseline are read from `<ref>` with `git ls-tree` and
-`git show`. Nothing is checked out, nothing is written into the repository.
-A head-side change to any of them never takes effect for the run and is
-reported instead:
+The config, the baseline and the `.npmrc` pins are read from `<ref>` with
+`git ls-tree` and `git show`. Nothing is checked out, nothing is written
+into the repository. A head-side change to any of them never takes effect
+for the run and is reported instead:
 
 ```
 Pull-request mode: control inputs from origin/main
   config changed in this pull request (proposed: allow some-package)
   baseline changed in this pull request (1 baseline entries added)
+  npmrc changed in this pull request (proposed: unpin @scope)
 ```
+
+Only the scope pins are compared in `.npmrc`, not the file text, so a
+rotated auth token or a changed default registry is not reported as an
+attempt to loosen the gate.
 
 A control input the head carries and the base does not reads `config added
 in this pull request`, and the run uses the defaults rather than the head's
@@ -293,8 +306,8 @@ the base has not moved since the fork, *is* the head branch's tree, so
 input straight back out of the tree under judgment. Pass the base *branch*.
 
 `--format json` gains a `trustBase` block (`ref`, `proposals`,
-`configChanged`, `baselineChanged`, `configShapeChange`,
-`baselineShapeChange`), and SARIF carries each proposal as a
+`configChanged`, `baselineChanged`, `npmrcChanged`, `configShapeChange`,
+`baselineShapeChange`, `npmrcShapeChange`), and SARIF carries each proposal as a
 `toolExecutionNotification` rather than as a result, because a proposal is
 a fact about the run and not a finding about the code.
 
@@ -446,11 +459,12 @@ And `ignorePaths` drops findings before the gate sees them, so a pattern
 broad enough to match everything would switch the tool off; patterns made
 only of wildcards are rejected for that reason.
 
-Every key here, and the baseline file beside it, is a **control input**: it
-decides what dep-guard reports rather than what dep-guard is looking at. On
-a pull-request run they are read from the base ref, not from the branch
-under judgment, so a pull request cannot loosen the gate in the commit the
-gate is weighing. See the pull-request section above.
+Every key here, the baseline file beside it, and the scope pins in
+`.npmrc`, are **control inputs**: they decide what dep-guard reports rather
+than what dep-guard is looking at. On a pull-request run they are read from
+the base ref, not from the branch under judgment, so a pull request cannot
+loosen the gate in the commit the gate is weighing. See the pull-request
+section above.
 
 ## Building a corpus
 

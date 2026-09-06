@@ -196,8 +196,10 @@ describe('dep-guard scan --trust-base', () => {
       proposals: [`config changed in this pull request (proposed: allow ${UNKNOWN_NAME})`],
       configChanged: true,
       baselineChanged: false,
+      npmrcChanged: false,
       configShapeChange: null,
       baselineShapeChange: null,
+      npmrcShapeChange: null,
     });
     expect(result.exitCode).toBe(1);
     expect(run.exitCode).toBe(1);

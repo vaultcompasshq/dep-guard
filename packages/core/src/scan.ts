@@ -63,15 +63,22 @@ const DEFAULT_CORPUS_DIR = path.join(
 // What a pull-request run says about the control inputs it did NOT obey.
 // The umbrella sums `proposals` across its children, so that field is a
 // plain string array with one entry per proposed change and nothing
-// nested; the four flags beside it let a consumer act on the kind of
-// change without parsing the prose.
+// nested; the flags beside it let a consumer act on the kind of change
+// without parsing the prose.
 export interface TrustBaseReport {
   ref: string;
   proposals: string[];
   configChanged: boolean;
   baselineChanged: boolean;
+  // .npmrc is a control input, not a subject: its scope pins are what
+  // decide whether the dependency-confusion pin-mismatch rule has anything
+  // to compare against, so a pull request that deletes .npmrc deletes a
+  // rule. Reported separately from the config because it is a separate
+  // file a reviewer will look for by name.
+  npmrcChanged: boolean;
   configShapeChange: ControlShapeChange | null;
   baselineShapeChange: ControlShapeChange | null;
+  npmrcShapeChange: ControlShapeChange | null;
 }
 
 export interface ScanResult {
@@ -568,8 +575,10 @@ function buildResult(
             proposals: controls.proposals,
             configChanged: controls.configChanged,
             baselineChanged: controls.baselineChanged,
+            npmrcChanged: controls.npmrcChanged,
             configShapeChange: controls.configShapeChange,
             baselineShapeChange: controls.baselineShapeChange,
+            npmrcShapeChange: controls.npmrcShapeChange,
           },
         }),
     run: {
@@ -639,11 +648,22 @@ export async function scan(opts: {
   // outside pull-request mode nothing about this function changes.
   const baseline = controls === null ? loadBaseline(root) : controls.baseline;
 
+  // The scope pins are a CONTROL INPUT, so in pull-request mode they come
+  // from the base ref like the config and the baseline do.
+  //
+  // statePair.after is the tree under judgment, and the pin-mismatch rule
+  // fires only for a scope that HAS a pin, so sourcing the pins from there
+  // meant a pull request could delete .npmrc and delete the rule along
+  // with it. That was live, and it was worse than silent: the run reported
+  // "no control input changed in this pull request" while a control input
+  // had just been removed. loadStates still reads the head-side .npmrc as
+  // it always did; its pins are simply not what the rule is judged
+  // against here.
   const { findings: checkedFindings, ctx } = runChecks(
     corpus,
     config,
     delta,
-    statePair.after.npmrcRegistryPins
+    controls === null ? statePair.after.npmrcRegistryPins : controls.npmrcPins
   );
   const rawFindings = resolveOnline(config, opts.online)
     ? await enrichOnline(checkedFindings, ctx)

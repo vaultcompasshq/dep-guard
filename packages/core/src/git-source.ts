@@ -756,7 +756,14 @@ async function loadLockfile(source: FileSource): Promise<ParsedLockfile | null> 
 
 const ROOT_MANIFEST = 'package.json';
 const WORKSPACE_YAML = 'pnpm-workspace.yaml';
-const NPMRC = '.npmrc';
+// Exported so trust-base.ts reads the same path out of the base ref that
+// loadState reads from the scanned side. .npmrc is a CONTROL INPUT, not a
+// subject: its scope pins are what decides whether the
+// dependency-confusion pin-mismatch rule fires at all, so on a
+// pull-request run it has to come from the base like the config and the
+// baseline do. See docs/INVARIANTS.md, "A control input is not read from
+// the tree being judged".
+export const NPMRC = '.npmrc';
 
 async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise<RepoState> {
   const rootManifestContent = await source.read(ROOT_MANIFEST);

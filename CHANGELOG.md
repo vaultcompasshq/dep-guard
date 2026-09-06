@@ -23,25 +23,27 @@ ref and the head tree is the thing judged.**
 ### Added
 
 - **`--trust-base <ref>` on `scan` and `check`.** Pull-request mode.
-  `.dep-guard.json`, `.dep-guard.local.json` and `.dep-guard.baseline.json`
-  are read from `<ref>` with `git ls-tree` and `git show`, and the head tree
-  is judged against them. A control input the head changed never takes
-  effect for the run and is reported on one line: `config changed in this
-  pull request` or `baseline changed in this pull request`, with a short
-  parenthetical naming what it proposed (`proposed: allow foo`, `failOn
-  loosened to critical`, `2 baseline entries added`). A control input the
-  head carries and the base does not reads `config added in this pull
-  request`, and the run uses the defaults. Reads only: no checkout switch,
-  no worktree, and nothing written into the repository. Fails closed, exit
-  2, when the ref will not resolve; a missing base is never a reason to
-  fall back to trusting the head. Pass it alongside `--base`, which
-  continues to decide only what the change is compared against.
+  `.dep-guard.json`, `.dep-guard.local.json`, `.dep-guard.baseline.json`
+  and `.npmrc` are read from `<ref>` with `git ls-tree` and `git show`, and
+  the head tree is judged against them. A control input the head changed
+  never takes effect for the run and is reported on one line: `config
+  changed in this pull request`, `baseline changed in this pull request`,
+  or `npmrc changed in this pull request`, with a short parenthetical
+  naming what it proposed (`proposed: allow foo`, `failOn loosened to
+  critical`, `2 baseline entries added`, `proposed: unpin @scope`). A
+  control input the head carries and the base does not reads `config added
+  in this pull request`, and the run uses the defaults. Reads only: no
+  checkout switch, no worktree, and nothing written into the repository.
+  Fails closed, exit 2, when the ref will not resolve; a missing base is
+  never a reason to fall back to trusting the head. Pass it alongside
+  `--base`, which continues to decide only what the change is compared
+  against.
 - **A `trustBase` block in the JSON** from `scan` and `check` (`ref`,
-  `proposals`, `configChanged`, `baselineChanged`, `configShapeChange`,
-  `baselineShapeChange`), and one SARIF `toolExecutionNotification` per
-  proposal. A proposal is never a SARIF result: it is a fact about the run,
-  not a finding about the code, and promoting it would invent an alert with
-  no code behind it.
+  `proposals`, `configChanged`, `baselineChanged`, `npmrcChanged`,
+  `configShapeChange`, `baselineShapeChange`, `npmrcShapeChange`), and one
+  SARIF `toolExecutionNotification` per proposal. A proposal is never a
+  SARIF result: it is a fact about the run, not a finding about the code,
+  and promoting it would invent an alert with no code behind it.
 - **A `trust-base` input on the composite Action**, which passes
   `origin/$GITHUB_BASE_REF` by itself on a `pull_request` event and on no
   other event. Set it to a ref to point pull-request mode at a different
@@ -68,6 +70,19 @@ ref and the head tree is the thing judged.**
   `--trust-base`, which is how CI should now invoke the gate on a pull
   request. Local and pre-commit behaviour is unchanged and is pinned by a
   parity test in both packages.
+- **Deleting `.npmrc` deleted a rule.** The scope-to-registry pins in
+  `.npmrc` are the entire precondition of the dependency-confusion
+  pin-mismatch rule, which fires only for a scope that HAS a pin, and they
+  were read from the tree under judgment. So a pull request that added
+  `@scope/package` resolving from the public registry while deleting the
+  `.npmrc` that pinned `@scope` to a private one exited 0, and the report
+  said "no control input changed in this pull request" while a control
+  input had just been removed. `.npmrc` is now read from the base ref like
+  the config and the baseline, and a head-side change to its pins is
+  reported as `npmrc changed in this pull request` with the same four shape
+  variants. Only the scope pins are compared, not the file text, so a
+  rotated auth token or a changed default registry is not reported as an
+  attempt to loosen the gate.
 - **A trust base that resolves to the commit being judged is refused**,
   exit 2, even though it names a real commit. It would put the boundary
   back exactly where it started while the report said pull-request mode was

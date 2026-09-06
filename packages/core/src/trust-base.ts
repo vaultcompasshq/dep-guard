@@ -54,7 +54,8 @@ import { promisify } from 'node:util';
 import { BASELINE_FILE, parseBaseline } from './baseline.js';
 import type { ResolvedConfig } from './checks/types.js';
 import { CONFIG_FILE, LOCAL_CONFIG_FILE, loadConfigFromTexts } from './config.js';
-import { isUsableRef } from './git-source.js';
+import { NPMRC, isUsableRef } from './git-source.js';
+import { parseNpmrcPins } from './state.js';
 import { DepGuardError } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -75,6 +76,23 @@ export const CONFIG_ADDED_LINE = 'config added in this pull request';
 
 /** The same, for the baseline. */
 export const BASELINE_ADDED_LINE = 'baseline added in this pull request';
+
+/**
+ * The one line a report prints when the head proposes a different .npmrc.
+ *
+ * .npmrc earns its place beside the config and the baseline because its
+ * scope pins GATE a rule rather than being judged by one: the
+ * dependency-confusion pin-mismatch rule fires only for a scope that has a
+ * pin, so a pull request that deletes .npmrc deletes the rule. That was
+ * live: a base pinning @scope to a private host, a pull request adding
+ * @scope/pkg from the public registry, exit 1; the same pull request also
+ * deleting .npmrc, exit 0 and a report that said no control input had
+ * changed.
+ */
+export const NPMRC_PROPOSAL_LINE = 'npmrc changed in this pull request';
+
+/** The same, for an .npmrc the head introduces and the base does not carry. */
+export const NPMRC_ADDED_LINE = 'npmrc added in this pull request';
 
 /** How many names a parenthetical spells out before it starts counting. */
 const MAX_NAMED_ENTRIES = 5;
@@ -110,14 +128,24 @@ export interface TrustedControls {
   config: ResolvedConfig;
   /** The base ref's baseline fingerprints, empty when it carries none. */
   baseline: Set<string>;
+  /**
+   * The base ref's .npmrc scope-to-registry pins, empty when it carries
+   * none. These decide whether the dependency-confusion pin-mismatch rule
+   * has anything to compare against, which is why they come from the base.
+   */
+  npmrcPins: Map<string, string>;
   /** True when the head proposes a different config. */
   configChanged: boolean;
   /** True when the head proposes a different baseline. */
   baselineChanged: boolean;
+  /** True when the head proposes different .npmrc scope pins. */
+  npmrcChanged: boolean;
   /** How the head changed the SHAPE of a config file, or null. */
   configShapeChange: ControlShapeChange | null;
   /** The same for the baseline file. */
   baselineShapeChange: ControlShapeChange | null;
+  /** The same for .npmrc. */
+  npmrcShapeChange: ControlShapeChange | null;
   /** One line per control input the head proposes to change. */
   proposals: string[];
 }
@@ -431,19 +459,35 @@ const FAIL_ON_STRICTNESS: Record<string, number> = {
   none: 0,
 };
 
+/** The summary for a head config that would not parse or validate. */
+export const UNPARSEABLE_CONFIG_DETAIL = 'head config could not be parsed';
+
 /**
  * The short parenthetical for a config proposal, or null when nothing
  * cheap can be said.
  *
- * Only ADDITIONS and CHANGES are named. Anything a pull request removes
- * from `allow` or `ignorePaths` makes the gate stricter, and a reviewer
- * does not need a warning line about a pull request tightening the tool.
- * The base config is what the run actually used, so every entry named here
- * is a rule that did NOT apply.
+ * ADDITIONS are named individually, because each one is a rule that did
+ * NOT apply and a reviewer wants to see which. REMOVALS are counted rather
+ * than named: taking an entry out of `allow` or `ignorePaths` makes the
+ * gate stricter, so it needs to be visible but not itemised.
+ *
+ * Counting them at all matters. An earlier version named additions only,
+ * so a pull request that removed entries and added none printed the bare
+ * `config changed in this pull request` with no parenthetical, which is
+ * the same thing a reader saw when the change could not be summarised at
+ * all. Two different facts rendering identically is exactly the ambiguity
+ * this line exists to remove, and the unparseable case below was the other
+ * half of it.
  */
 function describeConfigChange(base: ResolvedConfig, head: ResolvedConfig | null): string | null {
+  // Null means the head config did not parse or did not validate. The run
+  // used the base config regardless, so nothing about the verdict changes
+  // -- but saying so is the difference between "we could not summarise
+  // this" and "there was nothing to summarise", and the first is worth a
+  // reader's attention because a config that will not parse is a config
+  // that will not work once merged either.
   if (head === null) {
-    return null;
+    return UNPARSEABLE_CONFIG_DETAIL;
   }
   const parts: string[] = [];
 
@@ -483,6 +527,80 @@ function describeConfigChange(base: ResolvedConfig, head: ResolvedConfig | null)
     parts.push('extraAliases changed');
   }
 
+  // Removals, counted across the four list keys rather than named. A pull
+  // request that only removes entries is TIGHTENING the gate, which is not
+  // a warning, but it still has to be distinguishable from a change this
+  // function could not describe at all.
+  const removed =
+    addedEntries(head.allow, base.allow).length +
+    addedEntries(head.ignorePaths, base.ignorePaths).length +
+    addedEntries(head.internalScopes, base.internalScopes).length +
+    addedEntries(head.internalPrefixes, base.internalPrefixes).length;
+  if (removed > 0) {
+    parts.push(`${removed} entries removed`);
+  }
+
+  return parts.length === 0 ? null : parts.join('; ');
+}
+
+/**
+ * Whether two .npmrc files differ in the only way that gates a rule.
+ *
+ * The SCOPE PINS are compared, not the file text. An .npmrc carries auth
+ * tokens, a default registry, and any number of unrelated settings beside
+ * its scope pins, and only the scope pins decide whether the pin-mismatch
+ * rule has a pin to compare against. Comparing text would report a rotated
+ * auth token as a proposal to loosen the gate, which is both wrong and the
+ * kind of noise that teaches a reviewer to skip the line.
+ *
+ * This is narrower than the config and baseline comparisons on purpose,
+ * and it is safe in the fail-closed direction for the same reason it is
+ * narrower: everything it ignores is something no rule reads.
+ */
+function pinsDiffer(base: Map<string, string>, head: Map<string, string>): boolean {
+  if (base.size !== head.size) {
+    return true;
+  }
+  for (const [scope, registry] of base) {
+    if (head.get(scope) !== registry) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The short parenthetical for an .npmrc proposal, or null. */
+function describeNpmrcChange(
+  base: Map<string, string>,
+  head: Map<string, string>
+): string | null {
+  const added: string[] = [];
+  const removed: string[] = [];
+  const repointed: string[] = [];
+  for (const scope of head.keys()) {
+    if (!base.has(scope)) {
+      added.push(scope);
+    }
+  }
+  for (const [scope, registry] of base) {
+    if (!head.has(scope)) {
+      removed.push(scope);
+    } else if (head.get(scope) !== registry) {
+      repointed.push(scope);
+    }
+  }
+  const parts: string[] = [];
+  // Removals first: a deleted pin is the one that turns a rule off, and it
+  // is the half a reviewer most needs to see.
+  if (removed.length > 0) {
+    parts.push(`proposed: unpin ${nameList(removed.sort())}`);
+  }
+  if (repointed.length > 0) {
+    parts.push(`proposed: repoint ${nameList(repointed.sort())}`);
+  }
+  if (added.length > 0) {
+    parts.push(`proposed: pin ${nameList(added.sort())}`);
+  }
   return parts.length === 0 ? null : parts.join('; ');
 }
 
@@ -573,15 +691,25 @@ function tryBaseline(text: string | null): Set<string> | null {
 export async function loadTrustedControls(root: string, ref: string): Promise<TrustedControls> {
   await assertTrustBaseUsable(root, ref);
 
-  const [baseConfig, baseLocal, baseBaselineFile, headConfig, headLocal, headBaselineFile] =
-    await Promise.all([
-      readControlFileAtRef(root, ref, CONFIG_FILE),
-      readControlFileAtRef(root, ref, LOCAL_CONFIG_FILE),
-      readControlFileAtRef(root, ref, BASELINE_FILE),
-      readControlFileAtRef(root, 'HEAD', CONFIG_FILE),
-      readControlFileAtRef(root, 'HEAD', LOCAL_CONFIG_FILE),
-      readControlFileAtRef(root, 'HEAD', BASELINE_FILE),
-    ]);
+  const [
+    baseConfig,
+    baseLocal,
+    baseBaselineFile,
+    baseNpmrcFile,
+    headConfig,
+    headLocal,
+    headBaselineFile,
+    headNpmrcFile,
+  ] = await Promise.all([
+    readControlFileAtRef(root, ref, CONFIG_FILE),
+    readControlFileAtRef(root, ref, LOCAL_CONFIG_FILE),
+    readControlFileAtRef(root, ref, BASELINE_FILE),
+    readControlFileAtRef(root, ref, NPMRC),
+    readControlFileAtRef(root, 'HEAD', CONFIG_FILE),
+    readControlFileAtRef(root, 'HEAD', LOCAL_CONFIG_FILE),
+    readControlFileAtRef(root, 'HEAD', BASELINE_FILE),
+    readControlFileAtRef(root, 'HEAD', NPMRC),
+  ]);
 
   // A base-side control input that is not a regular file has no contents
   // worth parsing. Passing a symlink's target text to the JSON parser
@@ -601,6 +729,21 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
       ? new Set<string>()
       : parseBaseline(baseBaselineFile.text, `${ref}:${BASELINE_FILE}`);
 
+  // A base-side .npmrc that is not a regular file is NOT refused, unlike a
+  // config or a baseline that is not one. parseNpmrcPins cannot fail: it
+  // reads the lines it recognises and ignores everything else, so a link's
+  // target text simply yields no pins. Refusing here would turn an odd but
+  // harmless base-side file into a could-not-run for every pull request
+  // against that branch, and the direction of the resulting error is the
+  // safe one anyway: no pins means the pin-mismatch rule stays silent
+  // rather than firing wrongly.
+  const npmrcPins = parseNpmrcPins(
+    baseNpmrcFile !== null && isRegularFileMode(baseNpmrcFile.mode) ? baseNpmrcFile.text : null
+  );
+  const headNpmrcPins = parseNpmrcPins(
+    headNpmrcFile !== null && isRegularFileMode(headNpmrcFile.mode) ? headNpmrcFile.text : null
+  );
+
   // The config input is the PAIR of files, because that is what the
   // overlay makes it. A pull request that leaves .dep-guard.json alone and
   // commits a .dep-guard.local.json is proposing exactly the same kind of
@@ -608,6 +751,7 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
   const configShapeChange =
     shapeChange(baseConfig, headConfig) ?? shapeChange(baseLocal, headLocal);
   const baselineShapeChange = shapeChange(baseBaselineFile, headBaselineFile);
+  const npmrcShapeChange = shapeChange(baseNpmrcFile, headNpmrcFile);
 
   // Content OR shape. A symlink whose target holds the base config's exact
   // bytes has identical content by every measure available to a text
@@ -623,12 +767,20 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
   );
   const baselineChanged = baselineContentChanged || baselineShapeChange !== null;
 
+  // Pins OR shape, the same pairing as the other two. The shape half is
+  // what catches an .npmrc turned into a symlink whose target carries the
+  // base's exact pins: the pin comparison sees no difference at all, and
+  // the link target can be widened later in a diff that never mentions
+  // .npmrc.
+  const npmrcChanged = pinsDiffer(npmrcPins, headNpmrcPins) || npmrcShapeChange !== null;
+
   // "Added" is the first-adoption case: the head carries a control input
   // the base does not. The run uses the defaults (or an empty baseline),
   // and the line says added rather than changed, because there was nothing
   // to change it from.
   const configAdded = baseConfig === null && baseLocal === null && (headConfig !== null || headLocal !== null);
   const baselineAdded = baseBaselineFile === null && headBaselineFile !== null;
+  const npmrcAdded = baseNpmrcFile === null && headNpmrcFile !== null;
 
   const proposals: string[] = [];
   if (configChanged) {
@@ -657,15 +809,28 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
   if (baselineShapeChange !== null) {
     proposals.push(shapeProposal('baseline', baselineShapeChange));
   }
+  if (npmrcChanged) {
+    proposals.push(
+      npmrcAdded
+        ? withDetail(NPMRC_ADDED_LINE, describeNpmrcChange(npmrcPins, headNpmrcPins))
+        : withDetail(NPMRC_PROPOSAL_LINE, describeNpmrcChange(npmrcPins, headNpmrcPins))
+    );
+  }
+  if (npmrcShapeChange !== null) {
+    proposals.push(shapeProposal('npmrc', npmrcShapeChange));
+  }
 
   return {
     ref,
     config,
     baseline,
+    npmrcPins,
     configChanged,
     baselineChanged,
+    npmrcChanged,
     configShapeChange,
     baselineShapeChange,
+    npmrcShapeChange,
     proposals,
   };
 }
