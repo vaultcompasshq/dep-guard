@@ -27,6 +27,16 @@ export const COMPARISON_TAMPER_SIGNALS = [
   'integrity-changed',
   'integrity-downgraded',
   'tarball-repointed',
+  // The hashless sibling of tarball-repointed: a same-origin tarball move
+  // with the version held, where the BEFORE side carried no integrity hash
+  // to verify the move against. tarball-repointed proves a different
+  // artifact from a differing hash; this one cannot, so it is reported at
+  // high rather than critical -- but it is still a same-version repoint on a
+  // host the project trusts, which is a supply-chain signal in its own
+  // right. See checks/tamper.ts for the branch, and docs/INVARIANTS.md,
+  // "What the tamper signals cover", for why it is a distinct signal rather
+  // than an extension of tarball-repointed.
+  'tarball-repointed-unverified',
   'host-changed',
   'scheme-downgrade',
   'local-source-changed',

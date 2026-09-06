@@ -608,6 +608,66 @@ export const tamperCheck: Check = (ctx) => {
           });
         }
       }
+    } else if (
+      before.integrity === undefined &&
+      before.version === after.version &&
+      before.resolvedUrl !== after.resolvedUrl &&
+      sameOriginPair(before, after)
+    ) {
+      // The hashless sibling of tarball-repointed above, and one rung below
+      // it in certainty rather than in kind. That branch requires an
+      // integrity hash on BOTH sides and reads a rewritten one as proof the
+      // bytes differ; this branch is the case where the before side carried
+      // no hash at all, so there is nothing to prove the move against. npm
+      // writes hashless entries for some resolutions, and a partially
+      // hand-edited lockfile has them, so without this the two rules'
+      // blind spots compose exactly as they did for the hashed case: the
+      // integrity branches all require before.integrity, and a same-origin
+      // path move clears host-changed, scheme-downgrade and
+      // local-source-changed alike (same host, same scheme, and for a
+      // hosted URL the path is not part of the origin). The result was that
+      // a held-version repoint to another tarball on a host the project
+      // already trusts, on an entry that never had a hash, scanned clean.
+      //
+      // The version has to be unchanged for the same reason it does above --
+      // an ordinary bump moves the version and the URL together -- and the
+      // move has to be within one origin, because a move to a different
+      // origin is already the more specific host-changed, scheme-downgrade
+      // or local-source-changed finding below, which this else-if leaves to
+      // them.
+      //
+      // High, not critical: unlike tarball-repointed there is no differing
+      // hash asserting the bytes changed, only a URL that moved while the
+      // version stood still and no hash that could have caught it. High
+      // still blocks at the default medium gate, which is the point -- a
+      // same-version repoint on a trusted host is a real supply-chain signal
+      // -- but the severity does not overclaim a certainty the evidence does
+      // not carry, the same honesty the ambiguous-critical escalation keeps.
+      raise({
+        ruleId: 'lockfile-tamper',
+        severity: 'high',
+        packageName: subject.packageName,
+        message: `"${subject.packageName}" still resolves to the same version from origin "${originLabel(after)}" as ${priorSide(subject)}, but from a different tarball on the same host, and ${subject.candidateCount > 1 ? 'none of those earlier entries' : 'the earlier entry'} carried an integrity hash to verify the move.`,
+        manifestPath: subject.manifestPath,
+        details: {
+          // The value-bearing subject is the origin, exactly as
+          // tarball-repointed folds it in: a host cannot move under a
+          // version bump, so it satisfies the fingerprint stability
+          // contract, while the tarball path (which does move) stays out of
+          // the signal and lives in the details below.
+          signal: comparisonSignal('tarball-repointed-unverified', originLabel(after)),
+          kind: subject.kind,
+          // The tarball paths, never the resolved URLs: a URL is where a
+          // credential can appear, and a pathname carries none. The before
+          // path is one candidate's, so it is a fact only when there was a
+          // single candidate -- the same rule tarball-repointed follows for
+          // beforePath.
+          ...(subject.candidateCount > 1
+            ? { counterpartCandidates: subject.candidateCount }
+            : { beforePath: pathLabel(before) }),
+          afterPath: pathLabel(after),
+        },
+      });
     }
 
     if (before.resolvedUrl === undefined || after.resolvedUrl === undefined) {

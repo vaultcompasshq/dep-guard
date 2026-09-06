@@ -398,9 +398,9 @@ exists to catch.
 
 The comparison-derived tamper signals are `integrity-removed`,
 `integrity-changed`, `integrity-downgraded`, `tarball-repointed`,
-`host-changed`, `scheme-downgrade`, `local-source-changed`, and
-`resolution-unreadable`, and they are declared once, in
-`tamper-signals.ts`.
+`tarball-repointed-unverified`, `host-changed`, `scheme-downgrade`,
+`local-source-changed`, and `resolution-unreadable`, and they are declared
+once, in `tamper-signals.ts`.
 
 A diagnostic that describes coverage lost across the board -- audit mode's
 `audit-no-tamper-comparison`, the delta's `delta-new-lock-entries` -- names
@@ -411,14 +411,14 @@ both of those messages carried their own copy of the list, both copies were
 written when there were six signals, and neither learned about
 `tarball-repointed` or `resolution-unreadable` when those were added to the
 check. Both messages are now built from the one declaration, and every
-comparison-derived `details.signal` -- the eight named just above -- is
+comparison-derived `details.signal` -- the nine named just above -- is
 produced through a helper typed against that declaration, so one of THOSE
 absent from the list does not compile and cannot go unnamed. Two signals
 in `checks/tamper.ts` are deliberate exceptions, raw strings rather than
 values from that typed helper, because they are not comparison-derived
 signals at all: `AMBIGUOUS_CRITICAL_SIGNAL` (`ambiguous-critical`, tamper.ts
 around line 682) names the dropped-verdict escalation described in "What a
-dropped verdict costs" above, not one of the eight; and the git-source and
+dropped verdict costs" above, not one of the nine; and the git-source and
 url-source signal (a template string, tamper.ts around line 720) is built
 from the specifier's protocol and host, which are not fixed members of any
 declared list to type against. Both are outside the "coverage lost across
@@ -429,7 +429,7 @@ A diagnostic about ONE entry says which comparisons did not run for that
 entry, which is a different and narrower sentence:
 `tamper-resolution-unreadable` names the host, scheme and local-source
 comparisons because those are the three that were skipped, while the
-integrity branches still ran for it. Naming all eight there would be the
+integrity branches still ran for it. Naming all nine there would be the
 same misreport in the other direction.
 
 `integrity-changed` closes what was a known gap: a hash removed was
@@ -461,6 +461,33 @@ one shape it must stay silent for is the ordinary bump, and the VERSION is
 what tells them apart: when the version moved too, the URL and hash were
 expected to move with it. An identical hash across the move also settles
 it, in the other direction: same bytes, so the path change is a detail.
+
+`tarball-repointed-unverified` is the hashless sibling of that case, and it
+existed as a blind spot for the same compositional reason `tarball-repointed`
+did. `tarball-repointed` requires an integrity hash on BOTH sides: a
+differing hash is what proves the bytes changed. But the before side does
+not always have one -- npm writes hashless entries for some resolutions, and
+a partially hand-edited lockfile has them -- and when it does not, every
+integrity branch is skipped (they all test `before.integrity !==
+undefined`), while a same-origin path move clears host-changed,
+scheme-downgrade and local-source-changed alike, exactly as it did before
+`tarball-repointed` was added. So a held-version repoint to another tarball
+on a host the project already trusts, on an entry that never carried a hash,
+scanned clean. It fires now: same version, same origin, URL moved, no before
+integrity to have caught it. It is reported at high, not critical, and the
+difference is the point -- there is no differing hash asserting the bytes
+changed, only a URL that moved under a held version with no hash that could
+have verified it, so the severity does not overclaim a certainty the
+evidence does not carry, the same honesty the `ambiguous-critical`
+escalation keeps. High still blocks at the default medium gate, because a
+same-version repoint on a trusted host is a genuine supply-chain signal.
+This is a DELTA-mode signal: with no before entry there is no move to
+detect, so audit mode and a fresh add report nothing. Its value-bearing
+subject is the origin (a host cannot move under a version bump, so it obeys
+the fingerprint stability contract), and it is a distinct signal string
+rather than a wider `tarball-repointed`, because a baseline accepting one
+should not silently accept the other -- one is a hash-proven different
+artifact and the other is an unverifiable move, two different facts.
 
 `resolution-unreadable` is the fail-closed case. A resolved URL the engine
 cannot parse used to end the comparison with a bare return, and npm

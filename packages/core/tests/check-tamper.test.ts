@@ -711,6 +711,163 @@ describe('tamperCheck: a tarball swapped within one origin', () => {
   });
 });
 
+// tarball-repointed above catches a same-origin swap only when the BEFORE
+// side carried an integrity hash to compare against. npm writes hashless
+// entries for some resolutions, and a partially hand-edited lockfile has
+// them, so a before entry with NO integrity, its version held, repointed to
+// a different tarball path on the same host and scheme, tripped nothing:
+// the integrity branches all require before.integrity, and host/scheme/
+// origin all hold on a same-origin move. This is the hashless sibling of
+// tarball-repointed -- the move cannot be verified against a hash that was
+// never there, so it is reported at high rather than critical.
+describe('tamperCheck: a same-origin repoint with no before integrity', () => {
+  const BEFORE_URL = 'https://registry.npmjs.org/a/-/a-1.0.0.tgz';
+  const EVIL_URL = 'https://registry.npmjs.org/evil/-/evil-1.0.0.tgz';
+
+  test('a hashless before entry repointed to another tarball on the same host, version held, is reported at high and blocks', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: EVIL_URL, integrity: 'sha512-genuineevil' },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].ruleId).toBe('lockfile-tamper');
+    expect(findings[0].severity).toBe('high');
+    expect(findings[0].packageName).toBe('a');
+    expect(findings[0].details?.signal).toBe(
+      'tarball-repointed-unverified:https://registry.npmjs.org'
+    );
+    expect(findings[0].message).toContain('a');
+    expect(findings[0].message).toContain('same');
+    expect(isBlocking({ ...findings[0], fingerprint: 'x' }, 'medium')).toBe(true);
+  });
+
+  test('the same move with neither side carrying an integrity hash is reported too', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: EVIL_URL },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+    expect(String(findings[0].details?.signal)).toMatch(/^tarball-repointed-unverified:/);
+  });
+
+  test('the same swap on a transitive entry no manifest declares is caught too', () => {
+    const context = makeContext([], {
+      lockEntryChanges: [
+        makeLockEntryChange(
+          'ansi-regex',
+          { version: '5.0.1', resolvedUrl: 'https://registry.npmjs.org/ansi-regex/-/ansi-regex-5.0.1.tgz' },
+          { version: '5.0.1', resolvedUrl: EVIL_URL }
+        ),
+      ],
+    });
+    const findings = tamperCheck(context);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+    expect(findings[0].packageName).toBe('ansi-regex');
+    expect(String(findings[0].details?.signal)).toMatch(/^tarball-repointed-unverified:/);
+  });
+
+  // The message must not carry the full URL: a resolved URL is one of the
+  // places a credential can appear. Only the origin and the tarball paths.
+  test('the details carry the tarball paths, not the full URLs', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: EVIL_URL },
+      }),
+    ];
+    const finding = tamperCheck(makeContext(changes))[0];
+    expect(finding.details?.beforePath).toBe('/a/-/a-1.0.0.tgz');
+    expect(finding.details?.afterPath).toBe('/evil/-/evil-1.0.0.tgz');
+    expect(JSON.stringify(finding.details)).not.toContain('registry.npmjs.org/a/-/');
+  });
+
+  // A hashed before entry stays the existing critical tarball-repointed, not
+  // the weaker unverified signal: the hash proves the bytes differ.
+  test('a same-host repoint WITH a valid before integrity is still the critical tarball-repointed', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL, integrity: 'sha512-real' },
+        after: { version: '1.0.0', resolvedUrl: EVIL_URL, integrity: 'sha512-genuineevil' },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('critical');
+    expect(findings[0].details?.signal).toBe('tarball-repointed:https://registry.npmjs.org');
+  });
+
+  // An ordinary version bump moves the URL too, and is not a same-version
+  // repoint. The new signal must stay silent for it.
+  test('a legitimate version bump that moves the URL is not reported by the new signal', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.1.0', resolvedUrl: 'https://registry.npmjs.org/a/-/a-1.1.0.tgz' },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+
+  // No before entry at all -- audit mode, or a fresh add -- has no move to
+  // detect, so this delta-mode signal reports nothing.
+  test('an added entry with no before side reports nothing new', () => {
+    const context = makeContext([], {
+      lockEntryChanges: [
+        makeLockEntryChange('a', undefined, { version: '1.0.0', resolvedUrl: EVIL_URL }),
+      ],
+      hasComparisonBase: false,
+    });
+    expect(tamperCheck(context)).toEqual([]);
+  });
+
+  // A repoint to a DIFFERENT host is the more specific host-changed fact,
+  // even with no before integrity; the new signal must not double it.
+  test('a hashless repoint to another host is host-changed, not the same-origin signal', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: 'https://evil.example.test/a/-/a-1.0.0.tgz' },
+      }),
+    ];
+    const signals = tamperCheck(makeContext(changes)).map((f) => String(f.details?.signal));
+    expect(signals).toEqual(['host-changed:https://evil.example.test']);
+  });
+
+  // A same-origin move whose URL did NOT change (only, say, a metadata
+  // field) is no move at all.
+  test('a hashless entry whose URL did not move is silent', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+});
+
 describe('tamperCheck: scheme change on an unchanged host', () => {
   // A resolution's identity includes the scheme, so a scheme-only change
   // (same host) already trips host-changed -- but if the label were
