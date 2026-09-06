@@ -398,9 +398,9 @@ exists to catch.
 
 The comparison-derived tamper signals are `integrity-removed`,
 `integrity-changed`, `integrity-downgraded`, `tarball-repointed`,
-`host-changed`, `scheme-downgrade`, `local-source-changed`, and
-`resolution-unreadable`, and they are declared once, in
-`tamper-signals.ts`.
+`tarball-repointed-unverified`, `host-changed`, `scheme-downgrade`,
+`local-source-changed`, and `resolution-unreadable`, and they are declared
+once, in `tamper-signals.ts`.
 
 A diagnostic that describes coverage lost across the board -- audit mode's
 `audit-no-tamper-comparison`, the delta's `delta-new-lock-entries` -- names
@@ -411,14 +411,14 @@ both of those messages carried their own copy of the list, both copies were
 written when there were six signals, and neither learned about
 `tarball-repointed` or `resolution-unreadable` when those were added to the
 check. Both messages are now built from the one declaration, and every
-comparison-derived `details.signal` -- the eight named just above -- is
+comparison-derived `details.signal` -- the nine named just above -- is
 produced through a helper typed against that declaration, so one of THOSE
 absent from the list does not compile and cannot go unnamed. Two signals
 in `checks/tamper.ts` are deliberate exceptions, raw strings rather than
 values from that typed helper, because they are not comparison-derived
 signals at all: `AMBIGUOUS_CRITICAL_SIGNAL` (`ambiguous-critical`, tamper.ts
 around line 682) names the dropped-verdict escalation described in "What a
-dropped verdict costs" above, not one of the eight; and the git-source and
+dropped verdict costs" above, not one of the nine; and the git-source and
 url-source signal (a template string, tamper.ts around line 720) is built
 from the specifier's protocol and host, which are not fixed members of any
 declared list to type against. Both are outside the "coverage lost across
@@ -429,7 +429,7 @@ A diagnostic about ONE entry says which comparisons did not run for that
 entry, which is a different and narrower sentence:
 `tamper-resolution-unreadable` names the host, scheme and local-source
 comparisons because those are the three that were skipped, while the
-integrity branches still ran for it. Naming all eight there would be the
+integrity branches still ran for it. Naming all nine there would be the
 same misreport in the other direction.
 
 `integrity-changed` closes what was a known gap: a hash removed was
@@ -461,6 +461,97 @@ one shape it must stay silent for is the ordinary bump, and the VERSION is
 what tells them apart: when the version moved too, the URL and hash were
 expected to move with it. An identical hash across the move also settles
 it, in the other direction: same bytes, so the path change is a detail.
+
+`tarball-repointed-unverified` is the hashless sibling of that case, and it
+existed as a blind spot for the same compositional reason `tarball-repointed`
+did. `tarball-repointed` requires an integrity hash on BOTH sides: a
+differing hash is what proves the bytes changed. But the before side does
+not always have one -- npm writes hashless entries for some resolutions, and
+a partially hand-edited lockfile has them -- and when it does not, every
+integrity branch is skipped (they all test `before.integrity !==
+undefined`), while a same-origin path move clears host-changed,
+scheme-downgrade and local-source-changed alike, exactly as it did before
+`tarball-repointed` was added. So a held-version repoint to another tarball
+on a host the project already trusts, on an entry that never carried a hash,
+scanned clean. It fires now: same version, same origin, PATHNAME moved, both
+sides a REGISTRY resolution, and no before integrity to have caught it. It is
+reported at high, not critical, and the difference is the point -- there is
+no differing hash asserting the bytes changed, only a path that moved under a
+held version with no hash that could have verified it, so the severity does
+not overclaim a certainty the evidence does not carry, the same honesty the
+`ambiguous-critical` escalation keeps. High still blocks at the default
+medium gate, because a same-version repoint on a trusted host is a genuine
+supply-chain signal.
+
+Two clauses of that gate are not obvious and both were wrong in the first
+draft, so they are recorded here rather than left in the code.
+
+The move is judged on the PATHNAME, never on the raw resolved URL string. A
+raw-string comparison fires on things that are not a tarball move at all: a
+rotated credential in the userinfo (`ci:OLD@` to `ci:NEW@` on a private
+registry), a proxy's `?token=` query parameter cycling, a changed fragment.
+All three leave the tarball exactly where it was, and each would have
+produced a BLOCKING finding whose own reported `beforePath` and `afterPath`
+were byte-identical -- precisely the self-contradicting output the
+`host-changed` rule already refuses to produce for a scheme-only change.
+Gating on the same `pathLabel` whose output the finding reports makes "the
+two paths differ" true by construction. None of the three earns a diagnostic
+either: the comparison ran and reached a verdict (nothing moved), so there is
+no lost coverage to announce.
+
+It is REGISTRY-only on both sides, and that clause is load-bearing rather
+than tidy. A git-sourced resolution is hashless BY DESIGN, so a commit bump
+under a held version satisfies every other precondition here. npm writes a
+git dependency as `git+ssh://...#<sha>`, where the sha rides in the fragment
+and the pathname never moves -- the pathname gate alone already excludes it.
+pnpm writes a github dependency as a codeload tarball,
+`https://codeload.github.com/o/r/tar.gz/<sha>`, where the sha rides in the
+PATH, so the pathname genuinely moves and only this clause stops it. Without
+it, every github-dependency commit bump would file a blocking high, on top of
+the `git-source` finding the manifest walk already raises for the same
+dependency, and it would quietly reverse `sourceSwapReport`'s deliberate
+demotion of a pinned git source. A git source's integrity is git's own, and
+judging it is `git-source`'s job. `resolutionKindOf` in `resolution.ts` is
+where that classification lives -- the resolution-side counterpart of
+manifest.ts's `Protocol`, kept there for the same reason `resolutionOf` is:
+the lockfile walk has no manifest line to read a protocol off.
+
+Its http(s)-forge host set holds exactly one entry, `codeload.github.com`,
+and the two directions of error are NOT symmetric -- which is the part an
+earlier version of this file got wrong. A host MISSING from the set
+classifies as `registry`, and the worst that costs is a false positive on a
+commit bump. A host wrongly IN the set classifies as `git`, which silently
+removes a real registry from this signal's scope: that is lost coverage, and
+it is silent. So an over-broad entry is the expensive mistake, and this file
+previously blessed three of them. Bare `github.com`, `gitlab.com` and
+`bitbucket.org` were listed and bought no coverage for either supported
+lockfile format -- pnpm's github shape is codeload, and npm writes a `git+`
+scheme for all of them, which the scheme set already catches -- while
+`gitlab.com` actively cost some, because
+`https://gitlab.com/api/v4/projects/<id>/packages/npm/<pkg>/-/...` is
+GitLab's real npm package REGISTRY, so a hashless held-version repoint from
+one project id to another produced no finding at all. The rule is to match
+the archive SHAPE npm and pnpm actually write, never the domain of whoever
+owns the forge; a forge domain looks like an obvious thing to add and the
+reasoning that makes it wrong is not, which is why the mistake is recorded
+here rather than quietly deleted.
+
+The audit-mode exclusion is STRUCTURAL, not a guard, and the distinction
+matters to anyone auditing this rule. Nothing here consults
+`hasComparisonBase`. The branch lives inside `compare()`, which only ever runs
+for a pair that HAS a before entry: `subjectOfChange` returns null without
+one, and `candidatesOfLockEntry` returns an empty list. With no earlier
+revision there is no before entry, so there is no move to compare and the
+branch is unreachable, rather than reachable-and-suppressed. Any future
+refactor that gives `compare()` a synthetic before side would reopen this,
+and would need the flag consulted explicitly.
+
+Its value-bearing subject is the origin (a host cannot move under a version
+bump, so it obeys the fingerprint stability contract), and it is a distinct
+signal string rather than a wider `tarball-repointed`, because a baseline
+accepting one should not silently accept the other -- one is a hash-proven
+different artifact and the other is an unverifiable move, two different
+facts.
 
 `resolution-unreadable` is the fail-closed case. A resolved URL the engine
 cannot parse used to end the comparison with a bare return, and npm
@@ -863,15 +954,20 @@ The codes, and what each one means:
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
   corpus is absent, damaged, or -- for `corpus-corrupt` specifically --
   valid but written in a shape this build refuses to trust: a
-  `formatVersion` this build does not understand, or a
+  `formatVersion` this build does not understand, a
   `walkComplete: false` (or anything other than the literal boolean
-  `true`) from a walk that was stopped early or never finished. Neither of
-  those is damage -- the file parses and the fields are the right types --
-  but this build cannot tell what it does not know, or must not serve a
-  partial result as if it were a complete one, so both are refused the
-  same way a corrupt file would be. A corpus that reads as empty would
-  bless every hallucinated name. See "The corpus format is versioned" and
-  "A partial corpus refuses itself" below for the two checks this covers.
+  `true`) from a walk that was stopped early or never finished, or a bloom
+  filter whose bit-fill ratio is implausible (near 1, so it answers present
+  for every name and silently disables unknown-package; or near 0, so it
+  answers absent for every name). None of those is damage -- the file
+  parses and the fields are the right types -- but this build cannot tell
+  what it does not know, or must not serve a partial or fail-open result as
+  if it were a complete one, so all are refused the same way a corrupt file
+  would be. A corpus that reads as empty would flag every name, and a
+  saturated one would bless every hallucinated name. See "The corpus format
+  is versioned", "A partial corpus refuses itself", and "A bloom filter the
+  reader cannot trust fails closed at load" below for the three checks this
+  covers.
 - `path-missing` -- the path to scan does not exist, or is not a directory.
   A path nobody looked at must not report a clean result.
 - `read-error` -- a path exists but cannot be read.
@@ -1512,3 +1608,113 @@ its tests in scripts/tests/corpus-guards.test.mjs, which exercise both
 branches against real on-disk artifacts and assert that `loadCorpus`
 genuinely does refuse the partial one `verifyBuiltCorpus` accepts -- proof
 the two paths are different, not just that neither happens to throw.
+
+## A bloom filter the reader cannot trust fails closed at load
+
+`BloomFilter.deserialize` validates the magic, the version, the geometry
+(bitCount and hashCount both at least 1) and the byte length, and none of
+those can see a filter that is saturated or empty: an all-ones bit array and
+an all-zeros one both keep an intact header and the exact right length. A
+saturated filter answers `has()` true for every name, so `hasName` is true
+for every hallucinated name and the flagship unknown-package check is
+silently disabled -- no finding, no diagnostic, the fail-open direction. An
+all-zeros filter is the mirror: every name reads as unknown. Either is a
+corpus this build cannot trust, so `loadCorpus` refuses it (`corpus-corrupt`)
+via `assertBloomFillPlausible` in `packages/core/src/corpus.ts`, keyed on
+`BloomFilter.fillRatio()`.
+
+The check is in `loadBloom`, not `loadCorpus`'s eager section, so it stays
+lazy the way the rest of the bloom load is (a scan that never calls
+`hasName` never reads or validates the filter), and the validated filter is
+cached only AFTER it clears the guard -- caching before would leave a bad
+filter in the closure and every later `hasName` would answer from it without
+re-checking, reopening the fail-open on the second call. The refusal lands
+the first time `hasName` needs the filter, exactly like the existing
+truncated-bloom case.
+
+What this window is worth is narrower than its presence suggests, and
+overstating it is the failure this paragraph exists to prevent. It is a
+backstop against WHOLESALE degenerate shapes, not an anti-tamper control, and
+a corpus that clears it is not thereby verified. Two facts fix that scope:
+
+- Partial saturation passes. The false-accept rate of a filter at fill `f` is
+  about `f^k`, so a filter well inside this window is already badly degraded.
+  Measured on a 5000-name geometry: at fill 0.85 roughly 14 percent of
+  hallucinated names are accepted at `k`=13 and 23 percent at `k`=10; at fill
+  0.90, roughly 21 percent and 42 percent. Every one of those PASSES this
+  window, and a corpus in that state would miss most of what
+  unknown-package exists to catch while reporting nothing.
+- A targeted insertion is invisible to any window. Setting the `k` bits for
+  one specific name moves the ratio by `k/m` -- on the production filter
+  (`k`=13, `m`=82,434,282) about 1.6e-7. No fill band of any width can see
+  that; detecting it needs a signature over the artifact, which this is not.
+
+So the window's job is only to refuse the all-ones and all-zeros shapes, and
+its bounds are chosen to do that without false-rejecting a real corpus.
+It is `[0.10, 0.90]`, deliberately WIDER than the release gate's
+`[0.25, 0.75]` (`assertBloomFillRatioPlausible` in
+scripts/lib/shippable-corpus.mjs). A bloom filter sized the way
+`BloomFilter.create` sizes one has an expected fill of `1 - e^(-kn/m)` after
+its `n` inserts, which the optimal `k` drives to almost exactly 0.5,
+independent of `n` and of the false-positive rate -- so the release gate,
+which only ever sees a full multi-million-name production corpus, can afford
+the tighter band. The reader also serves the committed dev fixture (53
+names, measured 0.5085) and, in tests and local development, one-name and
+other tiny corpora. A tiny corpus's fill is a noisy single realization of
+that 0.5 expectation, not the expectation itself: measured single-name
+filters range about 0.25 to 0.70 across different names and fpRates, and the
+ANALYTIC worst case is lower than any of those measurements -- for `n`=1 at
+fpRate 0.0001 the geometry is `m`=20, `k`=14, and when the double-hashing
+stride shares a factor with `m` the `k` probes collapse onto as few as 2
+distinct bits, a fill of exactly 0.10. The earlier version of this section
+quoted "0.25 to 0.667" as though it were a bound; it was two measurements,
+and the analytic floor sits well below them, which is exactly the kind of
+anecdote-as-fact this file warns about at the top.
+
+So the release window would false-reject a legitimately small corpus at load,
+and -- this is the part that rules out the more obvious design -- an
+EXPECTED-fill band (observed against the fill implied by the claimed name
+count) tight enough to be meaningful would too, because the variance is
+larger than the drift of the expectation it would centre on.
+
+The boundary is INCLUSIVE at both ends, and that is load-bearing rather than
+incidental. The test is `fill < MIN || fill > MAX`, so a fill of exactly 0.10
+and a fill of exactly 0.90 both PASS. At the low end that is required: the
+analytic worst case for the smallest legitimate corpus is exactly 0.10, and
+an exclusive bound would reject it. At the high end it is acceptable because
+the shape being caught is exactly 1.0, a full 0.10 clear of the bound, and
+because anything that ships has already been through the tighter release
+band -- the load guard is the last net, not the first.
+
+The production corpus fill quoted elsewhere in these notes (0.4904) was
+measured against a local `.corpus-work` build. It is NOT reproducible from a
+clone: `packages/core/data` is gitignored and empty in the repository, and
+the shipped corpus is built fresh in the release job (see "A published
+corpus is built in the release job"). Treat that figure as one observation
+of one build, not as a checked-in fact a test could re-derive.
+
+The window reads the physical bit array only (`fillRatio()` counts set bits
+up to `bitCount`); it never consults the self-reported `meta.nameCount`,
+which is exactly the field a corpus forged to justify a saturated filter
+would inflate. This is why deriving an expected fill "for the claimed name
+count" would be not only variance-fragile but a smaller trust surface than
+reading the bits directly: an attacker who controls `meta.json` could set a
+`nameCount` whose implied expected fill is near 1, and a saturated observed
+fill would then match it. The physical-fill window has nothing for such a
+lie to move.
+
+This is additive to the release gate, never a replacement: the gate's
+`[0.25, 0.75]` is tighter and still runs at publish, so it still catches
+fills between 0.10 and 0.25 or between 0.75 and 0.90 that the load window
+lets through. Because `assertCorpusShippable` reaches `loadCorpus().hasName`
+(in `assertLoadsAndResolvesKnownName`) BEFORE its own
+`assertBloomFillRatioPlausible`, a near-empty or saturated corpus now trips
+the reader's guard first, with a message that also names the bit-fill ratio
+-- the gate still refuses to ship it, just one check earlier.
+
+This is a security hardening at the read boundary, a new refusal REASON at
+load rather than a change to any verdict, signal, fingerprint, exit code, or
+output shape. It fits the stability policy's patch case (a security defect
+in dep-guard itself: a corpus that fails open was accepted), but it rides
+the same release as the tamper-signal minor above, so it ships as part of
+that minor.

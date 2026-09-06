@@ -1,6 +1,6 @@
 {
   "name": "@vaultcompass/dep-guard-monorepo",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "packageManager": "pnpm@9.15.9",
   "engines": {
@@ -26,7 +26,7 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^22.19.0",
     "@vaultcompass/conductor": "0.2.0",
-    "@vaultcompass/dep-guard": "0.2.2",
+    "@vaultcompass/dep-guard": "0.4.0",
     "@vaultcompass/intent-guard": "1.2.1",
     "@vaultcompass/vault-guard": "1.4.6",
     "jest": "^30.4.2",

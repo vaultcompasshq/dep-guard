@@ -711,6 +711,386 @@ describe('tamperCheck: a tarball swapped within one origin', () => {
   });
 });
 
+// tarball-repointed above catches a same-origin swap only when the BEFORE
+// side carried an integrity hash to compare against. npm writes hashless
+// entries for some resolutions, and a partially hand-edited lockfile has
+// them, so a before entry with NO integrity, its version held, repointed to
+// a different tarball path on the same host and scheme, tripped nothing:
+// the integrity branches all require before.integrity, and host/scheme/
+// origin all hold on a same-origin move. This is the hashless sibling of
+// tarball-repointed -- the move cannot be verified against a hash that was
+// never there, so it is reported at high rather than critical.
+describe('tamperCheck: a same-origin repoint with no before integrity', () => {
+  const BEFORE_URL = 'https://registry.npmjs.org/a/-/a-1.0.0.tgz';
+  const EVIL_URL = 'https://registry.npmjs.org/evil/-/evil-1.0.0.tgz';
+
+  test('a hashless before entry repointed to another tarball on the same host, version held, is reported at high and blocks', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: EVIL_URL, integrity: 'sha512-genuineevil' },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].ruleId).toBe('lockfile-tamper');
+    expect(findings[0].severity).toBe('high');
+    expect(findings[0].packageName).toBe('a');
+    expect(findings[0].details?.signal).toBe(
+      'tarball-repointed-unverified:https://registry.npmjs.org'
+    );
+    // The polarity is the whole finding: it fires BECAUSE no hash was there,
+    // so the message has to say so. An earlier draft said the opposite, and
+    // substring assertions like "same" were satisfied by the wrong string.
+    expect(findings[0].message).toMatch(/no integrity hash/);
+    expect(findings[0].message).not.toMatch(/carried an integrity hash to verify/);
+    expect(isBlocking({ ...findings[0], fingerprint: 'x' }, 'medium')).toBe(true);
+  });
+
+  test('the ambiguous-candidate wording also says no integrity hash was there', () => {
+    const hashlessA: LockEntry = { version: '1.0.0', resolvedUrl: BEFORE_URL };
+    const hashlessB: LockEntry = {
+      version: '1.0.0',
+      resolvedUrl: 'https://registry.npmjs.org/a/-/a-1.0.0-other.tgz',
+    };
+    const context = makeContext([], {
+      lockEntryChanges: [
+        makeLockEntryChange(
+          'a',
+          hashlessA,
+          { version: '1.0.0', resolvedUrl: EVIL_URL },
+          { counterpartAmbiguous: true, beforeCandidates: [hashlessA, hashlessB] }
+        ),
+      ],
+    });
+    const repoint = tamperCheck(context).find((f) =>
+      String(f.details?.signal).startsWith('tarball-repointed-unverified')
+    );
+    expect(repoint).toBeDefined();
+    expect(repoint?.message).toMatch(/no integrity hash/);
+    // A guessed pairing may not print one candidate's path.
+    expect(repoint?.details?.beforePath).toBeUndefined();
+    expect(repoint?.details?.counterpartCandidates).toBe(2);
+  });
+
+  test('the same move with neither side carrying an integrity hash is reported too', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: EVIL_URL },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+    expect(String(findings[0].details?.signal)).toMatch(/^tarball-repointed-unverified:/);
+  });
+
+  test('the same swap on a transitive entry no manifest declares is caught too', () => {
+    const context = makeContext([], {
+      lockEntryChanges: [
+        makeLockEntryChange(
+          'ansi-regex',
+          { version: '5.0.1', resolvedUrl: 'https://registry.npmjs.org/ansi-regex/-/ansi-regex-5.0.1.tgz' },
+          { version: '5.0.1', resolvedUrl: EVIL_URL }
+        ),
+      ],
+    });
+    const findings = tamperCheck(context);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+    expect(findings[0].packageName).toBe('ansi-regex');
+    expect(String(findings[0].details?.signal)).toMatch(/^tarball-repointed-unverified:/);
+  });
+
+  // The message must not carry the full URL: a resolved URL is one of the
+  // places a credential can appear. Only the origin and the tarball paths.
+  test('the details carry the tarball paths, not the full URLs', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: EVIL_URL },
+      }),
+    ];
+    const finding = tamperCheck(makeContext(changes))[0];
+    expect(finding.details?.beforePath).toBe('/a/-/a-1.0.0.tgz');
+    expect(finding.details?.afterPath).toBe('/evil/-/evil-1.0.0.tgz');
+    expect(JSON.stringify(finding.details)).not.toContain('registry.npmjs.org/a/-/');
+  });
+
+  // A hashed before entry stays the existing critical tarball-repointed, not
+  // the weaker unverified signal: the hash proves the bytes differ.
+  test('a same-host repoint WITH a valid before integrity is still the critical tarball-repointed', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL, integrity: 'sha512-real' },
+        after: { version: '1.0.0', resolvedUrl: EVIL_URL, integrity: 'sha512-genuineevil' },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('critical');
+    expect(findings[0].details?.signal).toBe('tarball-repointed:https://registry.npmjs.org');
+  });
+
+  // An ordinary version bump moves the URL too, and is not a same-version
+  // repoint. The new signal must stay silent for it.
+  test('a legitimate version bump that moves the URL is not reported by the new signal', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.1.0', resolvedUrl: 'https://registry.npmjs.org/a/-/a-1.1.0.tgz' },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+
+  // No before entry at all -- audit mode, or a fresh add -- has no move to
+  // detect, so this delta-mode signal reports nothing.
+  test('an added entry with no before side reports nothing new', () => {
+    const context = makeContext([], {
+      lockEntryChanges: [
+        makeLockEntryChange('a', undefined, { version: '1.0.0', resolvedUrl: EVIL_URL }),
+      ],
+      hasComparisonBase: false,
+    });
+    expect(tamperCheck(context)).toEqual([]);
+  });
+
+  // A repoint to a DIFFERENT host is the more specific host-changed fact,
+  // even with no before integrity; the new signal must not double it.
+  test('a hashless repoint to another host is host-changed, not the same-origin signal', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: 'https://evil.example.test/a/-/a-1.0.0.tgz' },
+      }),
+    ];
+    const signals = tamperCheck(makeContext(changes)).map((f) => String(f.details?.signal));
+    expect(signals).toEqual(['host-changed:https://evil.example.test']);
+  });
+
+  // A same-origin move whose URL did NOT change (only, say, a metadata
+  // field) is no move at all.
+  test('a hashless entry whose URL did not move is silent', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+
+  // The gate is the PATHNAME, not the raw resolved URL string. Everything
+  // below leaves the tarball exactly where it was, so none of it is a move;
+  // firing on any of them would also produce a finding whose own reported
+  // beforePath and afterPath were byte-identical.
+  test('a rotated registry credential in the userinfo is not a tarball move', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: {
+          version: '1.0.0',
+          resolvedUrl: 'https://ci:OLDTOKEN@npm.internal.test/a/-/a-1.0.0.tgz',
+        },
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'https://ci:NEWTOKEN@npm.internal.test/a/-/a-1.0.0.tgz',
+        },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+
+  test('a proxy query parameter cycling is not a tarball move', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: `${BEFORE_URL}?token=OLD` },
+        after: { version: '1.0.0', resolvedUrl: `${BEFORE_URL}?token=NEW` },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+
+  test('a fragment-only change is not a tarball move', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: `${BEFORE_URL}#one` },
+        after: { version: '1.0.0', resolvedUrl: `${BEFORE_URL}#two` },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+
+  // The positive counterpart of the three above: a genuine pathname move
+  // fires, and the two paths it reports actually differ.
+  test('a genuine registry pathname move fires and the two reported paths differ', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: EVIL_URL },
+      }),
+    ];
+    const finding = tamperCheck(makeContext(changes))[0];
+    expect(finding.severity).toBe('high');
+    expect(finding.details?.beforePath).not.toBe(finding.details?.afterPath);
+  });
+
+  // A git-sourced resolution is hashless BY DESIGN, so a commit bump under a
+  // held version meets every other precondition. It is git-source's business,
+  // not this signal's.
+  test('an npm git+ssh commit bump under a held version does not fire this signal', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: {
+          version: '1.0.0',
+          resolvedUrl: 'git+ssh://git@github.com/owner/repo.git#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'git+ssh://git@github.com/owner/repo.git#bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        },
+      }),
+    ];
+    const signals = tamperCheck(makeContext(changes)).map((f) => String(f.details?.signal));
+    expect(signals.filter((s) => s.startsWith('tarball-repointed-unverified'))).toEqual([]);
+  });
+
+  // pnpm records a github dependency as a codeload tarball, where the commit
+  // sha rides in the PATH -- so the pathname genuinely moves and the pathname
+  // gate alone would not stop it. This is the case the registry-only gate is
+  // load-bearing for.
+  test('a pnpm codeload github tarball commit bump does not fire this signal', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: {
+          version: '1.0.0',
+          resolvedUrl: 'https://codeload.github.com/owner/repo/tar.gz/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'https://codeload.github.com/owner/repo/tar.gz/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        },
+      }),
+    ];
+    const signals = tamperCheck(makeContext(changes)).map((f) => String(f.details?.signal));
+    expect(signals.filter((s) => s.startsWith('tarball-repointed-unverified'))).toEqual([]);
+  });
+
+  // The same shape on a transitive lockfile entry, which has no manifest
+  // line at all -- the walk where a resolution is the only evidence there is.
+  test('a codeload commit bump on a transitive entry does not fire either', () => {
+    const context = makeContext([], {
+      lockEntryChanges: [
+        makeLockEntryChange(
+          'dep',
+          {
+            version: '2.0.0',
+            resolvedUrl: 'https://codeload.github.com/o/r/tar.gz/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          },
+          {
+            version: '2.0.0',
+            resolvedUrl: 'https://codeload.github.com/o/r/tar.gz/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          }
+        ),
+      ],
+    });
+    expect(tamperCheck(context)).toEqual([]);
+  });
+
+  // A forge host is not the same thing as a forge. gitlab.com serves
+  // GitLab's real npm package registry under /api/v4/, so treating the bare
+  // host as a git source classified a genuine registry tarball as git and
+  // silently dropped this repoint: project 1234 to project 9999, version
+  // held, no integrity. The exclusion has to be narrow enough to be about
+  // the SHAPE npm and pnpm actually write for a git source, not about who
+  // owns the domain.
+  test('a GitLab package-registry repoint between projects is a registry repoint and fires', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: {
+          version: '1.0.0',
+          resolvedUrl: 'https://gitlab.com/api/v4/projects/1234/packages/npm/a/-/a-1.0.0.tgz',
+        },
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'https://gitlab.com/api/v4/projects/9999/packages/npm/a/-/a-1.0.0.tgz',
+        },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+    expect(findings[0].details?.signal).toBe('tarball-repointed-unverified:https://gitlab.com');
+    expect(findings[0].details?.beforePath).not.toBe(findings[0].details?.afterPath);
+  });
+
+  // Two more real registries that happen to sit on forge-adjacent hostnames.
+  // Neither is a source archive, and both must stay in scope.
+  test('a GitHub Packages npm registry repoint fires', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: 'https://npm.pkg.github.com/a/-/a-1.0.0.tgz' },
+        after: { version: '1.0.0', resolvedUrl: 'https://npm.pkg.github.com/evil/-/evil-1.0.0.tgz' },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+    expect(String(findings[0].details?.signal)).toMatch(/^tarball-repointed-unverified:/);
+  });
+
+  test('a self-hosted GitLab registry repoint fires', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: {
+          version: '1.0.0',
+          resolvedUrl: 'https://gitlab.corp.test/api/v4/projects/1/packages/npm/a/-/a-1.0.0.tgz',
+        },
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'https://gitlab.corp.test/api/v4/projects/2/packages/npm/a/-/a-1.0.0.tgz',
+        },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+  });
+});
+
 describe('tamperCheck: scheme change on an unchanged host', () => {
   // A resolution's identity includes the scheme, so a scheme-only change
   // (same host) already trips host-changed -- but if the label were

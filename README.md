@@ -220,7 +220,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v5
-  - uses: vaultcompasshq/dep-guard@v0.4.0
+  - uses: vaultcompasshq/dep-guard@v0.5.0
     with:
       path: .
       online: 'true'

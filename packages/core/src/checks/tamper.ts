@@ -1,7 +1,7 @@
 import type { DepChange, LockEntryChange } from '../delta.js';
 import type { LockEntry } from '../lockfiles/types.js';
 import type { Resolution } from '../resolution.js';
-import { resolutionOf } from '../resolution.js';
+import { resolutionOf, resolutionKindOf } from '../resolution.js';
 import { agreementAcrossCandidates } from './agreement.js';
 import { comparisonSignal, type ComparisonTamperSignal } from '../tamper-signals.js';
 import type { Diagnostic, Finding } from '../types.js';
@@ -368,6 +368,52 @@ function pathLabel(entry: LockEntry): string {
   }
 }
 
+// Whether a pair is a same-origin REGISTRY tarball move: both sides parse,
+// both name a registry resolution, the origin holds, and the PATHNAME
+// differs. This is the gate for the hashless repoint branch below, and
+// every clause of it earns its place.
+//
+// The pathname, never the raw resolved URL. A raw-string comparison fires
+// on things that are not a tarball move at all: userinfo rotated on a
+// private registry (`ci:OLD@` to `ci:NEW@`), a proxy's `?token=` query
+// param cycling, a changed fragment. All three leave the tarball exactly
+// where it was, and all three would have produced a blocking finding whose
+// own reported beforePath and afterPath were byte-identical -- the
+// self-contradicting output the resolutionFinding comment above already
+// refuses for scheme-only changes. Gating on pathLabel, the very function
+// whose output the finding reports, is what makes "the paths differ" true
+// by construction rather than by hope. None of those three cases gets a
+// diagnostic either: the comparison ran and reached a verdict (nothing
+// moved), so there is no lost coverage to announce.
+//
+// Registry only, on both sides. A git-sourced resolution is hashless BY
+// DESIGN -- npm writes `git+ssh://...#<sha>`, pnpm writes a codeload
+// tarball -- so a commit bump under a held version satisfies every other
+// precondition here. For the codeload shape the sha rides in the PATH, so
+// the pathname genuinely moves and the pathname gate alone would not stop
+// it: without this clause every github-dependency commit bump would file a
+// blocking high, on top of the git-source finding the manifest walk already
+// raises for the same dependency, and it would quietly reverse
+// sourceSwapReport's deliberate demotion of a pinned git source. A git
+// source's integrity is git's own, and judging it is git-source's job.
+function sameOriginRegistryPathMove(before: LockEntry, after: LockEntry): boolean {
+  if (before.resolvedUrl === undefined || after.resolvedUrl === undefined) {
+    return false;
+  }
+  const beforeRes = resolutionOf(before.resolvedUrl);
+  const afterRes = resolutionOf(after.resolvedUrl);
+  if (beforeRes === null || afterRes === null) {
+    return false;
+  }
+  if (beforeRes.origin !== afterRes.origin) {
+    return false;
+  }
+  if (resolutionKindOf(beforeRes) !== 'registry' || resolutionKindOf(afterRes) !== 'registry') {
+    return false;
+  }
+  return pathLabel(before) !== pathLabel(after);
+}
+
 function resolutionFinding(
   subject: ComparisonSubject,
   signal: Extract<ComparisonTamperSignal, 'host-changed' | 'scheme-downgrade' | 'local-source-changed'>,
@@ -608,6 +654,78 @@ export const tamperCheck: Check = (ctx) => {
           });
         }
       }
+    } else if (
+      before.integrity === undefined &&
+      before.version === after.version &&
+      sameOriginRegistryPathMove(before, after)
+    ) {
+      // The hashless sibling of tarball-repointed above, and one rung below
+      // it in certainty rather than in kind. That branch requires an
+      // integrity hash on BOTH sides and reads a rewritten one as proof the
+      // bytes differ; this branch is the case where the before side carried
+      // no hash at all, so there is nothing to prove the move against. npm
+      // writes hashless entries for some resolutions, and a partially
+      // hand-edited lockfile has them, so without this the two rules'
+      // blind spots compose exactly as they did for the hashed case: the
+      // integrity branches all require before.integrity, and a same-origin
+      // path move clears host-changed, scheme-downgrade and
+      // local-source-changed alike (same host, same scheme, and for a
+      // hosted URL the path is not part of the origin). The result was that
+      // a held-version repoint to another tarball on a host the project
+      // already trusts, on an entry that never had a hash, scanned clean.
+      //
+      // The version has to be unchanged for the same reason it does above --
+      // an ordinary bump moves the version and the URL together -- and the
+      // move has to be within one origin, because a move to a different
+      // origin is already the more specific host-changed, scheme-downgrade
+      // or local-source-changed finding below, which this else-if leaves to
+      // them.
+      //
+      // What counts as a move, and which resolutions are in scope at all,
+      // is sameOriginRegistryPathMove's business: the PATHNAME has to differ
+      // (so a rotated credential, a proxy query param or a changed fragment
+      // is not a move), and both sides have to be REGISTRY resolutions (so a
+      // git or codeload source, hashless by design, is left to git-source).
+      // Read the comment on that helper before widening either clause.
+      //
+      // High, not critical: unlike tarball-repointed there is no differing
+      // hash asserting the bytes changed, only a URL that moved while the
+      // version stood still and no hash that could have caught it. High
+      // still blocks at the default medium gate, which is the point -- a
+      // same-version repoint on a trusted host is a real supply-chain signal
+      // -- but the severity does not overclaim a certainty the evidence does
+      // not carry, the same honesty the ambiguous-critical escalation keeps.
+      raise({
+        ruleId: 'lockfile-tamper',
+        severity: 'high',
+        packageName: subject.packageName,
+        // The polarity of this sentence is the whole finding: the branch
+        // fires precisely BECAUSE there was no hash, so the message must say
+        // that. An earlier draft read "the earlier entry carried an
+        // integrity hash to verify the move", the exact inverse of the
+        // condition, which would have told a reader the opposite of why the
+        // finding exists.
+        message: `"${subject.packageName}" still resolves to the same version from origin "${originLabel(after)}" as ${priorSide(subject)}, but from a different tarball path on the same host, and there was no integrity hash ${subject.candidateCount > 1 ? 'on any of those earlier entries' : 'recorded before'} to verify the move.`,
+        manifestPath: subject.manifestPath,
+        details: {
+          // The value-bearing subject is the origin, exactly as
+          // tarball-repointed folds it in: a host cannot move under a
+          // version bump, so it satisfies the fingerprint stability
+          // contract, while the tarball path (which does move) stays out of
+          // the signal and lives in the details below.
+          signal: comparisonSignal('tarball-repointed-unverified', originLabel(after)),
+          kind: subject.kind,
+          // The tarball paths, never the resolved URLs: a URL is where a
+          // credential can appear, and a pathname carries none. The before
+          // path is one candidate's, so it is a fact only when there was a
+          // single candidate -- the same rule tarball-repointed follows for
+          // beforePath.
+          ...(subject.candidateCount > 1
+            ? { counterpartCandidates: subject.candidateCount }
+            : { beforePath: pathLabel(before) }),
+          afterPath: pathLabel(after),
+        },
+      });
     }
 
     if (before.resolvedUrl === undefined || after.resolvedUrl === undefined) {

@@ -155,6 +155,81 @@ function assertMetaShape(filePath: string, value: unknown): asserts value is Cor
   }
 }
 
+// The load-time bit-fill guard, and what it is worth is narrower than it
+// looks, so read this before relying on it for anything.
+//
+// WHAT IT CATCHES: the two WHOLESALE degenerate shapes. A bloom filter whose
+// bit array is all ones answers has() true for every name, which makes
+// hasName() true for every hallucinated name and silently disables the
+// unknown-package check with no finding and no diagnostic -- the fail-open
+// direction. An all-zeros filter is the mirror: everything reads as unknown.
+// deserialize (bloom.ts) validates magic, version, geometry and byte length,
+// and none of those can see either shape, because both keep an intact header
+// and exactly the right length.
+//
+// WHAT IT DOES NOT CATCH, and this is the part that must not be overstated:
+// it is a degenerate-shape backstop, NOT an anti-tamper control, and a corpus
+// that clears it is in no way thereby verified.
+//   - Partial saturation walks straight through. The false-accept rate for a
+//     filter at fill f is about f^k, so a filter sitting inside this window
+//     is already badly degraded: measured on a 5000-name geometry, fill 0.85
+//     accepts roughly 14 percent of hallucinated names at k=13 and 23
+//     percent at k=10, and fill 0.90 accepts roughly 21 percent and 42
+//     percent respectively. All of that PASSES.
+//   - A targeted insertion is invisible. Setting the k bits for one specific
+//     name moves the ratio by k/m: on the production filter (k=13, m=82.4
+//     million) that is about 1.6e-7, which no window of any width could see.
+// Detecting either of those needs a signature over the artifact, which this
+// is not and does not pretend to be.
+//
+// THE BOUNDS. The release gate (scripts/lib/shippable-corpus.mjs,
+// assertBloomFillRatioPlausible) measures the same ratio and demands
+// [0.25, 0.75], but it runs only at publish time against a full
+// multi-million-name production corpus, whose fill is ~0.49 with negligible
+// variance, so it can afford that tighter band. This check runs in the
+// reader every scan goes through, which also serves the committed dev
+// fixture (53 names) and, in tests and local development, one-name and other
+// tiny corpora. A tiny corpus's fill is a noisy single realization of the
+// ~0.5 expectation rather than the expectation itself: measured single-name
+// filters range about 0.25 to 0.70 across different names and fpRates, and
+// the ANALYTIC worst case is lower still -- for n=1 at fpRate 0.0001 the
+// geometry is m=20, k=14, and when the double-hashing stride shares a factor
+// with m the k probes collapse onto as few as 2 distinct bits, giving a fill
+// of exactly 0.10. So the release band would false-reject a legitimately
+// small corpus, and an expected-fill band keyed on the claimed name count
+// would too -- the variance exceeds the drift of the expectation it would
+// centre on, and it would trust meta.nameCount, the very field a corpus
+// forged to justify a saturated filter would inflate. This window reads the
+// physical bit array only and never consults meta.nameCount.
+//
+// THE BOUNDARY IS INCLUSIVE AT BOTH ENDS. The test is `fill < MIN || fill >
+// MAX`, so a fill of exactly 0.10 and a fill of exactly 0.90 both PASS. That
+// is deliberate at the low end: the analytic worst case for the smallest
+// legitimate corpus lands on exactly 0.10, and an exclusive bound would
+// reject it. It is acceptable at the high end because the shape this exists
+// to catch is exactly 1.0, a full 0.10 away, and because a filter at 0.90 is
+// already caught by the tighter release band before anything ships -- the
+// load guard is the last net, not the first.
+const LOAD_MIN_FILL_RATIO = 0.1;
+const LOAD_MAX_FILL_RATIO = 0.9;
+
+function assertBloomFillPlausible(bloomPath: string, bloom: BloomFilter): void {
+  const fill = bloom.fillRatio();
+  if (fill < LOAD_MIN_FILL_RATIO || fill > LOAD_MAX_FILL_RATIO) {
+    throw new DepGuardError(
+      `corpus bloom filter has a degenerate bit-fill ratio of ${fill.toFixed(4)}, outside the ` +
+        `[${LOAD_MIN_FILL_RATIO}, ${LOAD_MAX_FILL_RATIO}] band a filter that actually holds its ` +
+        `names sits in (expected near 0.5): ${bloomPath}. An all-ones filter (fill 1) answers ` +
+        'present for every name, which would silently disable the unknown-package check; an ' +
+        'all-zeros filter (fill 0) reports every name as unknown. This band is a backstop against ' +
+        'those wholesale shapes only: it does not detect partial saturation, and it cannot see a ' +
+        'targeted insertion of a single name, so clearing it is not a verification of the corpus. ' +
+        'Rebuild the corpus.',
+      'corpus-corrupt'
+    );
+  }
+}
+
 export function loadCorpus(dir: string): Corpus {
   const bloomPath = path.join(dir, 'names.bloom');
   const topPath = path.join(dir, 'top.json');
@@ -208,14 +283,22 @@ export function loadCorpus(dir: string): Corpus {
     const bloomBytes = new Uint8Array(
       bloomBuf.buffer.slice(bloomBuf.byteOffset, bloomBuf.byteOffset + bloomBuf.byteLength)
     );
+    let deserialized: BloomFilter;
     try {
-      bloom = BloomFilter.deserialize(bloomBytes);
+      deserialized = BloomFilter.deserialize(bloomBytes);
     } catch (err) {
       if (err instanceof DepGuardError) {
         throw err;
       }
       throw new DepGuardError(`corpus bloom filter is corrupt: ${bloomPath}`, 'corpus-corrupt');
     }
+    assertBloomFillPlausible(bloomPath, deserialized);
+    // Only cache a filter that cleared the fill-ratio guard. Assigning
+    // before the guard would leave a saturated or empty filter in `bloom`,
+    // and every later hasName() call would then return from the cache
+    // without re-checking -- the fail-open this guard exists to close would
+    // reopen on the second call.
+    bloom = deserialized;
     return bloom;
   }
 
