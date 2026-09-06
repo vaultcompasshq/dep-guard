@@ -805,17 +805,29 @@ meaning, so widening `suppressed` to also mean "or allow" would be a
 breaking change, while a new additive field is the minor-safe path and
 keeps the three decisions three distinct numbers.
 
-The recording is done at the drop site, by `allowClears` in `checks/allow.ts`,
-which every check calls in place of the bare `isAllowed` predicate wherever
-it would otherwise silence a would-be finding. Recording where the drop
-already happens is what keeps the count honest: it cannot report a
-clearance that did not occur, and it cannot broaden which rules `allow`
-covers, because it changes nothing about the dropping -- `lockfile-tamper`
-is still not subject to `allow` for the reason `checks/allow.ts` states,
-and a rule that does not consult `allow` still records nothing. A future
-check that silences a package by `allow` records it for free by using
-`allowClears`; one that reaches for `isAllowed` directly at a drop site is
-the bug this centralisation exists to prevent.
+The recording is done by `allowClears` in `checks/allow.ts`, which every
+check calls in place of the bare `isAllowed` predicate -- and it is called
+at the FINDING point, past the condition that decides a finding, not at the
+top of the loop over changes. That placement is the whole of what keeps the
+count honest: it records a clearance only where a finding would otherwise
+have been reported, never merely because an allow-listed name appeared as a
+change. `hygiene` and `install-script` gate after their own would-be-finding
+tests; `existence` records only past the corpus and internal-name gates,
+and `typosquat` only past `matchName`, because a name that is corpus-known
+or bears no resemblance was never going to be a finding, so allow-listing it
+cleared nothing. The two candidate-fed checks record at their own emission
+points rather than in the shared `newRegistryNames` builder for exactly this
+reason: the builder has not yet judged the name, so dropping (and recording)
+an allowed name there would count a clean, corpus-known, correctly-pinned
+dependency as a clearance that never happened. `confusion` runs both its
+rules first and records once if either would have fired. This also cannot
+broaden which rules `allow` covers -- it changes nothing about the dropping,
+`lockfile-tamper` is still not subject to `allow` for the reason
+`checks/allow.ts` states, and a rule that does not consult `allow` still
+records nothing. A future check that silences a package by `allow` records
+it for free by using `allowClears` at its finding point; one that calls it
+before the finding condition, or reaches for `isAllowed` directly there, is
+the over-count this placement exists to prevent.
 
 ## Failing closed, and the error codes that do it
 

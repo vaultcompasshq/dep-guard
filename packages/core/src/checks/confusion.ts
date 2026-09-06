@@ -203,9 +203,6 @@ export const confusionCheck: Check = (ctx) => {
       continue;
     }
     const { registryName } = change;
-    if (allowClears(ctx, registryName)) {
-      continue;
-    }
     // Rule 2's admission (below) mirrors candidates.ts: an added
     // dependency, or an alias at any kind. Rule 1 is NOT gated on this --
     // it is about whether a resolution matches its pin, which is exactly
@@ -220,9 +217,6 @@ export const confusionCheck: Check = (ctx) => {
     // credential-adjacent even after .npmrc's own credential stripping,
     // and echoing it back out here would undo that.
     const mismatch = pinMismatch(ctx, registryName, change.after?.resolvedUrl, via);
-    if (mismatch !== null) {
-      report({ ...mismatch, manifestPath: change.manifestPath });
-    }
 
     // Rule 2: a dependency whose name the project has told this tool is
     // internal, reaching the registry as a plain public install -- absent
@@ -231,7 +225,24 @@ export const confusionCheck: Check = (ctx) => {
     // lands. Admits an added dependency at either protocol this check
     // considers, or an alias at any kind (see the top-of-file note).
     const admittedForRule2 = change.kind === 'added' || change.protocol === 'alias';
-    if (admittedForRule2 && isInternalName(registryName, config.internalScopes, config.internalPrefixes)) {
+    const internal =
+      admittedForRule2 && isInternalName(registryName, config.internalScopes, config.internalPrefixes);
+
+    // An allow entry silences BOTH rules for this name. It is recorded as a
+    // clearance -- and the name skipped -- only when at least one rule would
+    // otherwise have reported, so a clean allow-listed name (no pin
+    // mismatch, not internal) that merely appears as a change counts
+    // nothing, matching the finding-point gate existence, typosquat,
+    // hygiene and install-script use.
+    if ((mismatch !== null || internal) && allowClears(ctx, registryName)) {
+      continue;
+    }
+
+    if (mismatch !== null) {
+      report({ ...mismatch, manifestPath: change.manifestPath });
+    }
+
+    if (internal) {
       report({
         ruleId: 'dependency-confusion',
         severity: 'high',
@@ -255,17 +266,20 @@ export const confusionCheck: Check = (ctx) => {
   // The dedupe in report() collapses the two views of a declared
   // dependency, exactly as it does in tamper.ts.
   for (const entryChange of delta.lockEntryChanges) {
+    const mismatch = pinMismatch(ctx, entryChange.packageName, entryChange.after.resolvedUrl, '');
+    if (mismatch === null) {
+      continue;
+    }
+    // Recorded as a clearance only now that rule 1 has actually matched,
+    // the same finding-point gate as the manifest-walk loop above.
     if (allowClears(ctx, entryChange.packageName)) {
       continue;
     }
-    const mismatch = pinMismatch(ctx, entryChange.packageName, entryChange.after.resolvedUrl, '');
-    if (mismatch !== null) {
-      report({
-        ...mismatch,
-        manifestPath: entryChange.manifestPath,
-        lockfilePath: entryChange.lockfilePath,
-      });
-    }
+    report({
+      ...mismatch,
+      manifestPath: entryChange.manifestPath,
+      lockfilePath: entryChange.lockfilePath,
+    });
   }
 
   return findings;

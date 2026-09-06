@@ -1,6 +1,7 @@
 import type { Corpus } from '../corpus.js';
 import { bandedDistance } from '../levenshtein.js';
 import type { Finding, Severity } from '../types.js';
+import { allowClears } from './allow.js';
 import { newRegistryNames } from './candidates.js';
 import type { Check, CheckContext } from './types.js';
 
@@ -453,6 +454,15 @@ export const typosquatCheck: Check = (ctx) => {
   for (const { change, registryName } of candidates) {
     const match = matchName(registryName, ctx, index);
     if (match === null) {
+      continue;
+    }
+
+    // A resemblance was found, so this name would be reported. An allow
+    // entry silences it -- recorded here, past matchName, so a clearance is
+    // counted only where a finding would genuinely have been raised (a
+    // popular or unrelated allow-listed name returns no match above and is
+    // never recorded).
+    if (allowClears(ctx, registryName)) {
       continue;
     }
 

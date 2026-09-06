@@ -1,5 +1,5 @@
 import type { Finding } from '../types.js';
-import { isInternalName } from './allow.js';
+import { allowClears, isInternalName } from './allow.js';
 import { newRegistryNames } from './candidates.js';
 import type { Check } from './types.js';
 
@@ -29,6 +29,15 @@ export const existenceCheck: Check = (ctx) => {
     // internal registry), so reporting it here as well would be one
     // problem told twice, once wrongly.
     if (isInternalName(registryName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
+      continue;
+    }
+
+    // The name would be reported as unknown from here. An allow entry
+    // silences it -- recorded at THIS point, past the corpus and
+    // internal-name gates above, so a clearance is counted only where a
+    // finding would genuinely have been raised, never merely because an
+    // allow-listed name was among the new dependencies.
+    if (allowClears(ctx, registryName)) {
       continue;
     }
 

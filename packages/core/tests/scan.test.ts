@@ -305,6 +305,49 @@ describe('scan', () => {
       expect(result.allowed).toBe(1);
       expect(result.allowedNames).toEqual(['@acme/internal-thing']);
     });
+
+    // The counter records a clearance only where an allow entry actually
+    // suppressed a finding that would otherwise have been reported -- never
+    // merely because an allow-listed name appeared as a change. A clean,
+    // corpus-known, correctly-pinned dependency produces no finding from any
+    // check, so allow-listing it clears nothing and must count zero, even
+    // though the name still flows through the candidate, confusion, and
+    // hygiene loops.
+    test('an allow entry for a clean corpus-known correctly-pinned dependency records nothing', async () => {
+      await write('.dep-guard.json', JSON.stringify({ allow: ['react'] }));
+      await write('package.json', manifestJson({}));
+      await commitAll('first');
+      await write('package.json', manifestJson({ react: '^18.2.0' }));
+      await git('add', '-A');
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result.allowed).toBe(0);
+      expect(result.allowedNames).toEqual([]);
+    });
+
+    // The counterpart: an allow-listed name the dependency-confusion check
+    // WOULD have flagged (an internal-scope name resolving as a public
+    // registry install) is a real clearance and is recorded -- and recorded
+    // at the confusion finding point, not the top of the loop, which is what
+    // the clean-dependency test above pins down.
+    test('an allow entry that clears a confusion internal-name finding is recorded', async () => {
+      await write(
+        '.dep-guard.json',
+        JSON.stringify({ allow: ['@acme/widget'], internalScopes: ['@acme'] })
+      );
+      await write('package.json', manifestJson({}));
+      await commitAll('first');
+      await write('package.json', manifestJson({ '@acme/widget': '^1.0.0' }));
+      await git('add', '-A');
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result.allowed).toBe(1);
+      expect(result.allowedNames).toEqual(['@acme/widget']);
+    });
   });
 
   // The matcher's whole-path, segment-for-segment semantics are kept
