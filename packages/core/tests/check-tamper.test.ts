@@ -741,9 +741,38 @@ describe('tamperCheck: a same-origin repoint with no before integrity', () => {
     expect(findings[0].details?.signal).toBe(
       'tarball-repointed-unverified:https://registry.npmjs.org'
     );
-    expect(findings[0].message).toContain('a');
-    expect(findings[0].message).toContain('same');
+    // The polarity is the whole finding: it fires BECAUSE no hash was there,
+    // so the message has to say so. An earlier draft said the opposite, and
+    // substring assertions like "same" were satisfied by the wrong string.
+    expect(findings[0].message).toMatch(/no integrity hash/);
+    expect(findings[0].message).not.toMatch(/carried an integrity hash to verify/);
     expect(isBlocking({ ...findings[0], fingerprint: 'x' }, 'medium')).toBe(true);
+  });
+
+  test('the ambiguous-candidate wording also says no integrity hash was there', () => {
+    const hashlessA: LockEntry = { version: '1.0.0', resolvedUrl: BEFORE_URL };
+    const hashlessB: LockEntry = {
+      version: '1.0.0',
+      resolvedUrl: 'https://registry.npmjs.org/a/-/a-1.0.0-other.tgz',
+    };
+    const context = makeContext([], {
+      lockEntryChanges: [
+        makeLockEntryChange(
+          'a',
+          hashlessA,
+          { version: '1.0.0', resolvedUrl: EVIL_URL },
+          { counterpartAmbiguous: true, beforeCandidates: [hashlessA, hashlessB] }
+        ),
+      ],
+    });
+    const repoint = tamperCheck(context).find((f) =>
+      String(f.details?.signal).startsWith('tarball-repointed-unverified')
+    );
+    expect(repoint).toBeDefined();
+    expect(repoint?.message).toMatch(/no integrity hash/);
+    // A guessed pairing may not print one candidate's path.
+    expect(repoint?.details?.beforePath).toBeUndefined();
+    expect(repoint?.details?.counterpartCandidates).toBe(2);
   });
 
   test('the same move with neither side carrying an integrity hash is reported too', () => {
@@ -865,6 +894,134 @@ describe('tamperCheck: a same-origin repoint with no before integrity', () => {
       }),
     ];
     expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+
+  // The gate is the PATHNAME, not the raw resolved URL string. Everything
+  // below leaves the tarball exactly where it was, so none of it is a move;
+  // firing on any of them would also produce a finding whose own reported
+  // beforePath and afterPath were byte-identical.
+  test('a rotated registry credential in the userinfo is not a tarball move', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: {
+          version: '1.0.0',
+          resolvedUrl: 'https://ci:OLDTOKEN@npm.internal.test/a/-/a-1.0.0.tgz',
+        },
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'https://ci:NEWTOKEN@npm.internal.test/a/-/a-1.0.0.tgz',
+        },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+
+  test('a proxy query parameter cycling is not a tarball move', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: `${BEFORE_URL}?token=OLD` },
+        after: { version: '1.0.0', resolvedUrl: `${BEFORE_URL}?token=NEW` },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+
+  test('a fragment-only change is not a tarball move', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: `${BEFORE_URL}#one` },
+        after: { version: '1.0.0', resolvedUrl: `${BEFORE_URL}#two` },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes))).toEqual([]);
+  });
+
+  // The positive counterpart of the three above: a genuine pathname move
+  // fires, and the two paths it reports actually differ.
+  test('a genuine registry pathname move fires and the two reported paths differ', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: { version: '1.0.0', resolvedUrl: BEFORE_URL },
+        after: { version: '1.0.0', resolvedUrl: EVIL_URL },
+      }),
+    ];
+    const finding = tamperCheck(makeContext(changes))[0];
+    expect(finding.severity).toBe('high');
+    expect(finding.details?.beforePath).not.toBe(finding.details?.afterPath);
+  });
+
+  // A git-sourced resolution is hashless BY DESIGN, so a commit bump under a
+  // held version meets every other precondition. It is git-source's business,
+  // not this signal's.
+  test('an npm git+ssh commit bump under a held version does not fire this signal', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: {
+          version: '1.0.0',
+          resolvedUrl: 'git+ssh://git@github.com/owner/repo.git#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'git+ssh://git@github.com/owner/repo.git#bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        },
+      }),
+    ];
+    const signals = tamperCheck(makeContext(changes)).map((f) => String(f.details?.signal));
+    expect(signals.filter((s) => s.startsWith('tarball-repointed-unverified'))).toEqual([]);
+  });
+
+  // pnpm records a github dependency as a codeload tarball, where the commit
+  // sha rides in the PATH -- so the pathname genuinely moves and the pathname
+  // gate alone would not stop it. This is the case the registry-only gate is
+  // load-bearing for.
+  test('a pnpm codeload github tarball commit bump does not fire this signal', () => {
+    const changes = [
+      makeChange({
+        name: 'a',
+        kind: 'changed',
+        before: {
+          version: '1.0.0',
+          resolvedUrl: 'https://codeload.github.com/owner/repo/tar.gz/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'https://codeload.github.com/owner/repo/tar.gz/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        },
+      }),
+    ];
+    const signals = tamperCheck(makeContext(changes)).map((f) => String(f.details?.signal));
+    expect(signals.filter((s) => s.startsWith('tarball-repointed-unverified'))).toEqual([]);
+  });
+
+  // The same shape on a transitive lockfile entry, which has no manifest
+  // line at all -- the walk where a resolution is the only evidence there is.
+  test('a codeload commit bump on a transitive entry does not fire either', () => {
+    const context = makeContext([], {
+      lockEntryChanges: [
+        makeLockEntryChange(
+          'dep',
+          {
+            version: '2.0.0',
+            resolvedUrl: 'https://codeload.github.com/o/r/tar.gz/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          },
+          {
+            version: '2.0.0',
+            resolvedUrl: 'https://codeload.github.com/o/r/tar.gz/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          }
+        ),
+      ],
+    });
+    expect(tamperCheck(context)).toEqual([]);
   });
 });
 

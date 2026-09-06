@@ -45,6 +45,61 @@ export function resolutionOf(url: string): Resolution | null {
   }
 }
 
+// What KIND of source a resolution names, as opposed to where it points.
+// `Protocol` in manifest.ts answers this for a DECLARED specifier; this
+// answers it for a RESOLVED url, which is the only thing the lockfile walk
+// has -- a transitive entry has no manifest line to read a protocol off.
+// The two are deliberately separate types: a manifest `registry` specifier
+// can resolve to a git archive (a github dependency), and a rule that
+// judges resolutions has to see what the lockfile actually points at.
+export type ResolutionKind = 'registry' | 'git' | 'file' | 'url';
+
+// The schemes npm and pnpm write for a git-sourced resolution. npm records
+// a git dependency as `git+ssh://git@host/o/r.git#<sha>`; the sha rides in
+// the FRAGMENT, so the path never moves under a commit bump.
+const GIT_SCHEMES: ReadonlySet<string> = new Set([
+  'git:',
+  'git+ssh:',
+  'git+https:',
+  'git+http:',
+  'git+file:',
+  'ssh:',
+]);
+
+// Hosts that serve a git forge's source archive over ordinary https, where
+// the scheme alone cannot tell a git source from a registry tarball. pnpm
+// records a github dependency as a codeload tarball --
+// `https://codeload.github.com/o/r/tar.gz/<sha>` -- and there the sha rides
+// in the PATH, so a commit bump moves the pathname exactly the way a
+// repoint does. None of these hosts is ever an npm registry, so excluding
+// them costs no registry coverage.
+//
+// This is an exclusion list, and being a list it is the kind of thing this
+// codebase distrusts (see "derive, do not describe" in docs/INVARIANTS.md).
+// It is tolerable here only because of which way an omission fails: a forge
+// missing from it is classified `registry`, which can cost a FALSE POSITIVE
+// on a commit bump, never a missed repoint. Add to it when one shows up;
+// nothing silently loses coverage if it is incomplete.
+const GIT_FORGE_ARCHIVE_HOSTS: ReadonlySet<string> = new Set([
+  'codeload.github.com',
+  'github.com',
+  'gitlab.com',
+  'bitbucket.org',
+]);
+
+export function resolutionKindOf(resolution: Resolution): ResolutionKind {
+  if (GIT_SCHEMES.has(resolution.protocol)) {
+    return 'git';
+  }
+  if (resolution.protocol === 'file:') {
+    return 'file';
+  }
+  if (resolution.protocol === 'http:' || resolution.protocol === 'https:') {
+    return GIT_FORGE_ARCHIVE_HOSTS.has(resolution.host) ? 'git' : 'registry';
+  }
+  return 'url';
+}
+
 // The origin of a URL that may be absent or unparseable. null means "no
 // origin could be established", which is never equal to anything -- two
 // entries that both fail to parse are not thereby the same source.

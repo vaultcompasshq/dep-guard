@@ -473,21 +473,68 @@ undefined`), while a same-origin path move clears host-changed,
 scheme-downgrade and local-source-changed alike, exactly as it did before
 `tarball-repointed` was added. So a held-version repoint to another tarball
 on a host the project already trusts, on an entry that never carried a hash,
-scanned clean. It fires now: same version, same origin, URL moved, no before
-integrity to have caught it. It is reported at high, not critical, and the
-difference is the point -- there is no differing hash asserting the bytes
-changed, only a URL that moved under a held version with no hash that could
-have verified it, so the severity does not overclaim a certainty the
-evidence does not carry, the same honesty the `ambiguous-critical`
-escalation keeps. High still blocks at the default medium gate, because a
-same-version repoint on a trusted host is a genuine supply-chain signal.
-This is a DELTA-mode signal: with no before entry there is no move to
-detect, so audit mode and a fresh add report nothing. Its value-bearing
-subject is the origin (a host cannot move under a version bump, so it obeys
-the fingerprint stability contract), and it is a distinct signal string
-rather than a wider `tarball-repointed`, because a baseline accepting one
-should not silently accept the other -- one is a hash-proven different
-artifact and the other is an unverifiable move, two different facts.
+scanned clean. It fires now: same version, same origin, PATHNAME moved, both
+sides a REGISTRY resolution, and no before integrity to have caught it. It is
+reported at high, not critical, and the difference is the point -- there is
+no differing hash asserting the bytes changed, only a path that moved under a
+held version with no hash that could have verified it, so the severity does
+not overclaim a certainty the evidence does not carry, the same honesty the
+`ambiguous-critical` escalation keeps. High still blocks at the default
+medium gate, because a same-version repoint on a trusted host is a genuine
+supply-chain signal.
+
+Two clauses of that gate are not obvious and both were wrong in the first
+draft, so they are recorded here rather than left in the code.
+
+The move is judged on the PATHNAME, never on the raw resolved URL string. A
+raw-string comparison fires on things that are not a tarball move at all: a
+rotated credential in the userinfo (`ci:OLD@` to `ci:NEW@` on a private
+registry), a proxy's `?token=` query parameter cycling, a changed fragment.
+All three leave the tarball exactly where it was, and each would have
+produced a BLOCKING finding whose own reported `beforePath` and `afterPath`
+were byte-identical -- precisely the self-contradicting output the
+`host-changed` rule already refuses to produce for a scheme-only change.
+Gating on the same `pathLabel` whose output the finding reports makes "the
+two paths differ" true by construction. None of the three earns a diagnostic
+either: the comparison ran and reached a verdict (nothing moved), so there is
+no lost coverage to announce.
+
+It is REGISTRY-only on both sides, and that clause is load-bearing rather
+than tidy. A git-sourced resolution is hashless BY DESIGN, so a commit bump
+under a held version satisfies every other precondition here. npm writes a
+git dependency as `git+ssh://...#<sha>`, where the sha rides in the fragment
+and the pathname never moves -- the pathname gate alone already excludes it.
+pnpm writes a github dependency as a codeload tarball,
+`https://codeload.github.com/o/r/tar.gz/<sha>`, where the sha rides in the
+PATH, so the pathname genuinely moves and only this clause stops it. Without
+it, every github-dependency commit bump would file a blocking high, on top of
+the `git-source` finding the manifest walk already raises for the same
+dependency, and it would quietly reverse `sourceSwapReport`'s deliberate
+demotion of a pinned git source. A git source's integrity is git's own, and
+judging it is `git-source`'s job. `resolutionKindOf` in `resolution.ts` is
+where that classification lives -- the resolution-side counterpart of
+manifest.ts's `Protocol`, kept there for the same reason `resolutionOf` is:
+the lockfile walk has no manifest line to read a protocol off. Its
+http(s)-forge host set is an exclusion list, and the direction of an omission
+is why that is tolerable: a forge missing from it classifies as `registry`
+and can cost a false positive on a commit bump, never a missed repoint.
+
+The audit-mode exclusion is STRUCTURAL, not a guard, and the distinction
+matters to anyone auditing this rule. Nothing here consults
+`hasComparisonBase`. The branch lives inside `compare()`, which only ever runs
+for a pair that HAS a before entry: `subjectOfChange` returns null without
+one, and `candidatesOfLockEntry` returns an empty list. With no earlier
+revision there is no before entry, so there is no move to compare and the
+branch is unreachable, rather than reachable-and-suppressed. Any future
+refactor that gives `compare()` a synthetic before side would reopen this,
+and would need the flag consulted explicitly.
+
+Its value-bearing subject is the origin (a host cannot move under a version
+bump, so it obeys the fingerprint stability contract), and it is a distinct
+signal string rather than a wider `tarball-repointed`, because a baseline
+accepting one should not silently accept the other -- one is a hash-proven
+different artifact and the other is an unverifiable move, two different
+facts.
 
 `resolution-unreadable` is the fail-closed case. A resolved URL the engine
 cannot parse used to end the comparison with a bare return, and npm
@@ -1568,31 +1615,66 @@ re-checking, reopening the fail-open on the second call. The refusal lands
 the first time `hasName` needs the filter, exactly like the existing
 truncated-bloom case.
 
-The load-time window is `[0.10, 0.90]`, and it is deliberately WIDER than the
-release gate's `[0.25, 0.75]` (`assertBloomFillRatioPlausible` in
+What this window is worth is narrower than its presence suggests, and
+overstating it is the failure this paragraph exists to prevent. It is a
+backstop against WHOLESALE degenerate shapes, not an anti-tamper control, and
+a corpus that clears it is not thereby verified. Two facts fix that scope:
+
+- Partial saturation passes. The false-accept rate of a filter at fill `f` is
+  about `f^k`, so a filter well inside this window is already badly degraded.
+  Measured on a 5000-name geometry: at fill 0.85 roughly 14 percent of
+  hallucinated names are accepted at `k`=13 and 23 percent at `k`=10; at fill
+  0.90, roughly 21 percent and 42 percent. Every one of those PASSES this
+  window, and a corpus in that state would miss most of what
+  unknown-package exists to catch while reporting nothing.
+- A targeted insertion is invisible to any window. Setting the `k` bits for
+  one specific name moves the ratio by `k/m` -- on the production filter
+  (`k`=13, `m`=82,434,282) about 1.6e-7. No fill band of any width can see
+  that; detecting it needs a signature over the artifact, which this is not.
+
+So the window's job is only to refuse the all-ones and all-zeros shapes, and
+its bounds are chosen to do that without false-rejecting a real corpus.
+It is `[0.10, 0.90]`, deliberately WIDER than the release gate's
+`[0.25, 0.75]` (`assertBloomFillRatioPlausible` in
 scripts/lib/shippable-corpus.mjs). A bloom filter sized the way
 `BloomFilter.create` sizes one has an expected fill of `1 - e^(-kn/m)` after
 its `n` inserts, which the optimal `k` drives to almost exactly 0.5,
 independent of `n` and of the false-positive rate -- so the release gate,
-which only ever sees a full multi-million-name production corpus (measured
-fill 0.4904, negligible variance), can afford the tight window. The reader
-also serves the committed dev fixture (53 names, measured 0.5085) and, in
-tests and local development, one-name and other tiny corpora. A tiny
-corpus's fill is a noisy single realization of that 0.5 expectation, not the
-expectation itself: measured one-name filters land anywhere from 0.25
-(fpRate 0.0001) to 0.667 (fpRate 0.001), because with one insert the handful
-of set bits is dominated by hash collisions rather than the law of large
-numbers a real corpus converges under. So the release window would
-false-reject a legitimately small corpus at load, and -- this is the part
-that rules out the more obvious design -- an EXPECTED-fill band (observed
-against the fill implied by the claimed name count) tight enough to be
-meaningful would too, because the variance is larger than the drift of the
-expectation it would center on. A deliberately wide fixed window is the
-robust choice: it must catch the two degenerate shapes, which sit at the
-exact extremes 0.0 and 1.0, while never rejecting a real corpus. Every
-legitimate corpus measured -- production 0.4904, the dev fixture 0.5085,
-one-name filters 0.25 to 0.667 -- falls inside `[0.10, 0.90]`, and the two
-shapes this exists to catch sit a wide margin outside it.
+which only ever sees a full multi-million-name production corpus, can afford
+the tighter band. The reader also serves the committed dev fixture (53
+names, measured 0.5085) and, in tests and local development, one-name and
+other tiny corpora. A tiny corpus's fill is a noisy single realization of
+that 0.5 expectation, not the expectation itself: measured single-name
+filters range about 0.25 to 0.70 across different names and fpRates, and the
+ANALYTIC worst case is lower than any of those measurements -- for `n`=1 at
+fpRate 0.0001 the geometry is `m`=20, `k`=14, and when the double-hashing
+stride shares a factor with `m` the `k` probes collapse onto as few as 2
+distinct bits, a fill of exactly 0.10. The earlier version of this section
+quoted "0.25 to 0.667" as though it were a bound; it was two measurements,
+and the analytic floor sits well below them, which is exactly the kind of
+anecdote-as-fact this file warns about at the top.
+
+So the release window would false-reject a legitimately small corpus at load,
+and -- this is the part that rules out the more obvious design -- an
+EXPECTED-fill band (observed against the fill implied by the claimed name
+count) tight enough to be meaningful would too, because the variance is
+larger than the drift of the expectation it would centre on.
+
+The boundary is INCLUSIVE at both ends, and that is load-bearing rather than
+incidental. The test is `fill < MIN || fill > MAX`, so a fill of exactly 0.10
+and a fill of exactly 0.90 both PASS. At the low end that is required: the
+analytic worst case for the smallest legitimate corpus is exactly 0.10, and
+an exclusive bound would reject it. At the high end it is acceptable because
+the shape being caught is exactly 1.0, a full 0.10 clear of the bound, and
+because anything that ships has already been through the tighter release
+band -- the load guard is the last net, not the first.
+
+The production corpus fill quoted elsewhere in these notes (0.4904) was
+measured against a local `.corpus-work` build. It is NOT reproducible from a
+clone: `packages/core/data` is gitignored and empty in the repository, and
+the shipped corpus is built fresh in the release job (see "A published
+corpus is built in the release job"). Treat that figure as one observation
+of one build, not as a checked-in fact a test could re-derive.
 
 The window reads the physical bit array only (`fillRatio()` counts set bits
 up to `bitCount`); it never consults the self-reported `meta.nameCount`,
