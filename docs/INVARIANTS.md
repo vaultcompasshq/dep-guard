@@ -1777,10 +1777,15 @@ Three consequences hold and are each pinned by a test:
 - Failing to read a control input is could-not-run, exit 2, never a
   fallback. That covers an unresolvable trust base, a trust base that IS
   the tree being judged (same commit, or a different commit with an
-  identical tree, which is what a merge ref looks like), and a base-side
-  config or baseline that will not validate. Every one of those has a
-  tempting quiet fallback and every one of those fallbacks is reachable by
-  whoever opens the pull request.
+  identical tree, which is what a merge ref looks like), a base-side
+  config or baseline that will not validate, and a base-side config,
+  baseline or `.npmrc` that is not a regular file (a symlink or a gitlink
+  at the ref). The last one is a misconfiguration on the protected branch
+  rather than something the pull request did, and the message says so,
+  but it is refused all the same: an `.npmrc` read through a link yields
+  no pins, and no pins is the loosest possible setting, not the safest.
+  Every one of those has a tempting quiet fallback and every one of those
+  fallbacks is reachable by whoever opens the pull request.
 
 The reason this is stated as an invariant rather than left to the
 implementation: the hole was not one bug, it was one CATEGORY of bug
