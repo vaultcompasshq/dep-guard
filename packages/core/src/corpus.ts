@@ -155,6 +155,55 @@ function assertMetaShape(filePath: string, value: unknown): asserts value is Cor
   }
 }
 
+// The load-time bit-fill guard. A bloom filter whose bit array is all ones
+// answers has() true for every name, which makes hasName() true for every
+// hallucinated name and silently disables the unknown-package check with no
+// finding and no diagnostic -- the fail-open direction. An all-zeros filter
+// is the mirror: everything reads as unknown. deserialize (bloom.ts)
+// validates magic, version, geometry and byte length, and none of those can
+// see either shape -- both keep an intact header and the right length.
+//
+// The release gate (scripts/lib/shippable-corpus.mjs, assertBloomFillRatioPlausible)
+// already measures this ratio and demands [0.25, 0.75], but it runs only at
+// publish time, against a full multi-million-name production corpus whose
+// fill is 0.49 with negligible variance -- so it can afford that tight
+// window. This check runs in the reader every scan goes through, which also
+// serves the committed dev fixture (53 names, measured fill 0.5085) and, in
+// tests and local development, one-name and other tiny corpora. A tiny
+// corpus's fill is a noisy single realization of the ~0.5 expectation:
+// measured one-name filters land anywhere from 0.25 (fpRate 0.0001) to
+// 0.667 (fpRate 0.001), because with one insert the handful of set bits is
+// dominated by hash collisions rather than the law-of-large-numbers 0.5 a
+// real corpus converges to. So the release window would false-reject a
+// legitimately small corpus at load, and an expected-fill band tight enough
+// to be meaningful would too -- the variance is larger than the drift of
+// the expectation. A deliberately wider fixed window is the robust choice
+// here: it must catch the two degenerate shapes, which sit at the exact
+// extremes 0.0 (empty) and 1.0 (saturated), while never rejecting a real
+// corpus. Every legitimate corpus measured -- production 0.4904, the dev
+// fixture 0.5085, one-name filters 0.25 to 0.667 -- falls inside [0.10,
+// 0.90], and the two shapes this exists to catch sit a wide margin outside
+// it. The window reads the physical bit array only; it never consults the
+// self-reported meta.nameCount, which is exactly the field a corpus forged
+// to justify a saturated filter would inflate.
+const LOAD_MIN_FILL_RATIO = 0.1;
+const LOAD_MAX_FILL_RATIO = 0.9;
+
+function assertBloomFillPlausible(bloomPath: string, bloom: BloomFilter): void {
+  const fill = bloom.fillRatio();
+  if (fill < LOAD_MIN_FILL_RATIO || fill > LOAD_MAX_FILL_RATIO) {
+    throw new DepGuardError(
+      `corpus bloom filter has an implausible bit-fill ratio of ${fill.toFixed(4)}, outside the ` +
+        `[${LOAD_MIN_FILL_RATIO}, ${LOAD_MAX_FILL_RATIO}] a filter that actually holds its names ` +
+        `sits in (expected near 0.5): ${bloomPath}. A saturated filter (fill near 1) answers ` +
+        'present for every name, which would silently disable the unknown-package check; an empty ' +
+        'filter (fill near 0) reports every name as unknown. A corpus this build cannot trust must ' +
+        'not serve a scan -- rebuild the corpus.',
+      'corpus-corrupt'
+    );
+  }
+}
+
 export function loadCorpus(dir: string): Corpus {
   const bloomPath = path.join(dir, 'names.bloom');
   const topPath = path.join(dir, 'top.json');
@@ -208,14 +257,22 @@ export function loadCorpus(dir: string): Corpus {
     const bloomBytes = new Uint8Array(
       bloomBuf.buffer.slice(bloomBuf.byteOffset, bloomBuf.byteOffset + bloomBuf.byteLength)
     );
+    let deserialized: BloomFilter;
     try {
-      bloom = BloomFilter.deserialize(bloomBytes);
+      deserialized = BloomFilter.deserialize(bloomBytes);
     } catch (err) {
       if (err instanceof DepGuardError) {
         throw err;
       }
       throw new DepGuardError(`corpus bloom filter is corrupt: ${bloomPath}`, 'corpus-corrupt');
     }
+    assertBloomFillPlausible(bloomPath, deserialized);
+    // Only cache a filter that cleared the fill-ratio guard. Assigning
+    // before the guard would leave a saturated or empty filter in `bloom`,
+    // and every later hasName() call would then return from the cache
+    // without re-checking -- the fail-open this guard exists to close would
+    // reopen on the second call.
+    bloom = deserialized;
     return bloom;
   }
 

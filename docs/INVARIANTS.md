@@ -890,15 +890,20 @@ The codes, and what each one means:
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
   corpus is absent, damaged, or -- for `corpus-corrupt` specifically --
   valid but written in a shape this build refuses to trust: a
-  `formatVersion` this build does not understand, or a
+  `formatVersion` this build does not understand, a
   `walkComplete: false` (or anything other than the literal boolean
-  `true`) from a walk that was stopped early or never finished. Neither of
-  those is damage -- the file parses and the fields are the right types --
-  but this build cannot tell what it does not know, or must not serve a
-  partial result as if it were a complete one, so both are refused the
-  same way a corrupt file would be. A corpus that reads as empty would
-  bless every hallucinated name. See "The corpus format is versioned" and
-  "A partial corpus refuses itself" below for the two checks this covers.
+  `true`) from a walk that was stopped early or never finished, or a bloom
+  filter whose bit-fill ratio is implausible (near 1, so it answers present
+  for every name and silently disables unknown-package; or near 0, so it
+  answers absent for every name). None of those is damage -- the file
+  parses and the fields are the right types -- but this build cannot tell
+  what it does not know, or must not serve a partial or fail-open result as
+  if it were a complete one, so all are refused the same way a corrupt file
+  would be. A corpus that reads as empty would flag every name, and a
+  saturated one would bless every hallucinated name. See "The corpus format
+  is versioned", "A partial corpus refuses itself", and "A bloom filter the
+  reader cannot trust fails closed at load" below for the three checks this
+  covers.
 - `path-missing` -- the path to scan does not exist, or is not a directory.
   A path nobody looked at must not report a clean result.
 - `read-error` -- a path exists but cannot be read.
@@ -1539,3 +1544,78 @@ its tests in scripts/tests/corpus-guards.test.mjs, which exercise both
 branches against real on-disk artifacts and assert that `loadCorpus`
 genuinely does refuse the partial one `verifyBuiltCorpus` accepts -- proof
 the two paths are different, not just that neither happens to throw.
+
+## A bloom filter the reader cannot trust fails closed at load
+
+`BloomFilter.deserialize` validates the magic, the version, the geometry
+(bitCount and hashCount both at least 1) and the byte length, and none of
+those can see a filter that is saturated or empty: an all-ones bit array and
+an all-zeros one both keep an intact header and the exact right length. A
+saturated filter answers `has()` true for every name, so `hasName` is true
+for every hallucinated name and the flagship unknown-package check is
+silently disabled -- no finding, no diagnostic, the fail-open direction. An
+all-zeros filter is the mirror: every name reads as unknown. Either is a
+corpus this build cannot trust, so `loadCorpus` refuses it (`corpus-corrupt`)
+via `assertBloomFillPlausible` in `packages/core/src/corpus.ts`, keyed on
+`BloomFilter.fillRatio()`.
+
+The check is in `loadBloom`, not `loadCorpus`'s eager section, so it stays
+lazy the way the rest of the bloom load is (a scan that never calls
+`hasName` never reads or validates the filter), and the validated filter is
+cached only AFTER it clears the guard -- caching before would leave a bad
+filter in the closure and every later `hasName` would answer from it without
+re-checking, reopening the fail-open on the second call. The refusal lands
+the first time `hasName` needs the filter, exactly like the existing
+truncated-bloom case.
+
+The load-time window is `[0.10, 0.90]`, and it is deliberately WIDER than the
+release gate's `[0.25, 0.75]` (`assertBloomFillRatioPlausible` in
+scripts/lib/shippable-corpus.mjs). A bloom filter sized the way
+`BloomFilter.create` sizes one has an expected fill of `1 - e^(-kn/m)` after
+its `n` inserts, which the optimal `k` drives to almost exactly 0.5,
+independent of `n` and of the false-positive rate -- so the release gate,
+which only ever sees a full multi-million-name production corpus (measured
+fill 0.4904, negligible variance), can afford the tight window. The reader
+also serves the committed dev fixture (53 names, measured 0.5085) and, in
+tests and local development, one-name and other tiny corpora. A tiny
+corpus's fill is a noisy single realization of that 0.5 expectation, not the
+expectation itself: measured one-name filters land anywhere from 0.25
+(fpRate 0.0001) to 0.667 (fpRate 0.001), because with one insert the handful
+of set bits is dominated by hash collisions rather than the law of large
+numbers a real corpus converges under. So the release window would
+false-reject a legitimately small corpus at load, and -- this is the part
+that rules out the more obvious design -- an EXPECTED-fill band (observed
+against the fill implied by the claimed name count) tight enough to be
+meaningful would too, because the variance is larger than the drift of the
+expectation it would center on. A deliberately wide fixed window is the
+robust choice: it must catch the two degenerate shapes, which sit at the
+exact extremes 0.0 and 1.0, while never rejecting a real corpus. Every
+legitimate corpus measured -- production 0.4904, the dev fixture 0.5085,
+one-name filters 0.25 to 0.667 -- falls inside `[0.10, 0.90]`, and the two
+shapes this exists to catch sit a wide margin outside it.
+
+The window reads the physical bit array only (`fillRatio()` counts set bits
+up to `bitCount`); it never consults the self-reported `meta.nameCount`,
+which is exactly the field a corpus forged to justify a saturated filter
+would inflate. This is why deriving an expected fill "for the claimed name
+count" would be not only variance-fragile but a smaller trust surface than
+reading the bits directly: an attacker who controls `meta.json` could set a
+`nameCount` whose implied expected fill is near 1, and a saturated observed
+fill would then match it. The physical-fill window has nothing for such a
+lie to move.
+
+This is additive to the release gate, never a replacement: the gate's
+`[0.25, 0.75]` is tighter and still runs at publish, so it still catches
+fills between 0.10 and 0.25 or between 0.75 and 0.90 that the load window
+lets through. Because `assertCorpusShippable` reaches `loadCorpus().hasName`
+(in `assertLoadsAndResolvesKnownName`) BEFORE its own
+`assertBloomFillRatioPlausible`, a near-empty or saturated corpus now trips
+the reader's guard first, with a message that also names the bit-fill ratio
+-- the gate still refuses to ship it, just one check earlier.
+
+This is a security hardening at the read boundary, a new refusal REASON at
+load rather than a change to any verdict, signal, fingerprint, exit code, or
+output shape. It fits the stability policy's patch case (a security defect
+in dep-guard itself: a corpus that fails open was accepted), but it rides
+the same release as the tamper-signal minor above, so it ships as part of
+that minor.

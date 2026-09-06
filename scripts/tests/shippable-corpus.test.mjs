@@ -310,9 +310,16 @@ describe('assertCorpusShippable', () => {
 
   it('refuses a corpus that loads fine but does not resolve a known-popular name as present', () => {
     const dir = tempCorpusDir();
-    // Filter built over names that do not include "react" at all.
-    writeCorpusFiles(dir, { names: ['some-other-package'], top: ['some-other-package'] });
-    writeMeta(dir, validMeta());
+    // A filter genuinely populated near its claimed nameCount, over names
+    // that do not include "react" at all. It must be properly populated,
+    // not a one-name stub: loadCorpus's own load-time fill-ratio guard
+    // (corpus.ts) refuses a near-empty filter now, and this test needs a
+    // corpus that loads FINE through the real reader and then simply lacks
+    // react -- so the /react/ path is what fails, not the fill guard.
+    const NAME_COUNT = 2000;
+    const names = Array.from({ length: NAME_COUNT }, (_, i) => `not-react-pkg-${i}`);
+    writeCorpusFiles(dir, { names, top: ['some-other-package'], nameCount: NAME_COUNT });
+    writeMeta(dir, validMeta({ nameCount: NAME_COUNT }));
 
     expect(() => assertCorpusShippable(dir, 1)).toThrow(/react/);
   });

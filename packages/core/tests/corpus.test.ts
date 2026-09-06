@@ -341,3 +341,80 @@ describe('loadCorpus', () => {
     }
   });
 });
+
+// A bloom filter whose bit array is all ones answers has() true for every
+// name, which makes hasName return true for every hallucinated name and
+// silently disables the flagship unknown-package check -- no finding, no
+// diagnostic, the fail-open direction. An all-zeros filter is the mirror:
+// hasName is false for everything, so every dependency reads as unknown.
+// deserialize validates the magic, version, geometry and length, but none
+// of that can see a filter that is saturated or empty. The release gate
+// (scripts/lib/shippable-corpus.mjs) measures the bit-fill ratio, but it
+// runs only at release, never at read time. loadBloom now checks it too.
+//
+// The bit-array region begins after the 10-byte header (4 magic + 1
+// version + 4 bitCount + 1 hashCount; see bloom.ts).
+const BLOOM_HEADER_BYTES = 10;
+
+function bloomWithBitArrayForcedTo(value: 0 | 0xff): Uint8Array {
+  // A valid header and a plausible geometry, with the bit array forced all
+  // ones or all zeros -- the two shapes deserialize cannot catch, because
+  // magic, version, bitCount, hashCount and byte length are all intact.
+  const names = Array.from({ length: 500 }, (_, i) => `pkg-${i}`);
+  const bytes = BloomFilter.create(names, 500, 0.0001).serialize();
+  for (let i = BLOOM_HEADER_BYTES; i < bytes.length; i++) {
+    bytes[i] = value;
+  }
+  return bytes;
+}
+
+describe('loadCorpus: bloom fill ratio', () => {
+  test('an all-ones (saturated) bloom filter is refused when a name check first needs it', () => {
+    const dir = writeFixtureDir({ bloom: bloomWithBitArrayForcedTo(0xff) });
+    const corpus = loadCorpus(dir);
+    // Lazy, like the truncated-bloom case: loadCorpus itself does not read
+    // the filter, so the refusal lands the first time hasName needs it.
+    expectCorpusCorrupt(() => corpus.hasName('totally-made-up-name-xyz'));
+  });
+
+  test('a saturated filter is refused on EVERY hasName call, not just the first', () => {
+    const dir = writeFixtureDir({ bloom: bloomWithBitArrayForcedTo(0xff) });
+    const corpus = loadCorpus(dir);
+    expectCorpusCorrupt(() => corpus.hasName('one'));
+    // The bad filter must never end up cached and then answer cleanly.
+    expectCorpusCorrupt(() => corpus.hasName('two'));
+  });
+
+  test('an all-zeros (empty) bloom filter is refused when a name check first needs it', () => {
+    const dir = writeFixtureDir({ bloom: bloomWithBitArrayForcedTo(0) });
+    const corpus = loadCorpus(dir);
+    expectCorpusCorrupt(() => corpus.hasName('react'));
+  });
+
+  test('the message names the fill ratio and the fail-open risk', () => {
+    const dir = writeFixtureDir({ bloom: bloomWithBitArrayForcedTo(0xff) });
+    const corpus = loadCorpus(dir);
+    try {
+      corpus.hasName('x');
+      throw new Error('expected hasName to throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(DepGuardError);
+      expect((err as DepGuardError).message).toContain('fill');
+      expect((err as DepGuardError).message).toContain('1.0000');
+    }
+  });
+
+  // The guard must not reject a legitimately small corpus. The committed
+  // fixture (53 names) and a one-name filter both sit near the 0.5
+  // expectation and load fine.
+  test('the fixture corpus loads and resolves through the fill-ratio guard', () => {
+    const corpus = loadCorpus(FIXTURE_DIR);
+    expect(corpus.hasName('react')).toBe(true);
+  });
+
+  test('a small one-name corpus still resolves through the fill-ratio guard', () => {
+    const dir = writeFixtureDir({ bloom: validBloomBytes() });
+    const corpus = loadCorpus(dir);
+    expect(corpus.hasName('react')).toBe(true);
+  });
+});

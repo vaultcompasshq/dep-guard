@@ -82,6 +82,28 @@ export class BloomFilter {
     return true;
   }
 
+  // The fraction of the bit array that is set. A filter sized the way
+  // create() sizes one (m and k chosen from the insert count n and a target
+  // false-positive rate) has an expected fill of 1 - e^(-kn/m) after its n
+  // inserts, and the optimal k = (m/n) * ln(2) that create() computes drives
+  // that to almost exactly 0.5, independent of n and of the false-positive
+  // rate. A saturated filter (every name reads present) approaches 1.0; a
+  // near-empty one approaches 0.0. Exposed so a reader can refuse those two
+  // degenerate shapes at load time, the way the release gate already refuses
+  // them at publish time -- the deserialize header checks cannot see either,
+  // because magic, version, geometry and length are all intact in both. Only
+  // the bits up to bitCount count; the trailing bits of the final byte are
+  // padding and are never set by insert().
+  fillRatio(): number {
+    let setBits = 0;
+    for (let i = 0; i < this.bitCount; i++) {
+      if ((this.bits[i >>> 3] & (1 << (i & 7))) !== 0) {
+        setBits++;
+      }
+    }
+    return setBits / this.bitCount;
+  }
+
   serialize(): Uint8Array {
     const out = new Uint8Array(HEADER_BYTES + this.bits.length);
     out.set(MAGIC, 0);
