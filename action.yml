@@ -1,5 +1,5 @@
-name: dep-guard
-description: Scan dependency changes for supply-chain risk and upload the result as SARIF. Requires a prior actions/checkout of your repository.
+name: Dep Guard Dependency Gate
+description: Scan dependency changes for supply-chain risk and write a SARIF log. Run after actions/checkout.
 author: Vault & Compass LLC
 branding:
   icon: shield
