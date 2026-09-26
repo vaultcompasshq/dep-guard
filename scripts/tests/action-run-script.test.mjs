@@ -58,6 +58,7 @@ const DEFAULT_INPUTS = {
   'sarif-output': 'dep-guard-results.sarif',
   'upload-sarif': 'true',
   'trust-base': '',
+  base: '',
 };
 
 // A runner: a checkout, a runner temp, and the scanner installed where the
@@ -289,6 +290,31 @@ describe('action.yml "Run dep-guard", under GitHub bash flags', () => {
     expect(
       invoke({ GITHUB_BASE_REF: 'main' }, { 'trust-base': 'origin/release' })
     ).toContain('--trust-base origin/release');
+  });
+
+  test('passes --base by default on a pull_request event, and redirects only off it', () => {
+    // Unlike --trust-base, an explicit `base` input cannot redirect a
+    // pull_request run: the validate step refuses that combination before
+    // this step is ever reached (see "Validate inputs, base" below), because
+    // a pull request could otherwise point comparison at its own head or
+    // branch and empty the delta. This step only proves the argv shape for
+    // the combinations validate would actually let through.
+    const invoke = (env, inputs = {}) =>
+      argvFor({ 'sarif-output': 'args.txt', ...inputs }, env);
+
+    // A push or schedule run: no base ref, no flag, behaviour unchanged.
+    expect(invoke({})).not.toContain('--base');
+
+    // A pull_request run with no explicit `base`: the base branch's
+    // remote-tracking ref, same origin/ prefix reasoning as --trust-base
+    // (a bare "main" would not resolve after a detached-HEAD checkout).
+    expect(invoke({ GITHUB_BASE_REF: 'main' })).toContain('--base origin/main');
+
+    // An explicit `base` input redirects comparison off a pull_request
+    // event, same as `trust-base` does off that event. On a pull_request
+    // event this combination is refused at validate instead of reaching
+    // this step at all; see the describe block below.
+    expect(invoke({}, { base: 'origin/release' })).toContain('--base origin/release');
   });
 });
 
@@ -733,6 +759,57 @@ describe('action.yml "Validate inputs", trust-base', () => {
     // the breaking change forces, so the message has to carry the answer.
     const run = runValidateWith({ version: 'latest' });
     expect(run.stdout).toContain('REMOVE the input');
+  });
+});
+
+describe('action.yml "Validate inputs", base', () => {
+  // Deliberately parallel to the trust-base describe block above: `base`
+  // is validated the same way (same charset, same refusal of `off`) even
+  // though it answers a different question (what changed, not whose
+  // config is trusted).
+  const runValidate = (base) => runValidateWith({ base });
+
+  test('refuses `off`, naming what to do instead', () => {
+    const run = runValidate('off');
+    expect(run.status).not.toBe(0);
+    expect(run.stdout).toContain('`base: off` is not supported');
+  });
+
+  test('refuses `off` however it is capitalised', () => {
+    for (const spelling of ['off', 'Off', 'OFF', 'oFf']) {
+      expect(runValidate(spelling).stdout).toContain('is not supported');
+    }
+  });
+
+  test('accepts an empty value and a real ref', () => {
+    expect(runValidate('').status).toBe(0);
+    expect(runValidate('origin/main').status).toBe(0);
+  });
+
+  test('refuses a ref that could be read as a git option', () => {
+    expect(runValidate('--upload-pack=touch').status).not.toBe(0);
+  });
+
+  test('refuses an explicit base on a pull_request event, naming the event default', () => {
+    // Unlike trust-base, base cannot be redirected on a pull_request event:
+    // a pull request could otherwise point the comparison at its own head or
+    // branch and empty the delta. GITHUB_BASE_REF non-empty is the same
+    // pull-request test the run step uses under auto, and this refusal uses
+    // the same ::error:: mechanism as the `off` refusal above.
+    const run = runValidateWith({ base: 'origin/release' }, { GITHUB_BASE_REF: 'main' });
+    expect(run.status).not.toBe(0);
+    expect(run.stdout).toContain('base');
+    expect(run.stdout).toContain('origin/$GITHUB_BASE_REF');
+    expect(run.stdout).toContain('pull_request');
+    expect(run.stdout).toContain('cannot be redirected');
+  });
+
+  test('still accepts an explicit base off a pull_request event', () => {
+    expect(runValidateWith({ base: 'origin/release' }, {}).status).toBe(0);
+  });
+
+  test('still accepts an unset base on a pull_request event', () => {
+    expect(runValidateWith({ base: '' }, { GITHUB_BASE_REF: 'main' }).status).toBe(0);
   });
 });
 
