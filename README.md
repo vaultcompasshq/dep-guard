@@ -445,7 +445,7 @@ run in that state, derived from what each check reads rather than guessed:
 | --- | --- | --- |
 | Unknown package | runs | runs |
 | Typosquat | runs | runs |
-| Install script | runs only for newly added entries | runs |
+| Install script | runs for every entry, reported at low, which does not block at the default fail-on | runs |
 | Lockfile tamper | does not run for comparison signals* | runs |
 | Version hygiene | runs | runs |
 | Dependency confusion | runs | runs |
@@ -454,21 +454,32 @@ run in that state, derived from what each check reads rather than guessed:
 signals need a lockfile entry on both sides of the change, so they are
 skipped with no earlier revision (`packages/core/src/delta.ts`, the
 `AUDIT_NO_TAMPER_COMPARISON` diagnostic around line 620). Its specifier-based
-git-source and url-source signals read the current manifest specifier
-only, not a comparison, so they still run over every dependency either way
-(`packages/core/src/checks/tamper.ts`, the `delta.changes` loop around
-line 911).
+git-source and url-source signals read the current manifest specifier only,
+not a comparison, and iterate `delta.changes`
+(`packages/core/src/checks/tamper.ts`, around line 911): with no earlier
+revision every dependency reads as a change, so they run over every
+dependency; with a `--base`, `computeDelta` skips a dependency whose
+specifier held and whose lock entry did not differ
+(`packages/core/src/delta.ts`, around lines 567-578), so they run only over
+added or changed dependencies there. A git source pinned to a full commit
+is reported at `low` rather than `critical` when there is no earlier
+revision, since the pin cannot be told apart from one that was already
+present (`sourceSwapReport`, around line 225).
 
 Install script is downgraded rather than skipped: with no earlier
 revision, `hasComparisonBase` is false, so a dependency that already runs
 install scripts cannot be told apart from one that just gained the
-ability, and the finding reports at the lower `present` severity instead
-of `flag-acquired` (`packages/core/src/checks/install-script.ts` around
-line 200, and the pnpm `onlyBuiltDependencies` branch around line 306).
-This is separate from pnpm's own install-script gap: `pnpm-lock.yaml`
-records no per-entry install-script flag at all, with or without `--base`,
-so its coverage is limited to `onlyBuiltDependencies` additions regardless
-(see [Lockfile support](#lockfile-support)). That limitation stays as
+ability. `present` is a *signal*, not a severity: the finding's severity
+drops from `high` to `low`, and the signal reported is `present` instead
+of `added` or `flag-acquired` (`packages/core/src/checks/install-script.ts`,
+`presenceReport` around line 109 and its callers around lines 200 and 267).
+The pnpm `onlyBuiltDependencies` branch (around line 300) makes the same
+severity drop on its own allowlist entries, reporting signal
+`only-built-added` as `present` instead. This is separate from pnpm's own
+install-script gap: `pnpm-lock.yaml` records no per-entry install-script
+flag at all, with or without `--base`, so its coverage is limited to
+`onlyBuiltDependencies` additions regardless (see
+[Lockfile support](#lockfile-support)). That limitation stays as
 documented; this table is about the comparison-based signals only.
 
 The gate fails closed, exit 2, with nothing scanned, when the ref does not
@@ -507,14 +518,22 @@ than a setting. If you need the old behaviour while you arrange
 `fetch-depth: 0`, stay pinned to `@v0.5.0` until you have arranged it.
 
 The action passes `--base` the same way, and separately from `trust-base`:
-on a `pull_request` event it appends `--base origin/$GITHUB_BASE_REF`, and
-on any other event it appends nothing, so a push run stays exactly what it
-was before this input existed. Set `base` to a ref to redirect comparison
-at a different base; the same `fetch-depth: 0` requirement, the same
+on a `pull_request` event it appends `--base origin/$GITHUB_BASE_REF` by
+default, and on any other event it appends nothing by default, so a push
+run stays exactly what it was before this input existed. Set `base` to a
+ref to redirect comparison at a different base on a push, schedule, or
+workflow_dispatch run; the same `fetch-depth: 0` requirement, the same
 refusal of `off`, and the same charset rules apply as they do to
-`trust-base`. Without a `--base`, on a push run or a pull_request run that
-has not set it, the scan runs with no earlier revision to compare
-dependencies against; see the table above for exactly what that costs.
+`trust-base`. Unlike `trust-base`, `base` cannot be redirected on a
+`pull_request` event at all: an explicit value there is refused with an
+error, because a pull request could otherwise point comparison at its own
+head or branch and empty the delta the gate exists to see, so every
+`pull_request` run gets the default. An unresolvable ref exits 2 on any
+event. Without a `--base` -- a push, schedule, or workflow_dispatch run
+that has not set one -- the scan runs with no earlier revision to compare
+dependencies against and stays in audit mode; see the table above for
+exactly what that costs. A `pull_request` run always has one, since
+`GITHUB_BASE_REF` is always set on that event.
 
 ### Protecting the workflow file itself
 
