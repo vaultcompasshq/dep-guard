@@ -107,11 +107,14 @@ inputs:
       the base branch is both the state you diverged from and the state
       whose rules were approved, but either can be set without the other.
 
-      Left at the default, this is decided by the event exactly like
-      `trust-base` is: on a `pull_request` event the action passes
-      `origin/$GITHUB_BASE_REF`, and on any other event it passes nothing,
-      so a push or schedule run is unchanged. Set it to a ref to redirect
-      comparison at a different base.
+      On a `pull_request` event `base` is ALWAYS `origin/$GITHUB_BASE_REF`,
+      and unlike `trust-base` this one cannot be redirected there: an
+      explicit value on a `pull_request` event is refused with an error
+      rather than honoured, because a pull request could otherwise point
+      the comparison at its own head or its own branch and empty the delta
+      the gate exists to see. On any other event `base` is unset by
+      default and an explicit ref works, so a push, schedule, or
+      workflow_dispatch run can set one.
 
       Without a base, the scan has no earlier revision to compare
       dependencies against, so the lockfile-tamper signals that work by
@@ -120,15 +123,17 @@ inputs:
       the README's pull-request-mode table for exactly what still runs in
       that case.
 
-      As with `trust-base`, there is no value that turns comparison off,
-      and `off` is refused with an error rather than ignored, for the same
-      reason: on a same-repository `pull_request` event the workflow file
-      runs from the pull request's own head, so an opt-out input would be
-      settable by the very pull request it governs.
+      There is no value that turns comparison off, and `off` is refused
+      with an error on every event rather than ignored, for the same
+      reason redirecting is refused on a `pull_request` event: an opt-out
+      input would be settable by the very change it is meant to hold at
+      arm's length there, and refusing it everywhere keeps the rule from
+      depending on which event fired.
 
       A pull_request run using this REQUIRES `actions/checkout` with
       `fetch-depth: 0`, so the base branch is present to read, exactly as
-      `trust-base` does.
+      `trust-base` does. A ref that does not resolve exits 2, whatever the
+      event.
 
       Same charset rules as `path`, and additionally may not begin with
       `-`, so it cannot be read as a git option.
@@ -507,6 +512,28 @@ runs:
           validate_path "base" "${DG_BASE}"
         fi
 
+        # UNLIKE `trust-base`, an explicit `base` cannot redirect a
+        # pull_request run at all, not even to a ref the caller wrote in the
+        # workflow file. On a same-repository pull_request event the
+        # workflow file runs from the pull request's own head, so the value
+        # of a `base:` input on that event is chosen by the very change
+        # being judged. `trust-base` is safe to redirect there because
+        # whatever ref it names, THAT ref's config and baseline are what
+        # gate the run; `base` has no equivalent backstop, since it only
+        # decides what counts as changed. A pull request could set `base` to
+        # its own head or its own branch and make every one of its
+        # dependency changes read as unchanged, emptying the delta the gate
+        # exists to see. So on a pull_request event `base` is always
+        # `origin/$GITHUB_BASE_REF`, exactly like the default, and an
+        # explicit value is refused rather than honoured. GITHUB_BASE_REF
+        # non-empty is the same pull-request test used above and in the run
+        # step's own default.
+        if [[ -n "${GITHUB_BASE_REF:-}" && -n "${DG_BASE}" ]]; then
+          printf '::error::dep-guard: `base` cannot be set on a pull_request event: %q\n' "${DG_BASE}"
+          printf '::error::On a pull_request event base is always origin/$GITHUB_BASE_REF and cannot be redirected, because a pull request could otherwise point the comparison at its own head or branch and empty the delta. Leave `base` unset on this event; set it on a push, schedule, or workflow_dispatch run instead.\n'
+          exit 1
+        fi
+
     # THE SCANNER COMES FROM OUTSIDE THE TREE IT SCANS. Running dep-guard with
     # `npx` from inside the checkout put the whole choice of program inside the
     # tree under judgment, by two separate routes. A `.npmrc` committed by the
@@ -817,6 +844,16 @@ runs:
         # config is trusted, so without it the scan has no earlier
         # revision and the lockfile-tamper comparison signals cannot run
         # (see the README's pull-request-mode table).
+        #
+        # UNLIKE --trust-base, DG_BASE CANNOT BE NON-EMPTY HERE ON A
+        # pull_request EVENT. The validate step above refuses an explicit
+        # `base` input whenever GITHUB_BASE_REF is set, so by the time this
+        # line runs, a non-empty DG_BASE means the event is something
+        # other than pull_request. On a pull_request event this branch is
+        # therefore always skipped and the elif below always supplies the
+        # default. This is a design choice, not a redirect: a pull request
+        # could otherwise point the comparison at its own head or branch
+        # and empty the delta the gate exists to see.
         #
         # NEVER PAIRED WITH --staged. dep-guard's own CLI refuses
         # --staged together with --base (packages/cli/src/cli.ts,
