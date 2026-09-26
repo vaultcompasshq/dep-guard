@@ -98,6 +98,42 @@ inputs:
       `-`, so it cannot be read as a git option.
     required: false
     default: ''
+  base:
+    description: |
+      What the change is compared against, passed to the scanner as
+      `--base`. Not the same input as `trust-base`, and neither implies
+      the other: `base` decides what changed, `trust-base` decides whose
+      config file is trusted. They usually name the same ref in CI, since
+      the base branch is both the state you diverged from and the state
+      whose rules were approved, but either can be set without the other.
+
+      Left at the default, this is decided by the event exactly like
+      `trust-base` is: on a `pull_request` event the action passes
+      `origin/$GITHUB_BASE_REF`, and on any other event it passes nothing,
+      so a push or schedule run is unchanged. Set it to a ref to redirect
+      comparison at a different base.
+
+      Without a base, the scan has no earlier revision to compare
+      dependencies against, so the lockfile-tamper signals that work by
+      comparison (resolved-URL change, integrity change, source-host
+      change) cannot run, and every dependency reads as newly added. See
+      the README's pull-request-mode table for exactly what still runs in
+      that case.
+
+      As with `trust-base`, there is no value that turns comparison off,
+      and `off` is refused with an error rather than ignored, for the same
+      reason: on a same-repository `pull_request` event the workflow file
+      runs from the pull request's own head, so an opt-out input would be
+      settable by the very pull request it governs.
+
+      A pull_request run using this REQUIRES `actions/checkout` with
+      `fetch-depth: 0`, so the base branch is present to read, exactly as
+      `trust-base` does.
+
+      Same charset rules as `path`, and additionally may not begin with
+      `-`, so it cannot be read as a git option.
+    required: false
+    default: ''
   sarif-output:
     description: |
       Where to write the SARIF file, relative to the workspace root. Same
@@ -157,6 +193,7 @@ runs:
         DG_SARIF_OUTPUT: ${{ inputs.sarif-output }}
         DG_UPLOAD: ${{ inputs.upload-sarif }}
         DG_TRUST_BASE: ${{ inputs.trust-base }}
+        DG_BASE: ${{ inputs.base }}
         # Declared from the event payload so the value can't come from the
         # workflow file even if the platform guarantee failed.
         GITHUB_BASE_REF: ${{ github.base_ref }}
@@ -452,6 +489,24 @@ runs:
           validate_path "trust-base" "${DG_TRUST_BASE}"
         fi
 
+        # `base` is validated the same way as `trust-base`, for the same
+        # reason: it answers a different question (what changed, rather
+        # than whose config is trusted) but it is exactly as much a
+        # control input on a pull_request event, since it decides which
+        # dependencies read as newly added. No opt-out value, `off`
+        # refused by name, same charset, same case-insensitive match.
+        case "${DG_BASE}" in
+          [Oo][Ff][Ff])
+            printf '::error::dep-guard: `base: off` is not supported. There is no value that disables comparison: on a same-repository pull_request event the workflow file runs from the pull request head, so an opt-out input would be settable by the pull request it governs.\n'
+            printf '::error::Leave `base` unset to use the default (origin/$GITHUB_BASE_REF on a pull_request event, nothing on any other event), or set it to a real ref.\n'
+            exit 1
+            ;;
+        esac
+
+        if [[ -n "${DG_BASE}" ]]; then
+          validate_path "base" "${DG_BASE}"
+        fi
+
     # THE SCANNER COMES FROM OUTSIDE THE TREE IT SCANS. Running dep-guard with
     # `npx` from inside the checkout put the whole choice of program inside the
     # tree under judgment, by two separate routes. A `.npmrc` committed by the
@@ -653,6 +708,7 @@ runs:
         DG_FAIL_ON: ${{ inputs.fail-on }}
         DG_SARIF_OUTPUT: ${{ inputs.sarif-output }}
         DG_TRUST_BASE: ${{ inputs.trust-base }}
+        DG_BASE: ${{ inputs.base }}
       run: |
         # NOT "set -uo pipefail". GitHub invokes a composite bash step as
         # `bash --noprofile --norc -eo pipefail {0}`, so errexit is
@@ -752,6 +808,28 @@ runs:
           ARGS+=(--trust-base "${DG_TRUST_BASE}")
         elif [[ -n "${GITHUB_BASE_REF:-}" ]]; then
           ARGS+=(--trust-base "origin/${GITHUB_BASE_REF}")
+        fi
+
+        # --base, same event-driven default as --trust-base immediately
+        # above, and for the same reason: GITHUB_BASE_REF is set by GitHub
+        # on, and only on, a pull_request event. Unlike --trust-base this
+        # decides what the scan compares dependencies against, not whose
+        # config is trusted, so without it the scan has no earlier
+        # revision and the lockfile-tamper comparison signals cannot run
+        # (see the README's pull-request-mode table).
+        #
+        # NEVER PAIRED WITH --staged. dep-guard's own CLI refuses
+        # --staged together with --base (packages/cli/src/cli.ts,
+        # resolveMode), because the two name incompatible comparisons: one
+        # against the git index, one against an arbitrary ref. This
+        # action never has occasion to raise that conflict, because it
+        # never passes --staged at all -- there is no `staged` input and
+        # no code path above that appends the flag -- so the guard here is
+        # simply that ARGS never grows a --staged of its own.
+        if [[ -n "${DG_BASE}" ]]; then
+          ARGS+=(--base "${DG_BASE}")
+        elif [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+          ARGS+=(--base "origin/${GITHUB_BASE_REF}")
         fi
 
         # SARIF goes to stdout and nothing else does, so this redirects

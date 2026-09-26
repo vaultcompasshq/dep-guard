@@ -1836,12 +1836,25 @@ go undiscovered, which hides the very thing the gate should be looking at.
 Discovery inputs may need a different rule from control inputs, namely the
 union of both sides rather than either one.
 
-**The composite Action never passes `--base`**, so a CI run scans in audit
-mode and the comparison-based lockfile-tamper signals (integrity-changed,
-tarball-repointed, and the rest of the list in the `delta-new-lock-entries`
-diagnostic) never evaluate. Pre-existing in 0.5.0 and not introduced by
-pull-request mode; recorded here because the trust-boundary work is what
-made the gap legible.
+**UPDATED.** The composite Action now has a `base` input (action.yml,
+around line 69, wired to `DG_BASE` and appended as `--base` in the run
+step's ARGS block, around line 830), which on a `pull_request` event
+defaults to `origin/$GITHUB_BASE_REF`, the same event-driven default
+`trust-base` uses. Before this the claim below held without qualification:
+the composite Action never passed `--base` at all, so every CI run scanned
+in audit mode and the comparison-based lockfile-tamper signals never
+evaluated (issue #62). A push run, or a pull_request run that has not set
+`base`, is still unchanged and still scans in audit mode for exactly the
+reason described below; see the README's pull-request-mode table
+(`README.md`, "Pull-request mode") for which checks still run in that
+state.
+
+**The composite Action never passed `--base`** (fixed above), so a CI run
+scans in audit mode and the comparison-based lockfile-tamper signals
+(integrity-changed, tarball-repointed, and the rest of the list in the
+`delta-new-lock-entries` diagnostic) never evaluate. Pre-existing in 0.5.0
+and not introduced by pull-request mode; recorded here because the
+trust-boundary work is what made the gap legible.
 
 ## The scanner is itself a control input, and comes from outside the tree
 

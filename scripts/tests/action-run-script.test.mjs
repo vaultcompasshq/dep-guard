@@ -58,6 +58,7 @@ const DEFAULT_INPUTS = {
   'sarif-output': 'dep-guard-results.sarif',
   'upload-sarif': 'true',
   'trust-base': '',
+  base: '',
 };
 
 // A runner: a checkout, a runner temp, and the scanner installed where the
@@ -289,6 +290,29 @@ describe('action.yml "Run dep-guard", under GitHub bash flags', () => {
     expect(
       invoke({ GITHUB_BASE_REF: 'main' }, { 'trust-base': 'origin/release' })
     ).toContain('--trust-base origin/release');
+  });
+
+  test('passes --base on a pull_request event and nowhere else', () => {
+    // Same shape as the --trust-base test above, and for the same reason:
+    // --base and --trust-base answer two different questions (what changed
+    // vs whose config is trusted) but share the same event-driven default,
+    // so the two tests are deliberately parallel.
+    const invoke = (env, inputs = {}) =>
+      argvFor({ 'sarif-output': 'args.txt', ...inputs }, env);
+
+    // A push or schedule run: no base ref, no flag, behaviour unchanged.
+    expect(invoke({})).not.toContain('--base');
+
+    // A pull_request run: the base branch's remote-tracking ref, same
+    // origin/ prefix reasoning as --trust-base (a bare "main" would not
+    // resolve after a detached-HEAD checkout).
+    expect(invoke({ GITHUB_BASE_REF: 'main' })).toContain('--base origin/main');
+
+    // An explicit `base` input REDIRECTS pull-request mode, exactly like
+    // `trust-base` does; there is no value that disables it.
+    expect(
+      invoke({ GITHUB_BASE_REF: 'main' }, { base: 'origin/release' })
+    ).toContain('--base origin/release');
   });
 });
 
@@ -733,6 +757,35 @@ describe('action.yml "Validate inputs", trust-base', () => {
     // the breaking change forces, so the message has to carry the answer.
     const run = runValidateWith({ version: 'latest' });
     expect(run.stdout).toContain('REMOVE the input');
+  });
+});
+
+describe('action.yml "Validate inputs", base', () => {
+  // Deliberately parallel to the trust-base describe block above: `base`
+  // is validated the same way (same charset, same refusal of `off`) even
+  // though it answers a different question (what changed, not whose
+  // config is trusted).
+  const runValidate = (base) => runValidateWith({ base });
+
+  test('refuses `off`, naming what to do instead', () => {
+    const run = runValidate('off');
+    expect(run.status).not.toBe(0);
+    expect(run.stdout).toContain('`base: off` is not supported');
+  });
+
+  test('refuses `off` however it is capitalised', () => {
+    for (const spelling of ['off', 'Off', 'OFF', 'oFf']) {
+      expect(runValidate(spelling).stdout).toContain('is not supported');
+    }
+  });
+
+  test('accepts an empty value and a real ref', () => {
+    expect(runValidate('').status).toBe(0);
+    expect(runValidate('origin/main').status).toBe(0);
+  });
+
+  test('refuses a ref that could be read as a git option', () => {
+    expect(runValidate('--upload-pack=touch').status).not.toBe(0);
   });
 });
 

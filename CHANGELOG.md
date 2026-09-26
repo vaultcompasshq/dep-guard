@@ -10,6 +10,15 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+- The Action gained a `base` input, wired to the scanner's `--base` flag the
+  same way `trust-base` is wired to `--trust-base`: on a pull_request event
+  it defaults to `origin/$GITHUB_BASE_REF`, on any other event it passes
+  nothing, an explicit ref redirects it, and `off` is refused with an error.
+  Before this the Action never passed `--base` at all, so every scan ran
+  with no earlier revision to compare dependencies against and the
+  lockfile-tamper comparison signals could not run in pull-request mode.
+  README documents which checks still run without a base ref (fixes #62).
+
 - Pinned the Action's npm floor (10.5.2), version-shape regex and its
   occurrence count, `--ignore-scripts` install line, and the exact
   `npm audit signatures` subshell in a drift check. The hygiene blocklist

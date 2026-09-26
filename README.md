@@ -435,6 +435,42 @@ whose rules it is judged. They usually name the same ref in CI, because the
 base branch is both the state you diverged from and the state whose rules
 were approved, but either can be passed without the other.
 
+**Without a `--base`, every dependency reads as newly added**, because the
+scan has no earlier revision to compare against. That is not a special
+case of pull-request mode; it is the state of every scan that never passes
+`--base`, `--trust-base` included. The table below says which checks still
+run in that state, derived from what each check reads rather than guessed:
+
+| Check | No `--base` (every dependency reads as newly added) | With `--base` (real comparison) |
+| --- | --- | --- |
+| Unknown package | runs | runs |
+| Typosquat | runs | runs |
+| Install script | runs only for newly added entries | runs |
+| Lockfile tamper | does not run for comparison signals* | runs |
+| Version hygiene | runs | runs |
+| Dependency confusion | runs | runs |
+
+\* Lockfile tamper's resolved-URL, integrity, and source-host comparison
+signals need a lockfile entry on both sides of the change, so they are
+skipped with no earlier revision (`packages/core/src/delta.ts`, the
+`AUDIT_NO_TAMPER_COMPARISON` diagnostic around line 620). Its specifier-based
+git-source and url-source signals read the current manifest specifier
+only, not a comparison, so they still run over every dependency either way
+(`packages/core/src/checks/tamper.ts`, the `delta.changes` loop around
+line 911).
+
+Install script is downgraded rather than skipped: with no earlier
+revision, `hasComparisonBase` is false, so a dependency that already runs
+install scripts cannot be told apart from one that just gained the
+ability, and the finding reports at the lower `present` severity instead
+of `flag-acquired` (`packages/core/src/checks/install-script.ts` around
+line 200, and the pnpm `onlyBuiltDependencies` branch around line 306).
+This is separate from pnpm's own install-script gap: `pnpm-lock.yaml`
+records no per-entry install-script flag at all, with or without `--base`,
+so its coverage is limited to `onlyBuiltDependencies` additions regardless
+(see [Lockfile support](#lockfile-support)). That limitation stays as
+documented; this table is about the comparison-based signals only.
+
 The gate fails closed, exit 2, with nothing scanned, when the ref does not
 resolve, when it resolves to HEAD's own commit, and when it is a different
 commit carrying HEAD's tree. That last one is not a hypothetical: what
@@ -469,6 +505,16 @@ workflow file runs from the pull request's own head. A knob the untrusted
 side can turn is not a boundary, so base-ref judging is the floor rather
 than a setting. If you need the old behaviour while you arrange
 `fetch-depth: 0`, stay pinned to `@v0.5.0` until you have arranged it.
+
+The action passes `--base` the same way, and separately from `trust-base`:
+on a `pull_request` event it appends `--base origin/$GITHUB_BASE_REF`, and
+on any other event it appends nothing, so a push run stays exactly what it
+was before this input existed. Set `base` to a ref to redirect comparison
+at a different base; the same `fetch-depth: 0` requirement, the same
+refusal of `off`, and the same charset rules apply as they do to
+`trust-base`. Without a `--base`, on a push run or a pull_request run that
+has not set it, the scan runs with no earlier revision to compare
+dependencies against; see the table above for exactly what that costs.
 
 ### Protecting the workflow file itself
 
