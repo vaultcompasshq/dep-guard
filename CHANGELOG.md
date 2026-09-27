@@ -10,6 +10,35 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+- Fixed a publish-age coverage loss: a scope pinned to the PUBLIC registry
+  in `.npmrc` used to be treated as private just because it had a pin at
+  all, so a dependency under that scope never reached the publish-age
+  check. A pin now decides by its own origin, and still outranks the
+  project's default registry either way: a scope pinned to the public
+  registry is checked even under a private default, and a scope pinned
+  away from the public registry is skipped even under a public default.
+  README and `docs/INVARIANTS.md` updated (fixes #67).
+
+- Fixed a privacy gap in the two online checks that predate publish-age:
+  `unknown-package` and `registered-squat` used to send every
+  manifest-declared name to the public registry regardless of `.npmrc`
+  scope pins or the project's default registry, the same leak shape
+  publish-age was built to close. The name-level decision is now shared
+  across all three checks (`online/registry-scope.ts`'s `isNonPublicName`),
+  and a name it excludes is never silently dropped: `unknown-package`
+  raises `unknown-package-private-origin-skipped` and `registered-squat`
+  raises `registered-squat-private-origin-skipped`, each naming the
+  package. README and `docs/INVARIANTS.md` updated (fixes #70).
+
+- Fixed a pull-request misreport: `trust-base.ts`'s `npmrcChanged` only
+  compared the `.npmrc` scope pins and the file's shape, so a pull request
+  that edited nothing but the unscoped `registry=` line was reported as an
+  unchanged `.npmrc` even though that line is a control input the run
+  already judges from the base ref. `npmrcChanged` now also ORs in a
+  difference between the base and head default registry, and
+  `describeNpmrcChange` names it ("proposed: default registry changed").
+  README and `docs/INVARIANTS.md` updated (fixes #66).
+
 ## [0.8.0] - 2026-09-26
 
 Minor on both published packages, per the stability policy: 0.x minors may
