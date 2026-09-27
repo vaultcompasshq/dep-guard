@@ -223,13 +223,48 @@ own network failure: it never turns an otherwise-clean scan's exit 0 into
 an exit 1 by itself, so a registry outage does not turn a required CI
 check red on its own.
 
-All four share one wall-clock budget of twenty seconds per run, not per
-request. Once it is spent the remaining lookups are skipped, the affected
-findings keep exactly the result the offline checks gave them, and an
-`online-deadline-exceeded` diagnostic says how many were skipped. Without
-it, a repository adding twenty new names could stall a commit for
-half a minute while every individual request stayed comfortably inside
-its own timeout.
+All four share one wall-clock budget per run, not per request. Once it is
+spent the remaining lookups are skipped, the affected findings keep exactly
+the result the offline checks gave them, and an `online-deadline-exceeded`
+diagnostic says how many were skipped. A spent budget never fails the run
+by itself: it stays a diagnostic, the same as a registry error above,
+because a skipped lookup is exactly as much "nothing this check could say"
+as a network failure is.
+
+The budget defaults to **20000ms (twenty seconds)** for a plain run --
+the pre-commit hook shape, where a developer is waiting on the command to
+finish, and a repository adding twenty new names should not stall a commit
+for half a minute while every individual request stays comfortably inside
+its own timeout. It defaults to **300000ms (five minutes)** instead when
+either `--base` or `--trust-base` is given, because that is the
+pull-request/CI shape rather than a hook: a CI job has minutes to spend,
+and the expensive failure there is not a slow job but a large dependency
+change whose remaining lookups quietly keep their offline result once the
+hook-sized budget runs out. Either default can be overridden: the
+`onlineBudgetMs` key in `.dep-guard.json` sets it for every invocation
+(like `"online"` itself, only meaningful alongside it), and `--online-budget-ms
+<ms>` overrides both the key and the default for one run. An explicit
+config key or flag always wins over whichever default would otherwise
+apply.
+
+The run's JSON output always carries an `online` object under `run`,
+whether or not online checks ran, so a CI consumer (the conductor umbrella
+in particular) can read it unconditionally: `enabled`, the `budgetMs`
+actually used, `lookupsAttempted` (real registry/downloads requests
+issued), `lookupsSkippedByDeadline` (candidates skipped once the budget was
+spent, matching what the `online-deadline-exceeded` diagnostics already
+say), and `deadlineExceeded`. Disabled online checks report `enabled:
+false` and every number at zero, never an absent field.
+
+```json
+"online": {
+  "enabled": true,
+  "budgetMs": 300000,
+  "lookupsAttempted": 42,
+  "lookupsSkippedByDeadline": 0,
+  "deadlineExceeded": false
+}
+```
 
 `--no-online` forces the online checks off for one run, overriding
 `"online": true` in `.dep-guard.json`. That is the flag to reach for in a
@@ -743,7 +778,8 @@ Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
   "extraAliases": { "unused-imports": ["eslint-plugin-unused-imports"] },
   "ignorePaths": ["fixtures"],
   "minAgeDays": 7,
-  "minAgeAllow": ["some-package@1.2.3"]
+  "minAgeAllow": ["some-package@1.2.3"],
+  "onlineBudgetMs": 20000
 }
 ```
 
@@ -761,6 +797,13 @@ and accepts `0` (only future-dated publishes are refused). `minAgeAllow`
 takes exact `name@version` strings, never a bare name -- allowing a bare
 name would silence every future version of it too, the same much-bigger
 door `allow` is for, not a one-release exception.
+
+`onlineBudgetMs` sets the per-run online wall-clock budget (see "Online
+checks" above); it too has no effect without `--online` or `"online":
+true`. Unset, the budget defaults to 20000 for a plain run or 300000 for a
+`--base`/`--trust-base` run -- setting this key picks one number for every
+invocation regardless of shape, the same way `--online-budget-ms` picks one
+for a single run.
 
 Every key here, the baseline file beside it, and the scope pins in
 `.npmrc`, are **control inputs**: they decide what dep-guard reports rather

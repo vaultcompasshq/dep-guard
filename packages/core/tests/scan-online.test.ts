@@ -786,3 +786,188 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
     expect(result.findings.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('critical');
   });
 });
+
+// Issue #75: the run-level online budget and its JSON summary
+// (result.run.online). A name the fixture corpus does not know
+// ("published-after-the-corpus-walk", reused from the unknown-package
+// describe block above) gives resolveUnknownPackages exactly one real
+// candidate, which is all these tests need: either it is looked up (a real
+// mocked request, counted) or it is skipped by an already-spent deadline
+// (counted the other way).
+describe('scan(): run.online summary', () => {
+  beforeEach(async () => {
+    fetchWeeklyDownloadsMock.mockReset();
+    fetchPackumentMock.mockReset();
+    fetchPackumentMock.mockResolvedValue(null);
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map(), noRecord: new Set() });
+    process.env.XDG_CACHE_HOME = mkdtempSync(path.join(tmpdir(), 'depguard-online-cache-'));
+    jest.resetModules();
+    ({ scan, checkSingle } = await import('../src/scan.js'));
+  });
+
+  test('online off reports enabled:false and all zeros', async () => {
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: false,
+    });
+
+    expect(result.run.online).toEqual({
+      enabled: false,
+      budgetMs: 0,
+      lookupsAttempted: 0,
+      lookupsSkippedByDeadline: 0,
+      deadlineExceeded: false,
+    });
+  });
+
+  test('the onlineBudgetMs config key is honoured', async () => {
+    const dir = initRepo();
+    writeFileSync(
+      path.join(dir, '.dep-guard.json'),
+      JSON.stringify({ online: true, onlineBudgetMs: 12345 })
+    );
+    commitManifest(dir, {});
+
+    const result = await scan({ repoRoot: dir, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.run.online.enabled).toBe(true);
+    expect(result.run.online.budgetMs).toBe(12345);
+  });
+
+  test('the --online-budget-ms flag overrides the config key', async () => {
+    const dir = initRepo();
+    writeFileSync(
+      path.join(dir, '.dep-guard.json'),
+      JSON.stringify({ online: true, onlineBudgetMs: 12345 })
+    );
+    commitManifest(dir, {});
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'audit' },
+      corpusDir: FIXTURE_CORPUS,
+      onlineBudgetMs: 999,
+    });
+
+    expect(result.run.online.budgetMs).toBe(999);
+  });
+
+  test('the default is 20000 with no --base and no --trust-base', async () => {
+    const dir = initRepo();
+    commitManifest(dir, {});
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'audit' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    expect(result.run.online.budgetMs).toBe(20_000);
+  });
+
+  test('the default is 300000 with --base', async () => {
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    expect(result.run.online.budgetMs).toBe(300_000);
+  });
+
+  test('the default is 300000 with --trust-base, even without --base', async () => {
+    const dir = initRepo();
+    writeFileSync(path.join(dir, '.dep-guard.json'), JSON.stringify({ failOn: 'medium' }));
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'audit' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+      trustBase: 'HEAD~1',
+    });
+
+    expect(result.run.online.budgetMs).toBe(300_000);
+  });
+
+  test('lookupsAttempted counts exactly the real registry/downloads calls made', async () => {
+    fetchWeeklyDownloadsMock.mockResolvedValue({
+      counts: new Map([['some-brand-new-thing', 2]]),
+      noRecord: new Set(),
+    });
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: new Date().toISOString(),
+      latestVersion: '0.0.1',
+      latestPublishedAt: new Date().toISOString(),
+      deprecated: false,
+      unpublished: false,
+      securityHolder: false,
+      versionTimes: {},
+    });
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'some-brand-new-thing': '^0.0.1' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    const observedCalls = fetchWeeklyDownloadsMock.mock.calls.length + fetchPackumentMock.mock.calls.length;
+    expect(observedCalls).toBeGreaterThan(0);
+    expect(result.run.online.lookupsAttempted).toBe(observedCalls);
+  });
+
+  test('an exceeded deadline is reported: enabled, the configured budget, no lookups, and a skipped count matching the diagnostics', async () => {
+    const dir = initRepo();
+    writeFileSync(
+      path.join(dir, '.dep-guard.json'),
+      // A budget of 0 is expired from the very first question (see
+      // online-deadline.test.ts), the same device that file's own unit
+      // tests use to force expiry, applied here at the scan() level.
+      JSON.stringify({ online: true, onlineBudgetMs: 0 })
+    );
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+    });
+
+    expect(fetchPackumentMock).not.toHaveBeenCalled();
+    expect(fetchWeeklyDownloadsMock).not.toHaveBeenCalled();
+    expect(result.run.online.enabled).toBe(true);
+    expect(result.run.online.budgetMs).toBe(0);
+    expect(result.run.online.lookupsAttempted).toBe(0);
+    expect(result.run.online.deadlineExceeded).toBe(true);
+
+    // The number has to match what a human reading the diagnostics would
+    // add up themselves, not a second, independently-derived count.
+    const skippedFromDiagnostics = result.run.diagnostics
+      .filter((d) => d.code === 'online-deadline-exceeded')
+      .reduce((total, d) => {
+        const match = /before (\d+) lookup/.exec(d.message);
+        return total + (match ? Number(match[1]) : 0);
+      }, 0);
+    expect(skippedFromDiagnostics).toBeGreaterThan(0);
+    expect(result.run.online.lookupsSkippedByDeadline).toBe(skippedFromDiagnostics);
+  });
+});

@@ -1,4 +1,12 @@
-import { createOnlineDeadline, DEFAULT_ONLINE_BUDGET_MS } from '../src/online/deadline.js';
+import {
+  createOnlineDeadline,
+  CI_ONLINE_BUDGET_MS,
+  DEFAULT_ONLINE_BUDGET_MS,
+  ONLINE_DEADLINE_CODE,
+  deadlineDiagnosticMessage,
+  sumDeadlineSkipped,
+} from '../src/online/deadline.js';
+import type { Diagnostic } from '../src/types.js';
 
 // The deadline is a wall clock, not a step counter, so every test here
 // drives an injected clock rather than sleeping. A test that slept would
@@ -43,5 +51,36 @@ describe('createOnlineDeadline', () => {
 
   test('the default budget is a positive number of milliseconds', () => {
     expect(DEFAULT_ONLINE_BUDGET_MS).toBeGreaterThan(0);
+  });
+
+  // Issue #75: a --base/--trust-base run is the pull-request/CI shape,
+  // never a commit hook, so it gets a much larger default budget than the
+  // hook's twenty seconds.
+  test('the CI budget is larger than the hook default', () => {
+    expect(CI_ONLINE_BUDGET_MS).toBeGreaterThan(DEFAULT_ONLINE_BUDGET_MS);
+  });
+
+  test('the CI budget is five minutes', () => {
+    expect(CI_ONLINE_BUDGET_MS).toBe(300_000);
+  });
+});
+
+describe('sumDeadlineSkipped', () => {
+  test('sums the skipped count out of every online-deadline-exceeded diagnostic', () => {
+    const deadline = createOnlineDeadline(500, () => 1_500);
+    const diagnostics: Diagnostic[] = [
+      { code: ONLINE_DEADLINE_CODE, message: deadlineDiagnosticMessage('unknown-package', 3, deadline) },
+      { code: ONLINE_DEADLINE_CODE, message: deadlineDiagnosticMessage('publish-age', 5, deadline) },
+    ];
+    expect(sumDeadlineSkipped(diagnostics)).toBe(8);
+  });
+
+  test('ignores diagnostics with a different code', () => {
+    const diagnostics: Diagnostic[] = [{ code: 'ignore-path-unmatched', message: 'before 99 lookup(s)' }];
+    expect(sumDeadlineSkipped(diagnostics)).toBe(0);
+  });
+
+  test('is zero for an empty diagnostics list', () => {
+    expect(sumDeadlineSkipped([])).toBe(0);
   });
 });

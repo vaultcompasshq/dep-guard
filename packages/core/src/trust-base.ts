@@ -605,6 +605,11 @@ function describeConfigChange(base: ResolvedConfig, head: ResolvedConfig | null)
     parts.push(`online set to ${head.online}`);
   }
 
+  if (base.onlineBudgetMs !== head.onlineBudgetMs) {
+    const value = head.onlineBudgetMs === undefined ? 'the default' : `${head.onlineBudgetMs}`;
+    parts.push(`onlineBudgetMs set to ${value}`);
+  }
+
   if (JSON.stringify(base.extraAliases) !== JSON.stringify(head.extraAliases)) {
     parts.push('extraAliases changed');
   }

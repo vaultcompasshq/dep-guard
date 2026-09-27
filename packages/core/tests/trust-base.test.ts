@@ -173,6 +173,35 @@ describe('pull-request mode: a head-side config never takes effect', () => {
     ]);
   });
 
+  // Issue #75: onlineBudgetMs is a control input like every other
+  // .dep-guard.json key, read from the base ref via the same trust-base
+  // path -- no manifest change needed here, only a config-only pull
+  // request. With no dependency added at all, every one of the four online
+  // steps' candidate lists is empty, so this never makes a real network
+  // request even though online:true is committed at the base: the proof
+  // that the head's onlineBudgetMs did not take effect is that the run's
+  // JSON online.budgetMs still reports the BASE value, not the (much
+  // smaller) one the pull request tried to set.
+  test('an onlineBudgetMs the pull request changes is reported as a proposal and does not take effect', async () => {
+    await makeBase({ failOn: 'medium', online: true, onlineBudgetMs: 5000 });
+    await write('.dep-guard.json', JSON.stringify({ failOn: 'medium', online: true, onlineBudgetMs: 1 }));
+    await commitAll('lower the online budget');
+
+    const result = await scanPullRequest();
+
+    expect(result.trustBase?.configChanged).toBe(true);
+    expect(result.trustBase?.proposals).toEqual([
+      'config changed in this pull request (onlineBudgetMs set to 1)',
+    ]);
+    expect(result.run.online).toMatchObject({
+      enabled: true,
+      budgetMs: 5000,
+      lookupsAttempted: 0,
+      lookupsSkippedByDeadline: 0,
+      deadlineExceeded: false,
+    });
+  });
+
   test('an internalScopes entry the pull request adds does not re-route the finding', async () => {
     await makeBase();
     const scoped = '@acme/hallucinated-helper';
