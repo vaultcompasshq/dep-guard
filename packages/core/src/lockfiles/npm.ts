@@ -1,4 +1,5 @@
 import { DepGuardError, type Diagnostic } from '../types.js';
+import { registryTarballPackageName } from '../resolution.js';
 import type { LockEntry, ParsedLockfile } from './types.js';
 
 const NODE_MODULES_SEGMENT = 'node_modules/';
@@ -25,7 +26,22 @@ function installedNameFromKey(key: string): string | undefined {
   return name.length > 0 ? name : undefined;
 }
 
-function entryFromPackageValue(value: Record<string, unknown>): LockEntry {
+// The diagnostic code raised when a packages entry's own "name" field
+// cannot be trusted -- either because nothing on the entry vouches for it
+// (no resolvedUrl, or a resolution that is not a registry tarball at all:
+// git, file, and remote-tarball entries can all carry this field too, per
+// arborist's shrinkwrap.js, whenever the installed folder differs from the
+// target's own package.json name) or because the resolved tarball's own
+// path names something else entirely. Exported so tests can assert by
+// value rather than by a string literal that could drift from the message.
+export const UNVERIFIABLE_NAME_CODE = 'npm-lockfile-unverifiable-name';
+
+function entryFromPackageValue(
+  path: string,
+  key: string,
+  value: Record<string, unknown>,
+  diagnostics: Diagnostic[]
+): LockEntry {
   const entry: LockEntry = {};
   if (typeof value.version === 'string') {
     entry.version = value.version;
@@ -42,14 +58,30 @@ function entryFromPackageValue(value: Record<string, unknown>): LockEntry {
   // npm writes this entry's OWN "name" field whenever the resolved
   // package's real name differs from the installed/alias name the key
   // resolves to (installedNameFromKey above) -- an npm: alias entry, most
-  // often. That is the only place the real registry name survives for a
-  // purely transitive alias: one a dependency's own dependency block
-  // introduces, which no manifest anywhere declares (issue #69). An
-  // ordinary entry has no reason to carry this field at all, so it is left
-  // undefined rather than defaulted to the key-derived name -- delta.ts's
-  // packageName resolution supplies that fallback itself.
+  // often. That field is written by whoever committed the lockfile and
+  // round-tripped verbatim by npm whatever it says, so it must NEVER be
+  // trusted as identity on its own (see delta.ts's LockEntryChange doc
+  // comment: an independent review proved that trusting it let a forged
+  // name clear a tampered entry's own findings, issue #69).
+  //
+  // It is trusted only as a LOOKUP hint (LockEntry.lookupName), and only
+  // when the entry's own resolvedUrl vouches for it -- a registry tarball
+  // URL whose path encodes exactly that name. A name field present without
+  // that vouching is not silently used and not silently dropped either: a
+  // name this parser cannot verify has to be visible as unverified.
   if (typeof value.name === 'string') {
-    entry.registryName = value.name;
+    const vouched = entry.resolvedUrl === undefined ? null : registryTarballPackageName(entry.resolvedUrl);
+    if (vouched !== null && vouched === value.name) {
+      entry.lookupName = value.name;
+    } else {
+      diagnostics.push({
+        code: UNVERIFIABLE_NAME_CODE,
+        message:
+          `${path}: packages["${key}"] declares "name": "${value.name}", but its resolved location ` +
+          'does not vouch for that name (no registry tarball URL naming it exactly); the lockfile-' +
+          'declared name is ignored for registry lookups',
+      });
+    }
   }
   return entry;
 }
@@ -142,9 +174,9 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
     // order.
     const existing = entries.get(name);
     if (existing) {
-      existing.push(entryFromPackageValue(value));
+      existing.push(entryFromPackageValue(path, key, value, diagnostics));
     } else {
-      entries.set(name, [entryFromPackageValue(value)]);
+      entries.set(name, [entryFromPackageValue(path, key, value, diagnostics)]);
     }
   }
 

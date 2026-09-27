@@ -5,22 +5,45 @@ export interface LockEntry {
   resolvedUrl?: string;
   integrity?: string;
   hasInstallScript?: boolean;
-  // The real registry name this entry installs, when the lockfile format
-  // records that fact on the entry ITSELF rather than only in a manifest
-  // some dependent declares. This is the npm case: an npm: alias entry is
-  // keyed by the installed/alias name (see the entries map comment below),
-  // but npm always writes the resolved package's own "name" field on such
-  // an entry -- lockfiles/npm.ts is what reads it into this field. A
-  // purely transitive alias (one only some other package's own dependency
-  // block introduces, never the root manifest) has no ManifestDep to carry
-  // a registryName at all, so this is the only place that fact survives
-  // parsing; delta.ts's packageName resolution reads it as its second
-  // preference, after a manifest declaration and before falling back to
-  // the lockfile key itself. Left undefined for a format whose own key IS
-  // already the registry name (pnpm -- see lockfiles/pnpm.ts) or that
-  // never resolves aliasing at all (yarn, bun -- manifest-level only, see
-  // README.md's Lockfile support section).
-  registryName?: string;
+  // A LOOKUP hint only -- never identity. This is the registry name an
+  // online check should ask about for this entry, when it differs from the
+  // lockfile key; it must NEVER be read by anything that decides what a
+  // finding IS (packageName, an allow match, a pin, a dedupe key, a
+  // fingerprint). See delta.ts's LockEntryChange doc comment for why: an
+  // npm packages entry's own "name" field is written by whoever committed
+  // the lockfile, on a pull request the author of it, and npm installs the
+  // same bytes whatever it says -- treating it as identity let a forged
+  // "name" on a tampered nested entry silently clear its own
+  // dependency-confusion and install-script findings (issue #69, review
+  // finding).
+  //
+  // Populated ONLY when the entry's own resolvedUrl VOUCHES for the name --
+  // the resolved value is a registry tarball URL whose path encodes exactly
+  // that name (registryTarballPackageName in resolution.ts, reused from the
+  // same URL-parsing tamper.ts already relies on). A name field present but
+  // unvouched -- no resolvedUrl, a non-registry resolution (git, file, a
+  // remote tarball -- all of which npm can also stamp a "name" field onto,
+  // per arborist's shrinkwrap.js, whenever the installed folder differs
+  // from the target's own package.json name), or a resolvedUrl whose path
+  // names something else entirely -- is never trusted: lookupName stays
+  // undefined and lockfiles/npm.ts raises a diagnostic instead, because a
+  // name this parser cannot verify must be visible as unverified, not
+  // silently used or silently dropped.
+  //
+  // Only online/publish-age.ts reads this field (as `lookupName ??
+  // packageName`, for the registry query alone -- its finding still
+  // reports under packageName, with the looked-up name carried in
+  // `details` when the two differ). No other consumer may read it; grep to
+  // confirm before adding one.
+  //
+  // Never set by lockfiles/pnpm.ts: a pnpm alias mapping lives entirely in
+  // the DEPENDENT's own "dependencies" block, never on the target's own
+  // packages-map entry, so pnpm's `name` key (parsePackageKey) already IS
+  // the registry name and needs no separate lookup hint. Never set for
+  // yarn or bun either -- neither format's entries are parsed at all (see
+  // README.md's Lockfile support section), so there is no entry to carry
+  // one.
+  lookupName?: string;
 }
 
 export type LockfileFormat = 'npm' | 'pnpm' | 'yarn' | 'bun' | 'none';

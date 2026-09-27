@@ -54,7 +54,18 @@ export interface PublishAgeDeps {
 }
 
 interface Candidate {
+  // Identity: what this finding reports under, and what dedupes and
+  // allow-list keys are built from. Always entryChange.packageName -- the
+  // lockfile key or a manifest-declared alias target, never anything the
+  // lockfile entry itself merely claims (see delta.ts and
+  // lockfiles/types.ts's LockEntry.lookupName for why).
   name: string;
+  // What is actually sent to the registry. Equal to `name` for the
+  // overwhelming majority of entries; differs only when the entry carries a
+  // lookupName the resolved URL vouched for (a transitive npm: alias --
+  // issue #69). Never read by anything other than the fetchPackument call
+  // below.
+  lookupName: string;
   version: string;
   manifestPath: string;
 }
@@ -63,7 +74,10 @@ interface Candidate {
 // resolved version of the same package can legitimately appear more than
 // once in a single lockfile's diff (a nested duplicate resolution, say),
 // and asking the registry about it twice, or reporting it twice against
-// the same manifest, adds nothing a reader can act on twice.
+// the same manifest, adds nothing a reader can act on twice. Keyed by
+// `name` (identity), not `lookupName` -- two entries that report under
+// different names are two different findings even if they happen to look
+// up the same real package.
 function dedupeKey(candidate: Candidate): string {
   return JSON.stringify([candidate.manifestPath, candidate.name, candidate.version]);
 }
@@ -155,7 +169,13 @@ function collectCandidates(ctx: CheckContext, diagnostics: Diagnostic[]): Candid
       });
       continue;
     }
-    const candidate: Candidate = { name, version, manifestPath: entryChange.manifestPath };
+    // lookupName is a lookup hint ONLY -- see the Candidate field comment
+    // above and lockfiles/types.ts's LockEntry.lookupName. Every skip
+    // decision above this line judges `name` (identity), never this value,
+    // on purpose: an entry whose declared name is internal or privately
+    // pinned must not be sent to the wire under some OTHER name either.
+    const lookupName = entryChange.after.lookupName ?? name;
+    const candidate: Candidate = { name, lookupName, version, manifestPath: entryChange.manifestPath };
     const key = dedupeKey(candidate);
     if (seen.has(key)) {
       continue;
@@ -245,10 +265,16 @@ export async function findPublishAgeFindings(
       continue;
     }
 
+    // The ONLY place this check reads lookupName: every candidate sharing
+    // one `name` (identity) represents the same lockfile key, so they share
+    // one lookup target too -- group[0] stands in for all of them here.
+    // Every diagnostic and finding below keeps naming `name`/`candidate.name`
+    // (identity), never this value.
+    const lookupName = group[0].lookupName;
     let packument: { versionTimes: Record<string, string> } | null;
     try {
       packument = await deps.fetchPackument(
-        name,
+        lookupName,
         group.map((candidate) => candidate.version)
       );
     } catch (err) {
@@ -333,6 +359,15 @@ export async function findPublishAgeFindings(
           publishedAt,
           ageDays: Math.floor(days),
           minAgeDays,
+          // Present only when a lookup actually happened under a DIFFERENT
+          // name than this finding reports under (a transitive npm: alias,
+          // issue #69) -- so a reader knows which registry package the age
+          // came from without every ordinary, non-alias finding growing a
+          // redundant field that just repeats packageName. Outside the
+          // fingerprint (fingerprint.ts hashes only ruleId, packageName,
+          // manifestPath and details.signal), so this can never move a
+          // baseline.
+          ...(candidate.lookupName !== candidate.name ? { lookupName: candidate.lookupName } : {}),
         },
       });
     }

@@ -188,8 +188,9 @@ describe('parsePnpmLockfile registry-name key extraction (scoped/unscoped, slash
 // only in ITS OWN dependencies block ("myalias: lodash@4.17.21"); the
 // resolved package's own packages-map key is still "lodash@4.17.21", and
 // parsePackageKey (above) reads the name straight out of it. So
-// LockEntry.registryName (see lockfiles/types.ts) is deliberately never
-// set here -- this parser's `name` key already IS the answer.
+// LockEntry.lookupName (see lockfiles/types.ts) is deliberately never set
+// here -- this parser's `name` key already IS the answer, and packageName
+// (delta.ts) never reads entry-carried data anyway (round 2 of this issue).
 //
 // This test does not go red before the fix in this repository: pnpm never
 // had this bug, and no production code in lockfiles/pnpm.ts changed. It
@@ -213,7 +214,7 @@ describe('parsePnpmLockfile a transitive alias is already keyed by its real regi
       '      myalias: lodash@4.17.21\n';
     const result = parsePnpmLockfile(PATH, content);
     expect([...result.entries.keys()].sort()).toEqual(['host-pkg', 'lodash']);
-    expect(only(result, 'lodash')?.registryName).toBeUndefined();
+    expect(only(result, 'lodash')?.lookupName).toBeUndefined();
   });
 });
 

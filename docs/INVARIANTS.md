@@ -148,72 +148,127 @@ never reports a bump that leaves an already-true flag true. Tamper ignores
 `kind` for every signal: the git-source swap in particular almost always
 arrives as a changed specifier, never as a new dependency.
 
-## packageName has three sources, most specific first, and only one of them is per-format
+## packageName is identity, never sourced from data the lockfile author controls unverified
 
-`LockEntryChange.packageName` (delta.ts) is what every lockfile-backed
-check and every online check reading `lockEntryChanges` treats as the
-dependency's real identity -- the name that goes in a finding, and the name
-`publish-age` sends to the registry. It is resolved in this order, and the
-order is load-bearing, not stylistic:
+`LockEntryChange.packageName` (`diffLockEntries` in delta.ts) is dep-guard's
+identity for a lockfile entry: the name a finding reports under, the key
+every `allow` entry and pin match against, the key `report()`'s
+tamper/confusion/install-script dedupe collapses on, and one of the four
+fixed inputs to the fingerprint (`fingerprint.ts`, the "fingerprint is a
+promise about facts" section above). It has exactly two sources, most
+specific first, and there has never been a third:
 
 1. `declared?.registryName` -- a manifest declares this lockfile key and
-   names its own registry target (`manifest.ts`'s alias parsing). This is
-   the only source with a `ManifestDep` behind it, so it is the most
-   specific fact available and wins outright.
-2. `entry.registryName` -- the lockfile ENTRY itself recorded the real
-   name, independently of any manifest. This is the field a purely
-   transitive alias depends on entirely: one only some other package's own
-   dependency block introduces has no `ManifestDep` at all, so step 1 is
-   never available for it.
-3. `name` -- the lockfile key itself, unchanged.
+   names its own registry target (`manifest.ts`'s alias parsing,
+   `attributeLockNames` in delta.ts). The only source with a `ManifestDep`
+   behind it.
+2. `name` -- the lockfile key itself, unchanged.
 
-Getting this wrong (delta.ts:444, the fix for issue #69) was silent in the
-usual direction: before step 2 existed, a purely transitive `npm:` alias
-fell straight through step 1 to the installed/alias key, and `publish-age`
-asked the registry about a name nobody published -- a
-`publish-age-package-unknown` diagnostic standing in for a real answer at
-best, and at worst a real but unrelated package sharing that name pricing
-its age instead of the actual dependency's.
+Nothing else may ever enter this line, and the reason is stronger than the
+usual "keep it simple": an npm packages entry's own `name` field is written
+by whoever committed the lockfile -- on a pull request, the author of it --
+and npm round-trips it verbatim whatever it says, with no verification at
+install time. A fix for issue #69 briefly read that field into `packageName`
+for a purely transitive alias no manifest declares (there being no
+`ManifestDep` for step 1 to use), reasoning that a real name recovered from
+the entry was better than the alias key. An independent review proved the
+opposite directly against this engine: a nested
+`node_modules/host/node_modules/@corp/secret` entry, with `@corp` pinned to
+a private registry and `hasInstallScript: true`, produces a
+`dependency-confusion` finding (from `pinMismatch` in `checks/confusion.ts`,
+run over `entryChange.packageName`) and an `install-script` finding (from
+`checks/install-script.ts`'s lockfile-walk loop, same field). Adding
+`"name": "left-pad"` to that same entry -- nothing else -- produced ZERO
+findings: `pinMismatch`'s scope lookup and `allowClears`'s `allow: ["left-pad"]`
+match both ran against `"left-pad"` instead of `"@corp/secret"`, because
+both checks read `entryChange.packageName` and that had become the forged
+name. The same trick lands an already-tampered entry on an already-baselined
+fingerprint, silently. `packageName` is therefore sourced ONLY from step 1
+or step 2 above, full stop -- see `checks/confusion.ts`'s lockfile-walk loop
+(the `pinMismatch`/`allowClears` calls over `entryChange.packageName`) and
+`checks/install-script.ts`'s lockfile-walk loop (`allowClears`/`report`
+over the same field) for the two consumers whose behaviour this identity
+guarantee exists to keep byte-for-byte predictable from the lockfile key and
+the manifest alone.
 
-Step 2 only ever has something to contribute for a format whose OWN key is
-not already the registry name. Whether it does is a fact about the format,
-not a judgment call, and the three shipped formats fall into two different
-buckets for a reason worth keeping straight:
+## lookupName is a lookup hint, carried on the entry, read by exactly one consumer
 
-- npm keys `entries` by the INSTALLED name (`lockfiles/npm.ts`'s
-  `installedNameFromKey`) -- the folder name under `node_modules/`, which
-  for an `npm:` alias is the alias itself, never the target. npm writes the
-  resolved package's own `name` field on such an entry (it has to, to know
-  what is actually installed there), and that field is the only place the
-  real name survives once no manifest names it. `entryFromPackageValue`
-  reads it into `LockEntry.registryName` there and nowhere else.
-- pnpm keys `entries` by REGISTRY identity already (`lockfiles/pnpm.ts`'s
-  `parsePackageKey` splits the packages-map key itself, `name@version`),
-  because a pnpm alias mapping lives entirely in the DEPENDENT's own
-  `dependencies` block (`myalias: real-target@1.0.0`), never in the target
-  package's own key. So `LockEntry.registryName` is deliberately never set
-  by `lockfiles/pnpm.ts` -- step 3's `name` already answers step 2's
-  question for this format, and setting it to the same value would be the
-  parallel-fact-that-can-drift this file warns against elsewhere, for no
-  behavioural gain.
-- yarn and bun contribute neither: `git-source.ts`'s `manifestOnlyLockfile`
-  never populates `entries` at all for either format (see "Lockfile
-  support" in README.md), so `lockEntryChanges` is always empty for them
-  regardless of what either lockfile actually contains, alias or not.
-  There is nothing to resolve wrongly because nothing is ever read from
-  the lockfile in the first place -- the existing
-  `lockfile-format-manifest-only` diagnostic already says so, and no
-  alias-specific diagnostic was added on top of it: inventing one would
-  claim to know something specific about an entry this parser never looked
-  at.
+A purely transitive `npm:` alias still needs an answer to a real question --
+which registry package `publish-age` should actually ask about -- and
+`LockEntry.lookupName` (`lockfiles/types.ts`) is where that answer lives,
+kept entirely separate from identity so the review finding above can never
+recur through it. `lockfiles/npm.ts`'s `entryFromPackageValue` is the only
+producer; `online/publish-age.ts`'s `collectCandidates` and
+`findPublishAgeFindings` are the only consumers (`entryChange.after.lookupName
+?? name`, read once to build each `Candidate.lookupName` and once more,
+`group[0].lookupName`, as the literal `fetchPackument` argument -- nowhere
+else in the check, and nowhere in any other check). Grep for `lookupName`
+across `packages/core/src` before adding a second reader; the day one
+appears it needs the same scrutiny this section documents, not an assumed
+green light because the field already exists.
 
-None of this may change `packageName` for a NON-alias entry. An ordinary
-npm entry carries no `name` field at all when the installed name already is
-the registry name (there is nothing for npm itself to disambiguate), so
-`entry.registryName` stays `undefined` and step 3 answers exactly as it did
-before step 2 existed. The fingerprint tests that pin known npm/pnpm
-fixture entries are what prove this held; they are not alias fixtures, and
-they moved by zero bytes across this change.
+`lookupName` is populated only when the entry's own `resolvedUrl` VOUCHES
+for the `name` field -- a registry tarball URL whose path encodes exactly
+that name (`resolution.ts`'s `registryTarballPackageName`, reused by
+`lockfiles/npm.ts` the same way `checks/tamper.ts`'s own URL-pathname
+parsing is reused rather than duplicated a third time). npm's tarball path
+shape is fixed: `/<name>/-/<basename>-<version>.tgz` unscoped,
+`/@scope/<name>/-/<basename>-<version>.tgz` scoped, so the name is exactly
+the path segment before the literal `/-/` marker. A `name` field present
+without that vouching -- no `resolvedUrl` at all, a `resolvedUrl` that is
+not a registry resolution (`resolutionKindOf` returning `git`, `file`, or
+`url` -- and npm's arborist does stamp a `name` field onto a transitive
+git, remote-tarball, or `file:` entry too, whenever the installed folder
+differs from the target's own `package.json` name, so this is not a
+theoretical case), or a `resolvedUrl` whose path names something else
+entirely -- is never trusted: `lookupName` stays `undefined` and
+`lockfiles/npm.ts` raises `npm-lockfile-unverifiable-name` instead, naming
+the entry and the untrusted value. Every guess in this engine owes a
+diagnostic (see "Pairing two lockfiles is a chain of guesses" below); an
+unverifiable name is exactly that kind of guess, and staying silent about
+it would be indistinguishable from a name this parser never doubted at all.
+
+pnpm never needed this mechanism and never sets `lookupName`: its
+`packages` map is keyed by registry identity already (`lockfiles/pnpm.ts`'s
+`parsePackageKey` splits the packages-map key itself, `name@version`),
+because a pnpm alias mapping lives entirely in the DEPENDENT's own
+`dependencies` block, never on the target's own packages-map entry. Yarn
+and bun never populate `entries` at all for either format
+(`git-source.ts`'s `manifestOnlyLockfile`, see "Lockfile support" in
+README.md), so there is no entry to carry a `lookupName` in the first
+place, and no alias-specific diagnostic was added on top of the existing
+`lockfile-format-manifest-only` one: inventing one would claim to know
+something specific about an entry this parser never looked at.
+
+None of this may change `packageName` for ANY entry, alias or not -- the
+whole point of keeping `lookupName` a separate, narrowly-read field.
+`publish-age`'s own finding still reports under `packageName` (the
+lockfile key) and carries the looked-up real name in `details.lookupName`
+only when it differs from `packageName`, so a reader can tell which
+registry package an age finding's answer actually came from without the
+finding's identity ever moving. `details` is outside the fingerprint
+(`fingerprint.ts` hashes only `ruleId`, `packageName`, `manifestPath`, and
+`details.signal`), so this can never move a baseline either way. The
+existing fingerprint, tamper, confusion, and install-script tests --
+unmodified by this fix -- are what prove `packageName` moved by zero bytes
+for every entry that carries no `lookupName` at all, which is every entry
+in every one of dep-guard's own fixtures; the review's own reproduction,
+ported into `delta.test.ts`, proves it for the one shape that used to
+break: a forged, unvouched `name` field on an already-suspicious nested
+entry.
+
+One non-blocking case the same review raised is worth recording rather than
+re-discovering later: a genuinely transitive alias entry and an unrelated,
+unaliased copy of the SAME real package (two different lockfile keys, one
+of them carrying a vouched `lookupName` for that real package, the other
+being that real package's own ordinary entry) now share one `publish-age`
+registry lookup -- `collectCandidates` groups by identity (`name`), and the
+fetch itself is grouped by `lookupName`, so two different identities that
+happen to resolve the same lookup target get one shared fetch and two
+separate findings. They remain two distinct `LockEntryChange`s, two
+distinct `packageName`s, and two distinct fingerprints throughout; sharing
+a fetch is purely a network-call optimization and never merges what the
+two entries are.
 
 ## Pairing two lockfiles is a chain of guesses, and each guess owes a diagnostic
 
@@ -921,7 +976,8 @@ Current diagnostic codes: `audit-anchor-differs`,
 `ignore-path-dropped`,
 `ignore-path-unmatched`, `lockfile-binary-skipped`,
 `lockfile-format-manifest-only`, `lockfile-missing`,
-`manifest-alias-empty`, `npm-lockfile-invalid-entry`, `npm-lockfile-v1`,
+`manifest-alias-empty`, `npm-lockfile-invalid-entry`,
+`npm-lockfile-unverifiable-name`, `npm-lockfile-v1`,
 `npmrc-pin-unparseable`, `online-check-unreachable`,
 `online-deadline-exceeded`,
 `path-outside-root`, `pnpm-lockfile-invalid-entry`,

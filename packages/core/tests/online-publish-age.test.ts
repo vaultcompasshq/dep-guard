@@ -450,6 +450,12 @@ describe('findPublishAgeFindings', () => {
 // nothing (a false publish-age-package-unknown diagnostic) or, worse, finds
 // an unrelated real package that happens to share that name and prices its
 // age instead of lodash's.
+//
+// Round 2 (independent review finding): identity (packageName, and the
+// finding's own packageName field) must stay the lockfile key regardless --
+// only the registry QUERY reads LockEntry.lookupName. The looked-up real
+// name still has to reach a reader, so it travels in the finding's
+// `details` instead.
 describe('findPublishAgeFindings resolves a purely transitive npm alias (issue #69)', () => {
   function dep(name: string, specifier: string, overrides: Partial<ManifestDep> = {}): ManifestDep {
     return {
@@ -505,12 +511,11 @@ describe('findPublishAgeFindings resolves a purely transitive npm alias (issue #
     },
   });
 
-  // Mutation that turns this red: either half of the delta-side fix alone
-  // is not enough (see delta.test.ts's own mutation notes for the same
-  // pair) -- with either reverted, deps.calls ends up containing
-  // 'ui-alias' instead of 'lodash', and the 'ui-alias' assertion below
-  // fails first.
-  test('asks the registry for the real name, never the installed alias key', async () => {
+  // Mutation that turns this red: dropping the `lookupName ?? name` step in
+  // publish-age.ts's candidate construction (falling back straight to
+  // entryChange.packageName for the fetch) -- deps.calls would then contain
+  // 'ui-alias' instead of 'lodash'.
+  test('asks the registry for the real name, never the installed alias key -- but still reports under the key', async () => {
     const after = parseNpmLockfile('package-lock.json', TRANSITIVE_ALIAS_LOCKFILE);
     const delta = computeDelta(repoState(), repoState({ lockfile: after }));
 
@@ -523,13 +528,35 @@ describe('findPublishAgeFindings resolves a purely transitive npm alias (issue #
       allowed: [] as string[],
     };
     const deps = fakeDeps({
-      lodash: { '4.17.21': OLD_DATE },
+      lodash: { '4.17.21': FRESH_DATE },
       'host-pkg': { '1.0.0': OLD_DATE },
     });
 
-    await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+    const findings = await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
 
     expect(deps.calls).toContain('lodash');
     expect(deps.calls).not.toContain('ui-alias');
+
+    // Identity never moves: the finding is reported under the lockfile key,
+    // exactly as every other lockfile-backed check would report this entry,
+    // with the real looked-up name visible in details for a reader who
+    // wants to know which registry package the age actually came from.
+    const aliasFinding = findings.find((f) => f.packageName === 'ui-alias');
+    expect(aliasFinding).toBeDefined();
+    expect(aliasFinding?.details).toMatchObject({ lookupName: 'lodash' });
+  });
+
+  // The registry query is the ONLY consumer of lookupName in this check --
+  // and, per lockfiles/types.ts, in the whole engine. When there is nothing
+  // to look up beyond the key (the ordinary, non-alias case), `details`
+  // must not grow a redundant lookupName that just repeats packageName.
+  test('details carries no lookupName when the entry has none to carry', async () => {
+    const ctx = makeContext([makeLockEntryChange({ name: 'plain-thing', after: { version: '1.0.0' } })]);
+    const deps = fakeDeps({ 'plain-thing': { '1.0.0': FRESH_DATE } });
+
+    const findings = await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].details).not.toHaveProperty('lookupName');
   });
 });

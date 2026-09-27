@@ -10,22 +10,34 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
-- Fixed a transitive npm alias resolving to the wrong package name:
-  `entryChange.packageName` fell back to the lockfile key -- the installed
-  alias name -- whenever no manifest declared that key, which is the
-  ordinary case for a purely transitive `npm:` alias (one only some other
-  package's own dependency introduces). `publish-age`, and any other online
-  check reading `lockEntryChanges`, then asked the registry about the alias
-  name instead of the package actually installed: a silent miss, or a wrong
-  finding against an unrelated package that happens to share the name.
-  `lockfiles/npm.ts` now reads the packages entry's own `name` field (which
-  npm always writes for such an entry) into a new `LockEntry.registryName`,
-  and `delta.ts` prefers it, after a manifest declaration and before the
-  lockfile key. pnpm needed no fix: its `packages` map is already keyed by
-  registry identity, not by an alias name some dependent used to reach it.
-  Yarn and bun lockfiles are unaffected for the same reason they carry no
-  other lockfile-backed finding: neither format's entries are parsed at
-  all. README and `docs/INVARIANTS.md` updated (fixes #69).
+- Fixed a minimum-publish-age miss on a purely transitive npm alias (one
+  only some other package's own dependency introduces, which no manifest
+  declares): `publish-age` asked the registry about the installed alias
+  name instead of the package actually resolved, a silent miss at best and
+  a wrong finding against an unrelated same-named package at worst.
+  `lockfiles/npm.ts` now recovers the real name from the packages entry's
+  own `name` field, but only when the entry's own resolved tarball URL
+  vouches for it (`resolution.ts`'s `registryTarballPackageName`); an
+  unvouched name is ignored and reported via a new
+  `npm-lockfile-unverifiable-name` diagnostic rather than trusted or
+  silently dropped. `publish-age` uses the recovered name for its registry
+  query only -- its finding still reports under the lockfile key, with the
+  looked-up name carried in `details` when the two differ.
+
+  An earlier version of this fix read the entry-recorded name into
+  `packageName` (identity) directly whenever no manifest declared the key.
+  Independent review proved that let a forged `name` field on an otherwise-
+  tampered nested entry silently clear its own dependency-confusion and
+  install-script findings, and land it on an already-baselined fingerprint,
+  because both checks key their allow/pin logic off `packageName`. Identity
+  is now sourced only from a manifest declaration or the lockfile key,
+  exactly as before this issue existed; the recovered name lives in a
+  separate `LockEntry.lookupName` field that only `publish-age`'s registry
+  query reads. pnpm needed no fix either way: its `packages` map is already
+  keyed by registry identity, not by an alias name some dependent used to
+  reach it. Yarn and bun lockfiles are unaffected for the same reason they
+  carry no other lockfile-backed finding: neither format's entries are
+  parsed at all. README and `docs/INVARIANTS.md` updated (fixes #69).
 
 - Fixed a publish-age coverage loss: a scope pinned to the PUBLIC registry
   in `.npmrc` used to be treated as private just because it had a pin at

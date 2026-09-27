@@ -123,3 +123,48 @@ export function originOf(url: string | undefined): string | null {
   }
   return resolutionOf(url)?.origin ?? null;
 }
+
+// The package name a REGISTRY tarball URL's own path encodes, or null when
+// the URL is not a registry resolution at all (git, file, a remote tarball
+// -- resolutionKindOf's other three kinds) or does not have the shape a
+// registry tarball path always has. npm and pnpm both write it the same
+// way: "/<name>/-/<basename>-<version>.tgz" for an unscoped name,
+// "/@scope/<name>/-/<basename>-<version>.tgz" for a scoped one -- so the
+// name is exactly the pathname segment before the literal "/-/" marker,
+// leading slash stripped, whether or not it itself contains a "/".
+//
+// This is the vouching rule LockEntry.lookupName depends on (see
+// lockfiles/types.ts): a lockfile entry's own "name" field is written by
+// whoever committed the lockfile and is never verified by npm against
+// anything at install time, so it must never be trusted on its own. The
+// resolved tarball URL is different -- it is where npm actually fetched the
+// bytes from, and a registry only ever serves a package's own tarball at
+// its own path, so a "name" field that agrees with the path IS the name
+// under which that tarball is published. One that disagrees is either a
+// hand-edited lockfile or a repointed entry, and either way is not
+// something a "name" field alone gets to assert.
+//
+// Uses its own `new URL` parse rather than reusing resolutionOf's Resolution
+// (which carries origin/host/protocol, not pathname) -- the same
+// duplication checks/tamper.ts's own pathLabel makes for the identical
+// reason: this needs the pathname specifically, and parsing it twice is
+// cheaper than plumbing a field through Resolution that only this caller
+// wants.
+export function registryTarballPackageName(url: string): string | null {
+  const resolution = resolutionOf(url);
+  if (resolution === null || resolutionKindOf(resolution) !== 'registry') {
+    return null;
+  }
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return null;
+  }
+  const tarballMarker = '/-/';
+  const markerIndex = pathname.indexOf(tarballMarker);
+  if (markerIndex <= 0) {
+    return null;
+  }
+  return pathname.slice(1, markerIndex);
+}

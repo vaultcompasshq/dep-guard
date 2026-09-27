@@ -143,63 +143,140 @@ describe('parseNpmLockfile entry extraction', () => {
   });
 });
 
-// Issue #69: an npm: alias entry is keyed by the installed/alias name (see
-// installedNameFromKey), but npm always writes the resolved package's own
-// "name" field on such an entry -- that is the only place the real
-// registry name survives for a PURELY TRANSITIVE alias, one no manifest
-// anywhere declares (a dependency's own dependency, not a root
-// package.json line). Modelled on package-lock-v3.json's shape: host-pkg
-// is an ordinary dependency, and its own transitive dependency on
-// "npm:lodash@^4.17.0" installs under the name "ui-alias", nested under
-// host-pkg's own node_modules.
-describe('parseNpmLockfile alias name recovery (issue #69)', () => {
-  const TRANSITIVE_ALIAS_CONTENT = JSON.stringify({
-    name: 'test-app',
-    version: '1.0.0',
-    lockfileVersion: 3,
-    requires: true,
-    packages: {
-      '': {
-        name: 'test-app',
-        version: '1.0.0',
-        dependencies: { 'host-pkg': '^1.0.0' },
+// Issue #69, round 2 (independent review finding): an npm: alias entry is
+// keyed by the installed/alias name (see installedNameFromKey), and npm
+// writes the resolved package's own "name" field on such an entry -- but
+// that field is written by whoever committed the lockfile and is round-
+// tripped by npm verbatim, whatever it says, so it must never be trusted on
+// its own. It is trusted only when the entry's OWN resolvedUrl vouches for
+// it: a registry tarball URL whose path encodes exactly that name
+// (resolution.ts's registryTarballPackageName). LockEntry.lookupName is
+// where a vouched name lands -- a LOOKUP hint only, never identity (see
+// delta.ts and lockfiles/types.ts for why).
+describe('parseNpmLockfile alias lookup-name recovery, vouched by the resolved URL (issue #69)', () => {
+  function packages(entry: Record<string, unknown>): string {
+    return JSON.stringify({
+      name: 'test-app',
+      version: '1.0.0',
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        '': { name: 'test-app', version: '1.0.0', dependencies: { 'host-pkg': '^1.0.0' } },
+        'node_modules/host-pkg': {
+          version: '1.0.0',
+          resolved: 'https://registry.npmjs.org/host-pkg/-/host-pkg-1.0.0.tgz',
+          integrity: 'sha512-host',
+        },
+        'node_modules/host-pkg/node_modules/ui-alias': entry,
       },
-      'node_modules/host-pkg': {
-        version: '1.0.0',
-        resolved: 'https://registry.npmjs.org/host-pkg/-/host-pkg-1.0.0.tgz',
-        integrity: 'sha512-host',
-      },
-      'node_modules/host-pkg/node_modules/ui-alias': {
+    });
+  }
+
+  // Modelled on package-lock-v3.json's shape: host-pkg is an ordinary
+  // dependency, and its own transitive dependency on "npm:lodash@^4.17.0"
+  // installs under the name "ui-alias", nested under host-pkg's own
+  // node_modules -- no manifest anywhere declares "ui-alias".
+  //
+  // Mutation that turns this red: dropping the vouching check in
+  // entryFromPackageValue (npm.ts) and setting lookupName from value.name
+  // unconditionally -- this test alone would not catch that (the name and
+  // the resolved path agree here), which is exactly why the forged-name
+  // test below exists.
+  test('a transitively aliased entry whose resolved URL matches the "name" field carries a lookupName', () => {
+    const result = parseNpmLockfile(
+      PATH,
+      packages({
         name: 'lodash',
         version: '4.17.21',
         resolved: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
         integrity: 'sha512-transitive-alias',
-      },
-    },
+      })
+    );
+    expect(only(result, 'ui-alias')).toMatchObject({ version: '4.17.21', lookupName: 'lodash' });
+    expect(result.diagnostics).toEqual([]);
   });
 
-  // Mutation that turns this red: dropping the "if (typeof value.name ===
-  // 'string')" branch from entryFromPackageValue (npm.ts) -- the entry
-  // would then carry no registryName at all, and this reads undefined
-  // instead of 'lodash'.
-  test('a transitively aliased entry carries the real registry name from the packages-entry "name" field', () => {
-    const result = parseNpmLockfile(PATH, TRANSITIVE_ALIAS_CONTENT);
-    expect(only(result, 'ui-alias')).toMatchObject({
-      version: '4.17.21',
-      registryName: 'lodash',
-    });
+  // A scoped real name round-trips through the vouching check too --
+  // "/@scope/name/-/name-version.tgz" is npm's registry tarball shape for a
+  // scoped package, and registryTarballPackageName has to read the "/"
+  // inside the name without mistaking it for the tarball-marker separator.
+  test('a scoped real name is recovered the same way', () => {
+    const result = parseNpmLockfile(
+      PATH,
+      packages({
+        name: '@scope/real',
+        version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/@scope/real/-/real-1.0.0.tgz',
+        integrity: 'sha512-scoped',
+      })
+    );
+    expect(only(result, 'ui-alias')?.lookupName).toBe('@scope/real');
+  });
+
+  // The independent review's own experiment: a forged "name" field whose
+  // resolved URL names a COMPLETELY DIFFERENT package. Before this fix, a
+  // forged name here would have flowed straight into packageName (delta.ts)
+  // and cleared this entry's own dependency-confusion and install-script
+  // findings by relabelling it (see delta.test.ts and the check-level tests
+  // for that proof). At the parser level, the fix is that the resolved
+  // path -- "/@corp/secret/-/secret-9.9.9.tgz" -- names "@corp/secret", not
+  // "left-pad", so the forged name is never vouched.
+  //
+  // Mutation that turns this red: removing the
+  // `vouched === value.name` comparison (trusting any parseable registry
+  // tarball URL regardless of what name it actually names) -- lookupName
+  // would then read 'left-pad' and no diagnostic would fire.
+  test('a forged "name" field that the resolved URL does not match is never trusted, and is diagnosed', () => {
+    const result = parseNpmLockfile(
+      PATH,
+      packages({
+        name: 'left-pad',
+        version: '9.9.9',
+        resolved: 'https://registry.npmjs.org/@corp/secret/-/secret-9.9.9.tgz',
+        integrity: 'sha512-forged',
+      })
+    );
+    expect(only(result, 'ui-alias')?.lookupName).toBeUndefined();
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0].code).toBe('npm-lockfile-unverifiable-name');
+    expect(result.diagnostics[0].message).toContain('ui-alias');
+    expect(result.diagnostics[0].message).toContain('left-pad');
+  });
+
+  // npm also stamps a "name" field onto a transitive git, remote-tarball or
+  // file: entry whenever the installed folder differs from the target's own
+  // package.json name (arborist's shrinkwrap.js) -- none of those
+  // resolutions is a registry tarball, so none can ever vouch, by design,
+  // not as a gap. Diagnosed the same way an unvouched registry name is,
+  // since the fact ("this name could not be verified") is identical either
+  // way.
+  test('a "name" field on a git-sourced entry never yields a lookupName', () => {
+    const result = parseNpmLockfile(
+      PATH,
+      packages({
+        name: 'upstream-lib',
+        version: '1.0.0',
+        resolved: 'git+https://github.com/user/upstream-lib.git#abcdef1234567890abcdef1234567890abcdef12',
+      })
+    );
+    expect(only(result, 'ui-alias')?.lookupName).toBeUndefined();
+    expect(result.diagnostics.some((d) => d.code === 'npm-lockfile-unverifiable-name')).toBe(true);
   });
 
   // An ordinary (non-aliased) entry has no "name" field npm needs to write
-  // -- the key-derived name already is the real one -- so registryName
-  // must stay absent rather than being defaulted to the key. A check that
-  // ever started reading `registryName ?? name` without the `?? name`
-  // fallback would otherwise be safe by accident here and break the
-  // moment a lockfile omitted the field, which real ones do for every
-  // unaliased entry.
-  test('an ordinary entry with no "name" field leaves registryName undefined', () => {
-    const result = parseNpmLockfile(PATH, TRANSITIVE_ALIAS_CONTENT);
-    expect(only(result, 'host-pkg')?.registryName).toBeUndefined();
+  // -- the key-derived name already is the real one -- so lookupName must
+  // stay absent, with no diagnostic: there is nothing unverifiable about an
+  // entry that never claimed a different name in the first place.
+  test('an ordinary entry with no "name" field leaves lookupName undefined and raises no diagnostic', () => {
+    // host-pkg itself (fixed in the `packages` helper above) never carries a
+    // "name" field -- the `entry` argument here is irrelevant to this
+    // assertion and kept minimal on purpose.
+    const result = parseNpmLockfile(
+      PATH,
+      packages({ version: '4.17.21', resolved: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz' })
+    );
+    expect(only(result, 'host-pkg')?.lookupName).toBeUndefined();
+    expect(result.diagnostics).toEqual([]);
   });
 });
 

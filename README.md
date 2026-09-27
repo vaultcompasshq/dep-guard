@@ -824,15 +824,22 @@ Coverage is honest per format rather than uniform. Where a format cannot
 answer a question, the scan says so in a diagnostic instead of staying
 quiet:
 
-- `package-lock.json` v2 and v3 -- full coverage. An `npm:` alias entry no
-  manifest declares (one only some other package's own dependency
-  introduces) still resolves to the registry name it actually installs,
-  read from the entry's own `name` field.
+- `package-lock.json` v2 and v3 -- full coverage. Every finding's identity
+  (its package name) always comes from the lockfile key itself, or from a
+  manifest declaration -- never from a packages entry's own `name` field,
+  which is written by whoever committed the lockfile and is not something
+  dep-guard verifies at parse time. For a purely transitive `npm:` alias (one
+  only some other package's own dependency introduces, which no manifest
+  declares), the minimum-publish-age check still asks the registry about the
+  real package installed rather than the alias name, but only when the
+  entry's own resolved tarball URL vouches for that name; an unvouched name
+  is ignored for that lookup and reported in a diagnostic rather than
+  trusted or silently dropped.
 - `pnpm-lock.yaml` v9+ -- full, except install scripts, which the format
   stopped recording. Additions to `onlyBuiltDependencies` are used instead.
-  A transitive `npm:` alias never needed a fix here: pnpm's `packages` map
-  is already keyed by registry identity, not by whatever name a dependent's
-  own alias used to reach it.
+  A transitive `npm:` alias never needed special handling here: pnpm's
+  `packages` map is already keyed by registry identity, not by whatever name
+  a dependent's own alias used to reach it.
 - `yarn.lock`, `bun.lock` -- manifest-level checks only. Neither records
   install scripts, and yarn berry records no resolved URL. A transitive
   alias in either format is therefore invisible the same way every other
