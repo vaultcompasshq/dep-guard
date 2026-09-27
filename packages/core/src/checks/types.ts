@@ -49,6 +49,14 @@ export interface CheckContext {
   config: ResolvedConfig;
   delta: DependencyDelta;
   npmrcRegistryPins: Map<string, string>;
+  // The project .npmrc's unscoped default registry, or null/absent when it
+  // has none. Optional (rather than required like npmrcRegistryPins above)
+  // so the many existing check-unit-test CheckContext literals that never
+  // touch publish-age's pnpm-integrity-only case do not all need updating
+  // for a field only online/publish-age.ts's isNonPublicResolution reads;
+  // every real caller (scan.ts's runChecks) sets it. See RepoState's own
+  // field of the same name in state.ts for why this exists at all.
+  npmrcDefaultRegistry?: string | null;
   diagnostics: Diagnostic[];
   // A second write-only sink, alongside `diagnostics`. A check that drops a
   // would-be finding because an `allow` entry covers the package pushes the

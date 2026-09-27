@@ -7,7 +7,7 @@ import { parseNpmLockfile } from './lockfiles/npm.js';
 import { parseOnlyBuilt, parsePnpmLockfile } from './lockfiles/pnpm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
 import { parseManifest, type ParsedManifest } from './manifest.js';
-import { parseNpmrcPins, type RepoState } from './state.js';
+import { parseNpmrcDefaultRegistry, parseNpmrcPins, type RepoState } from './state.js';
 import { DepGuardError, type Diagnostic } from './types.js';
 
 // Loads the two sides of a scan out of a repository. Everything below
@@ -836,6 +836,11 @@ async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise
   }
 
   const lockfile = await loadLockfile(source);
+  // Read once and handed to both parsers below -- parseNpmrcPins and
+  // parseNpmrcDefaultRegistry read the same file for two different keys,
+  // and a source's read() is not assumed free of cost (a git source shells
+  // out per read).
+  const npmrcContent = await source.read(NPMRC);
 
   return {
     manifests,
@@ -845,7 +850,8 @@ async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise
     // so the merge has to happen here rather than in the install-script
     // check. Skipping it would leave that check permanently empty.
     onlyBuilt: parseOnlyBuilt(workspaceYamlContent, manifests),
-    npmrcRegistryPins: parseNpmrcPins(await source.read(NPMRC)),
+    npmrcRegistryPins: parseNpmrcPins(npmrcContent),
+    npmrcDefaultRegistry: parseNpmrcDefaultRegistry(npmrcContent),
     // A straight carry of what the lockfile parser already discovered
     // (npm's "link": true entries, one per workspace member); no
     // directory or manifest is re-walked to reconstruct it here.

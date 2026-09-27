@@ -62,6 +62,47 @@ function commit(dir: string, dependencies: Record<string, string>): void {
   execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'update'], { cwd: dir });
 }
 
+// A pnpm v9 packages entry with NO tarball field at all -- the shape
+// lockfiles/pnpm.ts's entryFromPackageValue writes for every ordinary
+// (non-git, non-URL) registry install, which never carries a resolvedUrl
+// at all because pnpm never records which registry served it. Real-world
+// shape confirmed against tests/fixtures/pnpm-lock-v9.yaml and
+// lockfile-pnpm.test.ts's own v9 key-extraction fixtures.
+function pnpmLockYaml(dependencies: Record<string, string>): string {
+  const lines = ['lockfileVersion: \'9.0\'', 'packages:'];
+  for (const [name, version] of Object.entries(dependencies)) {
+    lines.push(`  ${name}@${version}:`);
+    lines.push(`    resolution: {integrity: sha512-${name}-${version}==}`);
+  }
+  return lines.join('\n') + '\n';
+}
+
+// Writes a pnpm project (an empty-dependencies package.json plus a
+// pnpm-lock.yaml carrying an integrity-only resolution for each of
+// `lockPackages`) and, when `npmrc` is given, a project .npmrc alongside
+// it -- committed as a single snapshot, since these tests scan in audit
+// mode and never need a before/after diff.
+//
+// The manifest deliberately never declares `lockPackages` as a dependency:
+// this reproduces the bug's own shape, a TRANSITIVE lockfile entry no
+// manifest names (see online/publish-age.ts's module comment on why it
+// reads the lockfile diff rather than candidates.ts's newRegistryNames).
+// Declaring it in package.json as well would also make existence,
+// typosquat, and registered-squat/unknown-package treat it as a candidate
+// of THEIRS, and those checks call fetchPackument for reasons that have
+// nothing to do with isNonPublicResolution -- which would make "was
+// fetchPackument called for this name" ambiguous about which check called
+// it.
+function commitPnpm(dir: string, lockPackages: Record<string, string>, npmrc?: string): void {
+  writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '1.0.0', dependencies: {} }));
+  writeFileSync(path.join(dir, 'pnpm-lock.yaml'), pnpmLockYaml(lockPackages));
+  if (npmrc !== undefined) {
+    writeFileSync(path.join(dir, '.npmrc'), npmrc);
+  }
+  execFileSync('git', ['add', '.'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'pnpm install'], { cwd: dir });
+}
+
 const fetchWeeklyDownloadsMock: jest.MockedFunction<typeof fetchWeeklyDownloads> = jest.fn();
 const fetchPackumentMock: jest.MockedFunction<typeof fetchPackument> = jest.fn();
 
@@ -334,5 +375,119 @@ describe('scan(): publish-age through the real delta', () => {
     });
 
     expect(result.findings.some((f) => f.ruleId === 'publish-age')).toBe(false);
+  });
+
+  // Regression for a review finding on #58's follow-up: pnpm never records
+  // which registry served an ordinary resolution (lockfiles/pnpm.ts's
+  // entryFromPackageValue only sets resolvedUrl from a resolution's own
+  // `tarball` field, which an ordinary registry install never has), so
+  // isNonPublicResolution used to treat every such entry as public and send
+  // its name to registry.npmjs.org even when the project's own .npmrc
+  // named a different default registry -- leaking every transitive
+  // dependency's name out of a private pnpm repository in audit mode.
+  test('a pnpm lockfile entry with no resolvedUrl is skipped, not sent to the public registry, when the project .npmrc sets a private default registry', async () => {
+    fetchPackumentMock.mockImplementation(async (name: string) => {
+      if (name === 'private-thing') {
+        return {
+          createdAt: OLD_DATE,
+          latestVersion: '1.0.0',
+          latestPublishedAt: FRESH_DATE,
+          deprecated: false,
+          unpublished: false,
+          securityHolder: false,
+          versionTimes: { '1.0.0': FRESH_DATE },
+        };
+      }
+      return null;
+    });
+    const dir = initRepo();
+    commitPnpm(dir, { 'private-thing': '1.0.0' }, 'registry=https://npm.corp.example/\n');
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'audit' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    expect(fetchPackumentMock).not.toHaveBeenCalled();
+    expect(
+      result.run.diagnostics.some((d) => d.code === 'publish-age-private-origin-skipped')
+    ).toBe(true);
+    expect(result.findings.some((f) => f.ruleId === 'publish-age')).toBe(false);
+  });
+
+  // Control for the test above: the exact same pnpm lockfile shape, minus
+  // the project .npmrc, must still reach the registry -- proving the skip
+  // above is caused by the configured private default registry, not by
+  // pnpm's integrity-only resolution shape on its own.
+  test('control: the same pnpm lockfile with no project .npmrc still asks the public registry', async () => {
+    fetchPackumentMock.mockImplementation(async (name: string) => {
+      if (name === 'private-thing') {
+        return {
+          createdAt: OLD_DATE,
+          latestVersion: '1.0.0',
+          latestPublishedAt: FRESH_DATE,
+          deprecated: false,
+          unpublished: false,
+          securityHolder: false,
+          versionTimes: { '1.0.0': FRESH_DATE },
+        };
+      }
+      return null;
+    });
+    const dir = initRepo();
+    commitPnpm(dir, { 'private-thing': '1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'audit' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    expect(fetchPackumentMock).toHaveBeenCalledWith('private-thing', expect.anything());
+    const finding = result.findings.find((f) => f.ruleId === 'publish-age');
+    expect(finding).toMatchObject({ packageName: 'private-thing' });
+  });
+
+  // Folded in from a reviewer's leftover scratch file (zz-review-cache2):
+  // the pure cache-HIT path, where a second scan's cache already carries
+  // every version the run asks about and must be served from it with no
+  // second fetch at all -- distinct from the cache-MISS regression test
+  // above, which covers a cache entry missing a newly-added version.
+  test('a second scan whose cache already carries every requested version is served from cache, with no second fetch', async () => {
+    fetchPackumentMock.mockImplementation(async (name: string) =>
+      name === 'thing'
+        ? {
+            createdAt: OLD_DATE,
+            latestVersion: '1.0.0',
+            latestPublishedAt: OLD_DATE,
+            deprecated: false,
+            unpublished: false,
+            securityHolder: false,
+            versionTimes: { '0.9.0': OLD_DATE, '1.0.0': OLD_DATE },
+          }
+        : null
+    );
+    const dir = initRepo();
+    commit(dir, { thing: '0.9.0' });
+    commit(dir, { thing: '1.0.0' });
+
+    await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+    const second = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    expect(second.findings.some((f) => f.ruleId === 'publish-age')).toBe(false);
+    expect(fetchPackumentMock).toHaveBeenCalledTimes(1);
   });
 });

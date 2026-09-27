@@ -92,15 +92,29 @@ function isNonPublicResolution(ctx: CheckContext, name: string, resolvedUrl: str
     return true;
   }
   if (resolvedUrl === undefined) {
-    // Nothing resolved for this entry to judge an origin from. Every real
-    // npm or pnpm registry entry that reaches this point already carries a
-    // resolvedUrl (a version with none is not a shape either lockfile
-    // parser writes for a registry install), so this is a defensive
-    // fallthrough, not the common path -- and it is deliberately NOT
-    // treated as evidence of a private origin: this function's whole
-    // reason to exist is to avoid a false "must be private" as much as a
-    // false "must be public", and an absent value is neither.
-    return false;
+    // pnpm does not record which registry served an ordinary resolution --
+    // lockfiles/pnpm.ts only ever sets resolvedUrl from a resolution's own
+    // `tarball` field, and a ordinary registry install has none -- so an
+    // undefined resolvedUrl is the COMMON case for a pnpm lockfile, not a
+    // defensive fallthrough, and it says nothing about origin on its own.
+    // The project .npmrc's unscoped default registry is the one place
+    // pnpm's own resolution actually reads to decide where such a name
+    // came from, so it is the only signal available to judge this case:
+    // when the project set one and it is not the public registry, every
+    // resolution with no resolvedUrl came from that private registry, by
+    // the same reasoning as the npmrcRegistryPins scope check above. When
+    // none is configured, or it points at the public registry, an absent
+    // value is genuinely neither public nor private evidence, so this
+    // still returns false rather than guessing -- see the docs note on
+    // isNonPublicResolution in README.md and docs/INVARIANTS.md for what a
+    // repository relying on a USER-level ~/.npmrc or npm_config_registry
+    // instead has to configure, since neither of those reaches this
+    // function at all.
+    return (
+      ctx.npmrcDefaultRegistry !== undefined &&
+      ctx.npmrcDefaultRegistry !== null &&
+      originOf(ctx.npmrcDefaultRegistry) !== PUBLIC_REGISTRY_ORIGIN
+    );
   }
   return originOf(resolvedUrl) !== PUBLIC_REGISTRY_ORIGIN;
 }

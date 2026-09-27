@@ -182,7 +182,19 @@ failure rather than blocking:
   check never sends a name to the registry that resolved from anywhere
   other than the public npm registry, or whose scope is pinned to a
   different registry in `.npmrc` -- a private dependency's name is not put
-  on the wire to a public service just to price this heuristic.
+  on the wire to a public service just to price this heuristic. pnpm does
+  not record which registry served an ordinary resolution at all, so a
+  pnpm lockfile entry with no recorded resolution URL is judged against the
+  project `.npmrc`'s own unscoped default registry instead: when that is
+  set to a private registry, such an entry is skipped the same way a
+  scope-pinned one is; when none is set (or it names the public registry),
+  the entry is checked as public, since nothing in the project's own
+  configuration says otherwise. A *user*-level `~/.npmrc` default registry,
+  or an `npm_config_registry` environment variable, is invisible to this
+  check and to the rest of the scan -- a repository relying on either of
+  those instead of a project `.npmrc` must list the private names under
+  `internalScopes` or `internalPrefixes`. The same gap applies to an npm
+  lockfile written with its own registry-resolved URLs omitted.
 
 A registry error in any of the four checks degrades to a diagnostic
 rather than a block, the design every check above already follows for its

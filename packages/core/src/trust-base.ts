@@ -55,7 +55,7 @@ import { BASELINE_FILE, parseBaseline } from './baseline.js';
 import type { ResolvedConfig } from './checks/types.js';
 import { CONFIG_FILE, LOCAL_CONFIG_FILE, loadConfigFromTexts } from './config.js';
 import { NPMRC, isUsableRef } from './git-source.js';
-import { parseNpmrcPins } from './state.js';
+import { parseNpmrcDefaultRegistry, parseNpmrcPins } from './state.js';
 import { DepGuardError } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -134,6 +134,18 @@ export interface TrustedControls {
    * has anything to compare against, which is why they come from the base.
    */
   npmrcPins: Map<string, string>;
+  /**
+   * The base ref's .npmrc unscoped default registry, or null when the base
+   * carries none. Sourced from the base for the same reason npmrcPins is:
+   * online/publish-age.ts's isNonPublicResolution treats a resolved
+   * lockfile entry with no resolvedUrl as private only when this names a
+   * non-public registry, so a pull request that ADDED or CHANGED this line
+   * would otherwise be able to silence publish-age's check of a package it
+   * introduces via a pnpm integrity-only resolution -- the exact "control
+   * input a pull request can rewrite" this base-sourcing pattern exists to
+   * close.
+   */
+  npmrcDefaultRegistry: string | null;
   /** True when the head proposes a different config. */
   configChanged: boolean;
   /** True when the head proposes a different baseline. */
@@ -804,6 +816,10 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
   const headNpmrcPins = parseNpmrcPins(
     headNpmrcFile !== null && isRegularFileMode(headNpmrcFile.mode) ? headNpmrcFile.text : null
   );
+  // Same base-file text already validated above; no second read.
+  const npmrcDefaultRegistry = parseNpmrcDefaultRegistry(
+    baseNpmrcFile === null ? null : baseNpmrcFile.text
+  );
 
   // The config input is the PAIR of files, because that is what the
   // overlay makes it. A pull request that leaves .dep-guard.json alone and
@@ -886,6 +902,7 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
     config,
     baseline,
     npmrcPins,
+    npmrcDefaultRegistry,
     configChanged,
     baselineChanged,
     npmrcChanged,

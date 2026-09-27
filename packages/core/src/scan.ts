@@ -217,9 +217,18 @@ function runChecks(
   corpus: Corpus,
   config: ResolvedConfig,
   delta: DependencyDelta,
-  npmrcRegistryPins: Map<string, string>
+  npmrcRegistryPins: Map<string, string>,
+  npmrcDefaultRegistry: string | null
 ): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
-  const ctx: CheckContext = { corpus, config, delta, npmrcRegistryPins, diagnostics: [], allowed: [] };
+  const ctx: CheckContext = {
+    corpus,
+    config,
+    delta,
+    npmrcRegistryPins,
+    npmrcDefaultRegistry,
+    diagnostics: [],
+    allowed: [],
+  };
   const findings: Omit<Finding, 'fingerprint'>[] = [];
   for (const check of CHECKS) {
     findings.push(...check(ctx));
@@ -786,11 +795,18 @@ export async function scan(opts: {
   // had just been removed. loadStates still reads the head-side .npmrc as
   // it always did; its pins are simply not what the rule is judged
   // against here.
+  //
+  // The unscoped default registry is the same kind of control input, for
+  // the same reason: online/publish-age.ts's isNonPublicResolution reads
+  // it to judge a pnpm integrity-only resolution, and sourcing it from
+  // statePair.after would let a pull request silence that check for a
+  // package it introduces by adding or changing this one .npmrc line.
   const { findings: checkedFindings, ctx } = runChecks(
     corpus,
     config,
     delta,
-    controls === null ? statePair.after.npmrcRegistryPins : controls.npmrcPins
+    controls === null ? statePair.after.npmrcRegistryPins : controls.npmrcPins,
+    controls === null ? statePair.after.npmrcDefaultRegistry : controls.npmrcDefaultRegistry
   );
   const rawFindings = resolveOnline(config, opts.online)
     ? await enrichOnline(checkedFindings, ctx)
@@ -888,12 +904,14 @@ function syntheticDelta(name: string): DependencyDelta {
 // repository with no history) so a caller -- the CLI's `dep-guard check`,
 // and later an MCP tool -- can treat both results identically.
 //
-// npmrcRegistryPins is intentionally empty rather than read from the real
-// repository: the synthetic delta carries no lockfile resolution for the
-// dependency-confusion pin-mismatch rule to compare against a pin, so that
-// rule can never fire here regardless; the internal-name rule (the other
-// half of confusionCheck) still runs, since it only needs config and the
-// name itself.
+// npmrcRegistryPins is intentionally empty, and npmrcDefaultRegistry
+// intentionally null, rather than read from the real repository: the
+// synthetic delta carries no lockfile resolution at all -- neither for the
+// dependency-confusion pin-mismatch rule to compare against a pin, nor for
+// publish-age's isNonPublicResolution to judge against a default registry
+// -- so neither rule can act on either value here regardless; the
+// internal-name rule (the other half of confusionCheck) still runs, since
+// it only needs config and the name itself.
 export async function checkSingle(opts: {
   repoRoot: string;
   name: string;
@@ -939,7 +957,7 @@ export async function checkSingle(opts: {
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const delta = syntheticDelta(opts.name);
 
-  const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map());
+  const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map(), null);
   const rawFindings = resolveOnline(config, opts.online)
     ? await enrichOnline(checkedFindings, ctx)
     : checkedFindings;

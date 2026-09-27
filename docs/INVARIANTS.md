@@ -1371,12 +1371,36 @@ candidate on either of two independent grounds, checked in this order:
 2. The entry's `resolvedUrl` origin is not the public registry's origin
    (`originOf(DEFAULT_REGISTRY)`, computed once from
    `registry-client.ts`'s own constant rather than a second literal that
-   could drift from it). An entry with no `resolvedUrl` at all is
-   deliberately NOT treated as evidence of either a public or a private
-   origin -- every real npm or pnpm registry entry that reaches this
-   point already carries one, so this is a defensive fallthrough for a
-   shape neither lockfile parser is known to write, not a case this
-   check has evidence to judge either way.
+   could drift from it).
+
+   An entry with no `resolvedUrl` at all is the COMMON case for a pnpm
+   lockfile, not a rare fallthrough: pnpm never records which registry
+   served an ordinary (non-tarball-URL) resolution -- `lockfiles/pnpm.ts`'s
+   `entryFromPackageValue` sets `resolvedUrl` only from a resolution's own
+   `tarball` field -- so this is the ONE shape this check cannot judge from
+   the lockfile entry itself. `state.ts`'s `parseNpmrcDefaultRegistry`
+   reads the project `.npmrc`'s unscoped `registry=` line into
+   `ctx.npmrcDefaultRegistry` for exactly this case (a sibling to
+   `parseNpmrcPins`, which only ever reads the SCOPED `@scope:registry`
+   keys): when the project set one and it names a non-public origin, every
+   resolution with no `resolvedUrl` is treated as coming from it, by the
+   same reasoning as ground 1 above. When none is configured, or it names
+   the public registry, an absent `resolvedUrl` is genuinely neither public
+   nor private evidence, and this still returns false rather than
+   guessing. A *user*-level `~/.npmrc` default registry or an
+   `npm_config_registry` environment variable is invisible here and to the
+   rest of the scan; a repository relying on either instead of a project
+   `.npmrc` must list the private names under `internalScopes` /
+   `internalPrefixes`. An npm lockfile written with its own
+   registry-resolved URLs omitted has the identical gap, for the identical
+   reason -- this check has no registry to judge such an entry against
+   beyond the same project `.npmrc` default.
+
+   Like `npmrcRegistryPins`, `npmrcDefaultRegistry` is a CONTROL INPUT in
+   pull-request mode: `scan.ts` sources it from the base ref
+   (`TrustedControls.npmrcDefaultRegistry`), not from the head side under
+   judgment, so a pull request cannot add or change this one `.npmrc` line
+   to silence this check for a package the same pull request introduces.
 
 A candidate excluded by either ground raises
 `publish-age-private-origin-skipped`, naming the package, rather than a

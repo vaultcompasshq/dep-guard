@@ -10,6 +10,16 @@ export interface RepoState {
   lockfile: ParsedLockfile | null;
   onlyBuilt: string[];
   npmrcRegistryPins: Map<string, string>;
+  // The project .npmrc's unscoped default registry ("registry=..."), or
+  // null when the file has none or does not exist. pnpm does not record
+  // which registry served an ordinary (non-tarball-URL) resolution -- see
+  // lockfiles/pnpm.ts's resolvedUrl handling -- so a resolved lockfile
+  // entry with no resolvedUrl at all could come from ANY configured
+  // registry, and online/publish-age.ts's isNonPublicResolution needs this
+  // value to tell a pnpm repository whose default registry is private from
+  // one that never set one at all, the only two cases that reach it with
+  // no resolvedUrl to judge an origin from.
+  npmrcDefaultRegistry: string | null;
   // Every name this side's lockfile records as workspace-local (see
   // ParsedLockfile.workspaceLocalNames). A straight carry of the
   // lockfile's own field to the level checks actually read -- RepoState is
@@ -182,4 +192,50 @@ export function parseNpmrcPins(content: string | null): Map<string, string> {
     pins.set(scope, stripCredentials(value));
   }
   return pins;
+}
+
+// Reads the project .npmrc's unscoped default registry, e.g.
+// "registry=https://npm.corp.example/". Unlike parseNpmrcPins, this key has
+// no "@scope:" prefix and no ":registry" suffix -- it is the bare key
+// "registry" -- so it needs its own scan rather than a branch inside the
+// pin loop above, and it is deliberately kept a *sibling* function so the
+// existing scoped map's shape and callers are untouched.
+//
+// A repeated "registry=" line follows the same last-write-wins rule real
+// npmrc parsing uses for any duplicate key, which is why this returns the
+// LAST non-empty value seen rather than the first. Credentials are
+// stripped from the stored value for the same reason parseNpmrcPins strips
+// them from a pin: this value can reach a diagnostic message, and a
+// project .npmrc may legally carry credentials in the registry URL itself.
+//
+// This only tells the caller what the PROJECT declares. A user-level
+// ~/.npmrc default registry, or an npm_config_registry environment
+// variable, is invisible here (and to the rest of the scan) -- see the
+// docs note on online/publish-age.ts and README.md for what a repository
+// relying on either of those has to configure instead.
+export function parseNpmrcDefaultRegistry(content: string | null): string | null {
+  if (content === null) {
+    return null;
+  }
+  let registry: string | null = null;
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim();
+    if (line === '' || line.startsWith('#') || line.startsWith(';')) {
+      continue;
+    }
+    const separator = line.indexOf('=');
+    if (separator === -1) {
+      continue;
+    }
+    const key = line.slice(0, separator).trim();
+    if (key !== 'registry') {
+      continue;
+    }
+    const value = unquote(line.slice(separator + 1).trim());
+    if (value === '') {
+      continue;
+    }
+    registry = stripCredentials(value);
+  }
+  return registry;
 }
