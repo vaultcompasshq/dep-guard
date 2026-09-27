@@ -500,8 +500,9 @@ jobs:
     # here to smoke test: every command below installs
     # @vaultcompass/dep-guard at the version derived from the tag, and on
     # an action-only tag that version does not exist on the registry and
-    # never will. The job would wait out its twelve registry polls and
-    # then fail a release that did exactly what it was supposed to.
+    # never will. The job would wait out its registry polls (thirty per
+    # package, ten seconds apart) and then fail a release that did exactly
+    # what it was supposed to.
     if: needs.release.outputs.action_only == 'false'
     runs-on: ubuntu-latest
     steps:
