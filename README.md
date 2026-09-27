@@ -834,7 +834,11 @@ quiet:
   real package installed rather than the alias name, but only when the
   entry's own resolved tarball URL vouches for that name; an unvouched name
   is ignored for that lookup and reported in a diagnostic rather than
-  trusted or silently dropped.
+  trusted or silently dropped. A registry that serves tarballs under a path
+  prefix, or that percent-encodes a scope as `%2f` in the name, will raise
+  that diagnostic for a perfectly genuine alias too -- expected noise for
+  such a registry, never a wrong finding, since the affected entry simply
+  falls back to being looked up under its lockfile key like any other.
 - `pnpm-lock.yaml` v9+ -- full, except install scripts, which the format
   stopped recording. Additions to `onlyBuiltDependencies` are used instead.
   A transitive `npm:` alias never needed special handling here: pnpm's

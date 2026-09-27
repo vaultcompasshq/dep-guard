@@ -199,13 +199,17 @@ which registry package `publish-age` should actually ask about -- and
 kept entirely separate from identity so the review finding above can never
 recur through it. `lockfiles/npm.ts`'s `entryFromPackageValue` is the only
 producer; `online/publish-age.ts`'s `collectCandidates` and
-`findPublishAgeFindings` are the only consumers (`entryChange.after.lookupName
-?? name`, read once to build each `Candidate.lookupName` and once more,
-`group[0].lookupName`, as the literal `fetchPackument` argument -- nowhere
-else in the check, and nowhere in any other check). Grep for `lookupName`
-across `packages/core/src` before adding a second reader; the day one
-appears it needs the same scrutiny this section documents, not an assumed
-green light because the field already exists.
+`findPublishAgeFindings` are the only consumers, and each reads it for a
+different purpose: `collectCandidates` reads `entryChange.after.lookupName
+?? name` once, to build each `Candidate.lookupName`; `findPublishAgeFindings`
+reads `candidate.lookupName` again, once to GROUP candidates for the fetch
+(the `Map<string, Candidate[]>` it builds keyed by `lookupName`, not by
+identity -- see the grouping-fix section below for why that distinction is
+load-bearing) and once more as the literal `fetchPackument` argument for
+each group. Nowhere else in the check, and nowhere in any other check. Grep
+for `lookupName` across `packages/core/src` before adding a second reader;
+the day one appears it needs the same scrutiny this section documents, not
+an assumed green light because the field already exists.
 
 `lookupName` is populated only when the entry's own `resolvedUrl` VOUCHES
 for the `name` field -- a registry tarball URL whose path encodes exactly
@@ -257,18 +261,72 @@ ported into `delta.test.ts`, proves it for the one shape that used to
 break: a forged, unvouched `name` field on an already-suspicious nested
 entry.
 
-One non-blocking case the same review raised is worth recording rather than
-re-discovering later: a genuinely transitive alias entry and an unrelated,
-unaliased copy of the SAME real package (two different lockfile keys, one
-of them carrying a vouched `lookupName` for that real package, the other
-being that real package's own ordinary entry) now share one `publish-age`
-registry lookup -- `collectCandidates` groups by identity (`name`), and the
-fetch itself is grouped by `lookupName`, so two different identities that
-happen to resolve the same lookup target get one shared fetch and two
-separate findings. They remain two distinct `LockEntryChange`s, two
+## The registry fetch groups by lookup target, and grouping by identity was a second, separate hole
+
+A third review pass found that the fix above was still incomplete, in the
+grouping rather than the vouching: `collectCandidates` builds one
+`Candidate` per lockfile entry, correctly carrying both `name` (identity)
+and `lookupName` (the vouched-or-fallback lookup target) -- but
+`findPublishAgeFindings` used to group those candidates for the registry
+fetch by `name`, on the reasoning that every candidate sharing one identity
+shares one lookup target. That reasoning does not hold: npm stores several
+entries under one lockfile key at different nesting paths (a nested
+duplicate, the routine reason `entries: Map<string, LockEntry[]>` is a list
+in the first place -- see the entries-map comment in `lockfiles/types.ts`),
+and every one of them shares the outer key's installed name regardless of
+what each individually resolves to. So a genuinely transitive alias and a
+DECOY sharing its exact lockfile key can carry two different vouched
+`lookupName`s while reporting under the same `packageName`, and grouping
+by `name` put them in one group, whose fetch used only the first
+candidate's `lookupName` (`group[0].lookupName`) for the entire group.
+
+The dedupe made this a bypass rather than a merely-wrong fetch.
+`dedupeKey` used to be `(manifestPath, name, version)`, with no
+`lookupName` component, so a decoy sharing a real entry's key, version, and
+manifest path -- and vouching for an unrelated package's name -- collided
+with the real entry's own candidate in the `seen` set and silently dropped
+whichever one lost the race. The reviewer's reproduction: a genuine, fresh
+`evil@1.0.0` at `node_modules/evil` normally gets looked up and flagged; add
+`node_modules/a/node_modules/evil` with `"name": "lodash"` and a
+`resolvedUrl` that genuinely vouches for it (lodash's own real tarball URL,
+so `lockfiles/npm.ts`'s vouching check from the section above has nothing
+to object to), and the registry was asked only about `lodash` -- old,
+unflagged -- with no finding and no diagnostic for `evil` at all. `evil`'s
+own candidate never existed to be skipped; the dedupe erased it before the
+grouping step ever ran.
+
+The fix touches both mechanisms in `online/publish-age.ts`, and each closes
+a different half of the hole: `dedupeKey` now includes `lookupName`
+(`(manifestPath, name, lookupName, version)`), so the real entry and the
+decoy are two candidates, never one; and `findPublishAgeFindings` groups
+its `Map<string, Candidate[]>` by `candidate.lookupName`, not `candidate.name`,
+so "every candidate in this group shares one lookup target" is true by
+construction and there is no `group[0]` standing in for candidates it may
+not represent. Fixing only the dedupe would still merge the two candidates'
+fetches under one arbitrary name; fixing only the grouping would still lose
+the real candidate to the dedupe before grouping ever saw it.
+
+This also settles the genuinely benign version of the same shape, which the
+fix has to get right without a diagnostic: two ordinary entries sharing one
+lockfile key -- an ordinary nested duplicate, not an attack -- each
+carrying a DIFFERENT vouched `lookupName` at a different version. Grouping
+by `lookupName` asks the registry about each one under its own name and
+checks each version against the right package's time map; the old
+identity-grouped code would have asked about only one of the two real
+packages, for both versions, and reported the wrong package's version list
+missing the other's version (`publish-age-version-unknown`) rather than
+finding the right answer.
+
+A genuinely transitive alias entry and an unrelated, unaliased copy of the
+SAME real package -- two different lockfile keys, one of them carrying a
+vouched `lookupName` for that real package, the other being that real
+package's own ordinary entry -- still share one `publish-age` registry
+lookup by design, and this is the one place two different identities are
+meant to land in the same group: they resolve to the same lookup target, so
+one fetch answers both. They remain two distinct `LockEntryChange`s, two
 distinct `packageName`s, and two distinct fingerprints throughout; sharing
-a fetch is purely a network-call optimization and never merges what the
-two entries are.
+a fetch is purely a network-call optimization and never merges what the two
+entries are.
 
 ## Pairing two lockfiles is a chain of guesses, and each guess owes a diagnostic
 

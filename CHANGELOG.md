@@ -37,7 +37,23 @@ GitHub release notes, which are generated from the commit history.
   keyed by registry identity, not by an alias name some dependent used to
   reach it. Yarn and bun lockfiles are unaffected for the same reason they
   carry no other lockfile-backed finding: neither format's entries are
-  parsed at all. README and `docs/INVARIANTS.md` updated (fixes #69).
+  parsed at all.
+
+  A third review pass found the fetch grouping itself was still wrong:
+  `publish-age` grouped candidates by identity (the lockfile key) and asked
+  the registry about only the first candidate's lookup name for the whole
+  group, on the premise that every candidate sharing one key shares one
+  lookup target. npm stores several entries under one key at different
+  nesting paths, so a nested decoy sharing a real entry's key, version, and
+  manifest path -- while genuinely vouching for an unrelated package's name
+  -- collided with the real entry in the dedupe key (which did not account
+  for the lookup name either) and erased it before the grouping step ever
+  ran: the registry was asked only about the decoy's target, and the real,
+  fresh dependency produced no finding and no diagnostic at all. The dedupe
+  key now includes the lookup name, and the fetch groups by lookup name
+  rather than identity, so two entries that report under the same name but
+  resolve to different real packages are always looked up separately.
+  README and `docs/INVARIANTS.md` updated (fixes #69).
 
 - Fixed a publish-age coverage loss: a scope pinned to the PUBLIC registry
   in `.npmrc` used to be treated as private just because it had a pin at

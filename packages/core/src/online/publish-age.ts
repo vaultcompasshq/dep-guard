@@ -70,16 +70,22 @@ interface Candidate {
   manifestPath: string;
 }
 
-// One candidate per (manifestPath, name, version) triple: the same
-// resolved version of the same package can legitimately appear more than
-// once in a single lockfile's diff (a nested duplicate resolution, say),
-// and asking the registry about it twice, or reporting it twice against
-// the same manifest, adds nothing a reader can act on twice. Keyed by
-// `name` (identity), not `lookupName` -- two entries that report under
-// different names are two different findings even if they happen to look
-// up the same real package.
+// One candidate per (manifestPath, name, lookupName, version) quadruple.
+// `lookupName` has to be part of this key, not just `name`: npm stores
+// several entries under one lockfile key at different nesting paths
+// (lockfiles/types.ts's entries-map comment -- a nested duplicate is
+// ordinary, and every one of them shares the outer key's installed name),
+// so two GENUINELY DIFFERENT entries can share (manifestPath, name,
+// version) while resolving to two different real packages. Deduping on
+// the three-part key alone silently dropped whichever one lost the `seen`
+// race -- and a nested decoy sharing a real entry's key, version, and
+// manifest path while vouching for an unrelated package's name (issue #69,
+// round 3) turned that silent drop into a bypass: the real entry's own
+// candidate never existed, so it was never asked about and never checked.
+// With `lookupName` in the key, the real entry and the decoy are two
+// candidates, each looked up under its own name.
 function dedupeKey(candidate: Candidate): string {
-  return JSON.stringify([candidate.manifestPath, candidate.name, candidate.version]);
+  return JSON.stringify([candidate.manifestPath, candidate.name, candidate.lookupName, candidate.version]);
 }
 
 // True when a lockfile entry must never be sent to the public registry.
@@ -241,16 +247,22 @@ export async function findPublishAgeFindings(
   const allowSet = new Set(ctx.config.minAgeAllow);
   const minAgeDays = ctx.config.minAgeDays;
 
-  // Grouped by name, not by (name, version): one packument carries every
-  // version's publish timestamp, so a package appearing at several
-  // versions across a monorepo's manifests -- or, after dedupeKey above,
-  // even just at several manifestPaths for the SAME version -- is still
-  // one fetch.
-  const byName = new Map<string, Candidate[]>();
+  // Grouped by LOOKUP TARGET (lookupName), not by identity and not by
+  // (name, version): one packument carries every version's publish
+  // timestamp, so a package appearing at several versions across a
+  // monorepo's manifests -- or, after dedupeKey above, even just at
+  // several manifestPaths for the SAME version -- is still one fetch. It
+  // must be lookupName, not `name` (identity), because two candidates can
+  // share one identity while resolving to two different real packages
+  // (issue #69, round 3 -- see the dedupeKey comment above for the exact
+  // shape). Grouping by lookupName makes "every candidate in this group
+  // shares one lookup target" true by construction, rather than an
+  // assumption `group[0]` used to stand in for the whole group.
+  const byLookupName = new Map<string, Candidate[]>();
   for (const candidate of candidates) {
-    const existing = byName.get(candidate.name);
+    const existing = byLookupName.get(candidate.lookupName);
     if (existing === undefined) {
-      byName.set(candidate.name, [candidate]);
+      byLookupName.set(candidate.lookupName, [candidate]);
     } else {
       existing.push(candidate);
     }
@@ -259,18 +271,12 @@ export async function findPublishAgeFindings(
   const findings: Omit<Finding, 'fingerprint'>[] = [];
   let skippedByDeadline = 0;
 
-  for (const [name, group] of byName) {
+  for (const [lookupName, group] of byLookupName) {
     if (deadline.expired()) {
       skippedByDeadline += group.length;
       continue;
     }
 
-    // The ONLY place this check reads lookupName: every candidate sharing
-    // one `name` (identity) represents the same lockfile key, so they share
-    // one lookup target too -- group[0] stands in for all of them here.
-    // Every diagnostic and finding below keeps naming `name`/`candidate.name`
-    // (identity), never this value.
-    const lookupName = group[0].lookupName;
     let packument: { versionTimes: Record<string, string> } | null;
     try {
       packument = await deps.fetchPackument(
@@ -281,7 +287,7 @@ export async function findPublishAgeFindings(
       diagnostics.push({
         code: 'online-check-unreachable',
         message:
-          `publish-age: could not reach the npm registry for "${name}" (${(err as Error).message}); ` +
+          `publish-age: could not reach the npm registry for "${lookupName}" (${(err as Error).message}); ` +
           `${group.length} dependency(ies) were not checked`,
       });
       continue;
@@ -302,7 +308,7 @@ export async function findPublishAgeFindings(
       // "nothing needed checking".
       diagnostics.push({
         code: 'publish-age-package-unknown',
-        message: `publish-age: the npm registry does not know package "${name}"; ${group.length} dependency(ies) resolved to it were not checked for publish age`,
+        message: `publish-age: the npm registry does not know package "${lookupName}"; ${group.length} dependency(ies) resolved to it were not checked for publish age`,
       });
       continue;
     }

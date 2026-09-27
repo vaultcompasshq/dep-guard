@@ -34,6 +34,16 @@ function installedNameFromKey(key: string): string | undefined {
 // target's own package.json name) or because the resolved tarball's own
 // path names something else entirely. Exported so tests can assert by
 // value rather than by a string literal that could drift from the message.
+//
+// registryTarballPackageName (resolution.ts) only recognises npm's own
+// tarball path shape. A registry that serves tarballs under a path PREFIX
+// (a proxied or namespaced registry mounted below some base path) or that
+// percent-encodes a scope's "/" as "%2f" in the name segment writes a path
+// this parser cannot match against a scoped or unscoped name the ordinary
+// way, so a perfectly genuine alias on such a registry raises this
+// diagnostic too. That is expected noise for those registries -- a lost
+// lookupName, never a wrong finding -- not evidence of anything wrong with
+// the lockfile.
 export const UNVERIFIABLE_NAME_CODE = 'npm-lockfile-unverifiable-name';
 
 function entryFromPackageValue(
