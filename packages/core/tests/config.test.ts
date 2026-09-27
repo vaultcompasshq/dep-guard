@@ -202,6 +202,44 @@ describe('loadConfig', () => {
     expect(loadConfig(repoRoot).minAgeAllow).toEqual([]);
   });
 
+  // onlineBudgetMs (issue #75): unset by default, so scan.ts can tell "no
+  // opinion configured" apart from an explicit override and pick between
+  // the hook default and the much larger pull-request default itself.
+  test('onlineBudgetMs is undefined by default', () => {
+    const repoRoot = makeRepo();
+    expect(loadConfig(repoRoot).onlineBudgetMs).toBeUndefined();
+  });
+
+  test('onlineBudgetMs can be set in .dep-guard.json', () => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ onlineBudgetMs: 60000 }) });
+    expect(loadConfig(repoRoot).onlineBudgetMs).toBe(60000);
+  });
+
+  test('onlineBudgetMs of 0 is accepted (no online time at all)', () => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ onlineBudgetMs: 0 }) });
+    expect(loadConfig(repoRoot).onlineBudgetMs).toBe(0);
+  });
+
+  test('a negative onlineBudgetMs throws config-invalid', () => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ onlineBudgetMs: -1 }) });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+    try {
+      loadConfig(repoRoot);
+    } catch (error) {
+      expect((error as DepGuardError).code).toBe('config-invalid');
+    }
+  });
+
+  test('a non-integer onlineBudgetMs throws config-invalid', () => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ onlineBudgetMs: 1.5 }) });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+  });
+
+  test('a non-numeric onlineBudgetMs throws config-invalid', () => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ onlineBudgetMs: '60000' }) });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+  });
+
   test('minAgeAllow accepts exact name@version strings, scoped and unscoped', () => {
     const repoRoot = makeRepo({
       '.dep-guard.json': JSON.stringify({

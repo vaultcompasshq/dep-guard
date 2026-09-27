@@ -32,9 +32,12 @@ import { findPublishAgeFindings } from './online/publish-age.js';
 import { findRegisteredSquats } from './online/registered-squat.js';
 import { resolveUnknownPackages } from './online/unknown-package.js';
 import {
+  CI_ONLINE_BUDGET_MS,
+  DEFAULT_ONLINE_BUDGET_MS,
   ONLINE_DEADLINE_CODE,
   createOnlineDeadline,
   deadlineDiagnosticMessage,
+  sumDeadlineSkipped,
 } from './online/deadline.js';
 import { defaultCachePath, loadCache } from './online/cache.js';
 import { fetchPackument, fetchWeeklyDownloads } from './online/registry-client.js';
@@ -119,6 +122,13 @@ export interface ScanResult {
     corpusBuiltAt: string;
     lockfileFormat: string;
     diagnostics: Diagnostic[];
+    // Run-level online facts (issue #75), always present so the umbrella
+    // (conductor#72) and any other JSON consumer can read it unconditionally
+    // rather than branching on whether --online was on. See
+    // OnlineRunSummary's own doc comment for what each field means, and
+    // docs/INVARIANTS.md's "one wall clock" section for the online
+    // subsystem this reports on.
+    online: OnlineRunSummary;
   };
   exitCode: 0 | 1;
 }
@@ -253,6 +263,30 @@ function resolveOnline(config: ResolvedConfig, online: boolean | undefined): boo
   return online ?? config.online;
 }
 
+// Issue #75: the per-run online wall-clock budget. Same precedence shape
+// as resolveOnline and applyFailOnOverride -- an explicit CLI override
+// always wins, then an explicit config key, and only once both are absent
+// does the default get picked at all. Only then does the RUN SHAPE matter:
+// a --base or --trust-base run is the pull-request/CI shape (minutes to
+// spend, and a large dependency change is the expensive failure mode), so
+// it gets CI_ONLINE_BUDGET_MS; a plain audit or staged run is the commit
+// hook shape and keeps DEFAULT_ONLINE_BUDGET_MS. Only matters at all when
+// online checks are actually on -- see resolveOnline above -- but that is
+// the caller's decision, not this function's.
+function resolveOnlineBudgetMs(
+  config: ResolvedConfig,
+  cliOverride: number | undefined,
+  isPullRequestRun: boolean
+): number {
+  if (cliOverride !== undefined) {
+    return cliOverride;
+  }
+  if (config.onlineBudgetMs !== undefined) {
+    return config.onlineBudgetMs;
+  }
+  return isPullRequestRun ? CI_ONLINE_BUDGET_MS : DEFAULT_ONLINE_BUDGET_MS;
+}
+
 // Runs strictly after runChecks(): the six offline checks stay synchronous
 // and untouched by this. Uses one process-lifetime cache instance so a
 // single CLI invocation that calls scan() more than once (it does not
@@ -278,7 +312,39 @@ const CREATED_TTL_MS: number | null = null; // a package's creation date never c
 // roughly matching the per-request budget SCAN_TIMEOUT_MS already sets.
 const SCAN_BACKOFF_CAP_MS = 8_000;
 
-async function cachedFetchWeeklyDownloads(names: string[]): Promise<DownloadCountsResult> {
+// A single run's count of package NAMES actually looked up online (scan.ts's
+// JSON `online.lookupsAttempted` field, issue #75) -- not wrapper calls, and
+// not raw HTTP requests. Those two differ from "names" for exactly one of
+// the four cached fetches below: cachedFetchWeeklyDownloads is called ONCE
+// per online step with every candidate batched into a single array
+// (registered-squat.ts and asymmetry.ts each issue one bulk
+// fetchWeeklyDownloads call for every candidate they have, never one per
+// name), and that one call can in turn cost the registry client several
+// real HTTP requests internally (a 128-name unscoped batch, one request per
+// scoped name, and a possible sentinel probe -- registry-client.ts's own
+// fetchWeeklyDownloads). Counting "1 per call" undercounts a large batch
+// badly; counting "1 per underlying HTTP request" would require this file
+// to know registry-client.ts's private batching shape and would still not
+// match lookupsSkippedByDeadline, which is a count of skipped CANDIDATE
+// NAMES, not requests. Names are the one unit both fields can share, so a
+// consumer can add them to answer "how many names did the online checks
+// want to look up in total". The other three cached fetches below already
+// take one name per call, so "1 per call" and "1 per name" already agree
+// there; only the downloads batch needed to change.
+//
+// Threaded explicitly into each cached fetch below rather than kept as a
+// module-level counter: enrichOnline creates one fresh per call, so two
+// scans in one process (checkSingle and scan() can both run in a single
+// CLI invocation, per the `cache` singleton's own comment above) never mix
+// each other's counts the way a module-level mutable total would.
+interface LookupCounter {
+  attempted: number;
+}
+
+async function cachedFetchWeeklyDownloads(
+  names: string[],
+  lookups: LookupCounter
+): Promise<DownloadCountsResult> {
   const store = sharedCache();
   const counts = new Map<string, number>();
   const misses: string[] = [];
@@ -291,6 +357,11 @@ async function cachedFetchWeeklyDownloads(names: string[]): Promise<DownloadCoun
     }
   }
   if (misses.length > 0) {
+    // One name per miss, regardless of how many HTTP requests
+    // fetchWeeklyDownloads itself turns this array into -- see this
+    // function's own doc comment above (LookupCounter) for why "names",
+    // not "calls" or "requests", is the field's unit.
+    lookups.attempted += misses.length;
     const fetched = await fetchWeeklyDownloads(misses, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
     for (const [name, count] of fetched.counts) {
       counts.set(name, count);
@@ -340,12 +411,16 @@ async function cachedFetchWeeklyDownloads(names: string[]): Promise<DownloadCoun
   return { counts, noRecord: new Set() };
 }
 
-async function cachedFetchPackument(name: string): Promise<{ createdAt: string | null } | null> {
+async function cachedFetchPackument(
+  name: string,
+  lookups: LookupCounter
+): Promise<{ createdAt: string | null } | null> {
   const store = sharedCache();
   const hit = store.get(`created:${name}`);
   if (hit !== undefined) {
     return { createdAt: hit as string | null };
   }
+  lookups.attempted += 1;
   const packument = await fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
   // A real creation date never changes, so it is safe -- and worth doing
   // -- to cache one forever (CREATED_TTL_MS). A MISSING one (a 404, or a
@@ -394,7 +469,8 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
 // scan-online-publish-age.test.ts.
 async function cachedFetchPackumentVersionTimes(
   name: string,
-  requestedVersions: string[]
+  requestedVersions: string[],
+  lookups: LookupCounter
 ): Promise<{ versionTimes: Record<string, string> } | null> {
   const store = sharedCache();
   const hit = store.get(`version-times:${name}`);
@@ -408,6 +484,7 @@ async function cachedFetchPackumentVersionTimes(
     // question, and fall through to the same live-fetch-and-overwrite path
     // a cold cache takes.
   }
+  lookups.attempted += 1;
   const packument = await fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
   if (packument === null) {
     return null;
@@ -460,20 +537,64 @@ async function cachedFetchPackumentVersionTimes(
 // The cache stays exactly as valid as it was for registered-squat's age
 // question, which is what it was written for: a real creation date does
 // not change.
-async function liveFetchPackument(name: string) {
+async function liveFetchPackument(name: string, lookups: LookupCounter) {
+  lookups.attempted += 1;
   return fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
 }
 
+// The run-level facts scan.ts's JSON `online` field reports (issue #75).
+// enrichOnline builds one of these per call; a disabled run (online never
+// turned on) gets the all-zero, enabled:false shape directly from scan()
+// and checkSingle() instead, so the field is present either way -- see
+// buildResult.
+export interface OnlineRunSummary {
+  enabled: boolean;
+  budgetMs: number;
+  // Package NAMES for which a real registry or downloads lookup was
+  // actually issued, summed across all four online steps -- see
+  // LookupCounter's own doc comment above for why this counts names, never
+  // wrapper calls or raw HTTP requests: a single batched downloads call can
+  // carry many names in one request, and this field has to stay in the same
+  // unit as lookupsSkippedByDeadline for the two to be addable. Counted per
+  // check, never per distinct name: a name that unknown-package,
+  // registered-squat and publish-age each look up counts once for each.
+  lookupsAttempted: number;
+  // Skipped LOOKUPS once the budget was spent, read back out of every
+  // online-deadline-exceeded diagnostic this run raised (deadline.ts's
+  // sumDeadlineSkipped) rather than kept as a second, independently
+  // incremented count. "Skipped lookups", not "candidates skipped": the
+  // same package name can be counted here more than once if two different
+  // online steps both had it queued and both ran out of budget before
+  // reaching it (each step tracks and reports its own skips independently),
+  // so this is not a count of distinct packages the budget cost coverage
+  // for.
+  lookupsSkippedByDeadline: number;
+  deadlineExceeded: boolean;
+}
+
+const ONLINE_DISABLED_SUMMARY: OnlineRunSummary = {
+  enabled: false,
+  budgetMs: 0,
+  lookupsAttempted: 0,
+  lookupsSkippedByDeadline: 0,
+  deadlineExceeded: false,
+};
+
 async function enrichOnline(
   rawFindings: Omit<Finding, 'fingerprint'>[],
-  ctx: CheckContext
-): Promise<Omit<Finding, 'fingerprint'>[]> {
-  const deadline = createOnlineDeadline();
+  ctx: CheckContext,
+  budgetMs: number
+): Promise<{ findings: Omit<Finding, 'fingerprint'>[]; summary: OnlineRunSummary }> {
+  const deadline = createOnlineDeadline(budgetMs);
+  // Threaded through every real fetch below rather than kept at module
+  // scope: see LookupCounter's own comment for why a fresh one per call is
+  // what keeps two scans in one process from mixing counts.
+  const lookups: LookupCounter = { attempted: 0 };
 
   const resolved = await resolveUnknownPackages(
     rawFindings,
     ctx,
-    { fetchPackument: liveFetchPackument },
+    { fetchPackument: (name) => liveFetchPackument(name, lookups) },
     ctx.diagnostics,
     deadline
   );
@@ -503,14 +624,17 @@ async function enrichOnline(
     await applyTyposquatAsymmetry(
       resolved,
       ctx,
-      { fetchWeeklyDownloads: cachedFetchWeeklyDownloads },
+      { fetchWeeklyDownloads: (names) => cachedFetchWeeklyDownloads(names, lookups) },
       ctx.diagnostics
     );
   }
 
   const registeredSquats = await findRegisteredSquats(
     ctx,
-    { fetchWeeklyDownloads: cachedFetchWeeklyDownloads, fetchPackument: cachedFetchPackument },
+    {
+      fetchWeeklyDownloads: (names) => cachedFetchWeeklyDownloads(names, lookups),
+      fetchPackument: (name) => cachedFetchPackument(name, lookups),
+    },
     ctx.diagnostics,
     deadline
   );
@@ -521,11 +645,24 @@ async function enrichOnline(
   // step 1's removals.
   const publishAgeFindings = await findPublishAgeFindings(
     ctx,
-    { fetchPackument: cachedFetchPackumentVersionTimes },
+    { fetchPackument: (name, versions) => cachedFetchPackumentVersionTimes(name, versions, lookups) },
     ctx.diagnostics,
     deadline
   );
-  return [...resolved, ...registeredSquats, ...publishAgeFindings];
+  return {
+    findings: [...resolved, ...registeredSquats, ...publishAgeFindings],
+    summary: {
+      enabled: true,
+      budgetMs,
+      lookupsAttempted: lookups.attempted,
+      // Read back out of ctx.diagnostics rather than kept as a second,
+      // independently-incremented count: see sumDeadlineSkipped's own
+      // comment for why this is the number a human reading the same
+      // diagnostics would also compute.
+      lookupsSkippedByDeadline: sumDeadlineSkipped(ctx.diagnostics),
+      deadlineExceeded: deadline.expired(),
+    },
+  };
 }
 
 interface RunInfo {
@@ -534,6 +671,7 @@ interface RunInfo {
   corpusBuiltAt: string;
   diagnostics: Diagnostic[];
   startedAt: number;
+  online: OnlineRunSummary;
 }
 
 // checkSingle's manifestPath is fabricated (SYNTHETIC_MANIFEST_PATH
@@ -673,6 +811,7 @@ function buildResult(
       corpusBuiltAt: info.corpusBuiltAt,
       lockfileFormat: info.lockfileFormat,
       diagnostics: dedupeDiagnostics(info.diagnostics),
+      online: info.online,
     },
     exitCode,
   };
@@ -687,6 +826,10 @@ export async function scan(opts: {
   corpusDir?: string;
   failOn?: FailOn;
   online?: boolean;
+  // The CLI's --online-budget-ms, overriding config.onlineBudgetMs for one
+  // run the same way opts.online overrides config.online (issue #75). Only
+  // matters when online checks are actually on; see resolveOnlineBudgetMs.
+  onlineBudgetMs?: number;
   // Pull-request mode. When set, .dep-guard.json, .dep-guard.local.json
   // and the baseline are read from this ref through git and the head tree
   // is the thing judged; a head-side change to any of them is reported and
@@ -811,9 +954,22 @@ export async function scan(opts: {
     controls === null ? statePair.after.npmrcRegistryPins : controls.npmrcPins,
     controls === null ? statePair.after.npmrcDefaultRegistry : controls.npmrcDefaultRegistry
   );
-  const rawFindings = resolveOnline(config, opts.online)
-    ? await enrichOnline(checkedFindings, ctx)
-    : checkedFindings;
+  // A --base or --trust-base run is the pull-request/CI shape (issue #75):
+  // never a commit hook, so the online budget's default is minutes rather
+  // than seconds when either is present. controls !== null is exactly
+  // "opts.trustBase was given".
+  const isPullRequestRun = controls !== null || opts.mode.kind === 'base';
+  let rawFindings: Omit<Finding, 'fingerprint'>[];
+  let online: OnlineRunSummary;
+  if (resolveOnline(config, opts.online)) {
+    const budgetMs = resolveOnlineBudgetMs(config, opts.onlineBudgetMs, isPullRequestRun);
+    const enriched = await enrichOnline(checkedFindings, ctx, budgetMs);
+    rawFindings = enriched.findings;
+    online = enriched.summary;
+  } else {
+    rawFindings = checkedFindings;
+    online = ONLINE_DISABLED_SUMMARY;
+  }
 
   const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
   const { findings, suppressed, ignored } = applyPathFilters(rawFindings, config, baseline, diagnostics);
@@ -830,6 +986,7 @@ export async function scan(opts: {
       corpusBuiltAt: corpus.builtAt,
       diagnostics,
       startedAt,
+      online,
     },
     controls
   );
@@ -921,6 +1078,8 @@ export async function checkSingle(opts: {
   corpusDir?: string;
   failOn?: FailOn;
   online?: boolean;
+  // The CLI's --online-budget-ms; see scan()'s own field of the same name.
+  onlineBudgetMs?: number;
   // The same pull-request mode scan() takes, and for the same reason:
   // "is this name safe to add" is answered against `allow`,
   // `internalScopes`, `internalPrefixes` and `failOn`, every one of which
@@ -961,9 +1120,20 @@ export async function checkSingle(opts: {
   const delta = syntheticDelta(opts.name);
 
   const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map(), null);
-  const rawFindings = resolveOnline(config, opts.online)
-    ? await enrichOnline(checkedFindings, ctx)
-    : checkedFindings;
+  // checkSingle has no --base concept -- only --trust-base -- so the
+  // pull-request/CI shape here is exactly "a trust base was given".
+  const isPullRequestRun = controls !== null;
+  let rawFindings: Omit<Finding, 'fingerprint'>[];
+  let online: OnlineRunSummary;
+  if (resolveOnline(config, opts.online)) {
+    const budgetMs = resolveOnlineBudgetMs(config, opts.onlineBudgetMs, isPullRequestRun);
+    const enriched = await enrichOnline(checkedFindings, ctx, budgetMs);
+    rawFindings = enriched.findings;
+    online = enriched.summary;
+  } else {
+    rawFindings = checkedFindings;
+    online = ONLINE_DISABLED_SUMMARY;
+  }
 
   const findings = skipPathFilters(rawFindings);
 
@@ -979,6 +1149,7 @@ export async function checkSingle(opts: {
       corpusBuiltAt: corpus.builtAt,
       diagnostics: [...ctx.diagnostics, NAME_ONLY_DIAGNOSTIC],
       startedAt,
+      online,
     },
     controls
   );

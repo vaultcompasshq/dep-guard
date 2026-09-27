@@ -35,6 +35,13 @@ function scanResult(findings: Finding[], overrides: Partial<ScanResult['run']> =
       corpusBuiltAt: '2026-01-01',
       lockfileFormat: 'npm',
       diagnostics: [],
+      online: {
+        enabled: false,
+        budgetMs: 0,
+        lookupsAttempted: 0,
+        lookupsSkippedByDeadline: 0,
+        deadlineExceeded: false,
+      },
       ...overrides,
     },
     exitCode: 0,
