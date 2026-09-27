@@ -529,20 +529,33 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
           echo "Smoke testing @vaultcompass/dep-guard@${VERSION}"
 
-          FOUND=0
-          for i in $(seq 1 30); do
-            if [[ "$(npm view "@vaultcompass/dep-guard@${VERSION}" version 2>/dev/null)" == "${VERSION}" ]]; then
-              echo "Package visible on registry."
-              FOUND=1
-              break
+          # Wait for EVERY package the release job published, not only the
+          # CLI. The CLI depends on @vaultcompass/dep-guard-core at the exact
+          # same version, and the two propagate through the registry
+          # independently: on v0.8.0 the CLI was visible while core was not
+          # yet, so "npm install" below failed with ETARGET on core and
+          # turned a complete, correct publish into a red smoke job. A red
+          # smoke after a green release job is a propagation race until
+          # proven otherwise; re-running this job is the fix in the moment.
+          # This list has to match the directories the release job's
+          # "Publish to npm" step iterates (packages/core, packages/cli);
+          # there is no checkout here to derive it from.
+          for name in "@vaultcompass/dep-guard-core" "@vaultcompass/dep-guard"; do
+            FOUND=0
+            for i in $(seq 1 30); do
+              if [[ "$(npm view "${name}@${VERSION}" version 2>/dev/null)" == "${VERSION}" ]]; then
+                echo "${name}@${VERSION} visible on registry."
+                FOUND=1
+                break
+              fi
+              echo "Waiting for ${name}@${VERSION} on the npm registry (attempt ${i}/30)..."
+              sleep 10
+            done
+            if [[ "${FOUND}" -ne 1 ]]; then
+              echo "::error::Timed out waiting for ${name}@${VERSION} on the npm registry."
+              exit 1
             fi
-            echo "Waiting for npm registry (attempt ${i}/30)..."
-            sleep 10
           done
-          if [[ "${FOUND}" -ne 1 ]]; then
-            echo "::error::Timed out waiting for @vaultcompass/dep-guard@${VERSION} on the npm registry."
-            exit 1
-          fi
 
           TMP=$(mktemp -d)
           cd "${TMP}"
