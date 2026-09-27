@@ -19,8 +19,9 @@ change scanner behavior. `@vaultcompass/dep-guard` and
 `vaultcompasshq/dep-guard@v0.9.0` installs `@vaultcompass/dep-guard@0.9.0`.
 All four `--online` checks now share one name-visibility rule,
 `isNonPublicName`, closing a gap where the typosquat popularity-asymmetry
-check sent every low-popularity name to the registry with no scope or
-internal-name filter of its own; a scope pinned to the public registry is
+check sent every low-severity typosquat name to the downloads API with no
+scope or internal-name filter of its own, and unknown-package and
+registered-squat ignored `.npmrc` pins and the default registry; a scope pinned to the public registry is
 now checked even under a private default registry, and a pull request that
 changes only the default registry line is reported as a proposal rather
 than as no change. The online checks' wall-clock budget is now
@@ -100,8 +101,9 @@ allow and pin behavior all still key off the lockfile entry itself.
   before. The JSON output gained a `run.online` object (a sibling of
   `run.corpusBuiltAt`), always present, reporting whether online checks
   ran, the budget actually used, how many name lookups were actually
-  issued (counted per check, so a name three checks looked up counts three
-  times; a downloads lookup can batch many names into one request, so this
+  issued (counted once per check that looked a name up, except that two
+  checks sharing one cache count it once; a downloads lookup can batch many
+  names into one request, so this
   counts names, not requests), how many lookups were
   skipped once the budget was spent, and whether the deadline was exceeded
   at all -- so the conductor umbrella (vaultcompasshq/conductor#72) and any

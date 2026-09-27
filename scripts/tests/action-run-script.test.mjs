@@ -915,6 +915,12 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
     // single-digit minor like `0.9.0` as text despite being the larger
     // version. There is no longer a distinct trap value to list beside it:
     // `0.11.0` stands in as the value one minor further forward instead.
+    // That means this forward-only test no longer distinguishes numeric
+    // from text ordering on its own; the trap is still caught in both
+    // directions by the refusal case (0.9.0 against a future 0.10.0 must
+    // be refused, which a text comparison would allow) and the shipped-file
+    // case (0.10.0 against 0.9.0 must be accepted, which a text comparison
+    // would refuse).
     const future = scriptWithFutureTagScanner();
     for (const ok of ['0.10.0', '0.10.1', '0.11.0', '1.0.0', '10.0.0']) {
       expect([
