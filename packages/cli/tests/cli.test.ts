@@ -675,6 +675,161 @@ describe('--online flag', () => {
   }, CLI_TIMEOUT_MS);
 });
 
+describe('--online-budget-ms flag', () => {
+  test('sets result.run.online.budgetMs for one run', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      [
+        'scan',
+        '--online',
+        '--online-budget-ms',
+        '12345',
+        '--format',
+        'json',
+        '--corpus-dir',
+        FIXTURE_CORPUS,
+      ],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    expect(run.exitCode).not.toBe(2);
+    const result = JSON.parse(run.stdout) as ScanResult;
+    expect(result.run.online).toMatchObject({ enabled: true, budgetMs: 12345 });
+  }, CLI_TIMEOUT_MS);
+
+  test('overrides an onlineBudgetMs committed in .dep-guard.json', async () => {
+    await write('.dep-guard.json', JSON.stringify({ online: true, onlineBudgetMs: 1 }));
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['scan', '--online-budget-ms', '55555', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    const result = JSON.parse(run.stdout) as ScanResult;
+    expect(result.run.online.budgetMs).toBe(55555);
+  }, CLI_TIMEOUT_MS);
+
+  test('a negative value is rejected at the CLI boundary', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const run = await runCli(
+      ['scan', '--online', '--online-budget-ms', '-1', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toContain('--online-budget-ms');
+  }, CLI_TIMEOUT_MS);
+
+  test('a non-numeric value is rejected at the CLI boundary', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const run = await runCli(
+      ['scan', '--online', '--online-budget-ms', 'soon', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toContain('--online-budget-ms');
+  }, CLI_TIMEOUT_MS);
+
+  // Number(value) alone would accept each of these as a valid non-negative
+  // integer -- "" coerces to 0, "0x10" parses as hex (16), "1e3" as
+  // scientific notation (1000) -- none of which is what a person typing a
+  // millisecond count on a command line means (found in independent
+  // review). Only "1e3" is exercised here; the parser itself is a plain
+  // /^\d+$/ test that refuses all three the same way.
+  test('scientific notation is rejected, not silently parsed as a plain integer', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const run = await runCli(
+      ['scan', '--online', '--online-budget-ms', '1e3', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toContain('--online-budget-ms');
+  }, CLI_TIMEOUT_MS);
+
+  test('is accepted on check as well', async () => {
+    await write('package.json', manifestJson({}));
+    await write('.dep-guard.json', JSON.stringify({ allow: ['react'] }));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      [
+        'check',
+        'react',
+        '--online',
+        '--online-budget-ms',
+        '9999',
+        '--format',
+        'json',
+        '--corpus-dir',
+        FIXTURE_CORPUS,
+      ],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    expect(run.exitCode).not.toBe(2);
+    const result = JSON.parse(run.stdout) as ScanResult;
+    expect(result.run.online.budgetMs).toBe(9999);
+  }, CLI_TIMEOUT_MS);
+});
+
+describe('the default online budget depends on the run shape', () => {
+  test('is 20000 with no --base and no --trust-base', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['scan', '--online', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    const result = JSON.parse(run.stdout) as ScanResult;
+    expect(result.run.online.budgetMs).toBe(20_000);
+  }, CLI_TIMEOUT_MS);
+
+  test('is 300000 with --base', async () => {
+    // Zero dependencies on both sides of the diff, deliberately: this test
+    // is only about which default budget gets picked, not about a real
+    // online lookup, and this CLI suite spawns the real built binary with
+    // no fetch mocking available (unlike scan-online.test.ts in core) --
+    // an empty candidate set is what keeps it genuinely network-free the
+    // same way the "--online flag" describe block above relies on.
+    await write('package.json', manifestJson({}, { version: '1.0.0' }));
+    await commitAll('first');
+    await write('package.json', manifestJson({}, { version: '1.0.1' }));
+    await commitAll('second');
+    const cacheDir = await makeTempDir('dep-guard-cli-cache-');
+
+    const run = await runCli(
+      ['scan', '--online', '--base', 'HEAD~1', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo,
+      { XDG_CACHE_HOME: cacheDir }
+    );
+
+    const result = JSON.parse(run.stdout) as ScanResult;
+    expect(result.run.online.budgetMs).toBe(300_000);
+  }, CLI_TIMEOUT_MS);
+});
+
 // A name no registry will ever carry. Every assertion below is written so
 // that it holds identically on a machine with a live network connection
 // and on one without: an offline run leaves an unknown-package finding at

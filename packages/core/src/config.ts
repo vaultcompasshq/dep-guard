@@ -27,6 +27,7 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'online',
   'minAgeDays',
   'minAgeAllow',
+  'onlineBudgetMs',
 ]);
 
 // Exported so the CLI can validate --fail-on against the exact same set
@@ -285,6 +286,26 @@ function validateSection(raw: Record<string, unknown>, label: string): Partial<R
       throw new DepGuardError(`${label}: "minAgeDays" must be a non-negative integer`, 'config-invalid');
     }
     result.minAgeDays = raw.minAgeDays;
+  }
+
+  // The per-run online wall-clock budget (issue #75), in milliseconds.
+  // Unset (rather than defaulted here) so scan.ts can tell "this repository
+  // has no opinion" apart from an explicit override of any value, including
+  // one that happens to match a default -- resolveOnlineBudgetMs is what
+  // picks between the hook default and the much larger pull-request default
+  // when this is absent. Validated the same way minAgeDays is: a
+  // non-negative integer, with 0 meaning "no online time at all" (the same
+  // meaning createOnlineDeadline already gives a zero budget), not a
+  // silently-ignored garbage value.
+  if (raw.onlineBudgetMs !== undefined) {
+    if (
+      typeof raw.onlineBudgetMs !== 'number' ||
+      !Number.isInteger(raw.onlineBudgetMs) ||
+      raw.onlineBudgetMs < 0
+    ) {
+      throw new DepGuardError(`${label}: "onlineBudgetMs" must be a non-negative integer`, 'config-invalid');
+    }
+    result.onlineBudgetMs = raw.onlineBudgetMs;
   }
 
   if (raw.minAgeAllow !== undefined) {

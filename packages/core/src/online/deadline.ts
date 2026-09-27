@@ -1,3 +1,5 @@
+import type { Diagnostic } from '../types.js';
+
 // One wall-clock budget for every online call a single scan makes.
 //
 // The per-request budget registry-client.ts already sets (SCAN_TIMEOUT_MS,
@@ -43,10 +45,26 @@ export interface OnlineDeadline {
 // twenty seconds. The budget is therefore roughly "one pathological name,
 // or a couple of dozen healthy ones" -- long enough that a normal delta
 // finishes every lookup it wanted, short enough that a degraded network
-// cannot turn a commit into a coffee break. It is not configurable today;
-// if it ever needs to be, it becomes a config key rather than a second
-// constant somewhere else.
+// cannot turn a commit into a coffee break. This is the DEFAULT for a
+// plain run (no --base, no --trust-base) as of issue #75: it is now
+// configurable, both by a "onlineBudgetMs" key in .dep-guard.json and by
+// the CLI's --online-budget-ms flag, and scan.ts's resolveOnlineBudgetMs is
+// what picks between this and CI_ONLINE_BUDGET_MS below when neither
+// override is given.
 export const DEFAULT_ONLINE_BUDGET_MS = 20_000;
+
+// Five minutes, used instead of DEFAULT_ONLINE_BUDGET_MS when the run is a
+// --base or --trust-base run rather than a plain commit hook (issue #75).
+// The pre-commit trade-off above is exactly backwards for that shape: a CI
+// job has minutes to spend, and the expensive outcome is not a slow commit
+// but a large dependency change whose remaining lookups quietly keep their
+// offline result once twenty seconds run out, with only a diagnostic to
+// show for it. A hook still gets the tight default because a developer is
+// waiting on it; CI is not a developer waiting, so it gets minutes instead
+// of seconds. Both are only ever a DEFAULT -- an explicit onlineBudgetMs
+// config key or --online-budget-ms flag always wins over either one (see
+// scan.ts's resolveOnlineBudgetMs).
+export const CI_ONLINE_BUDGET_MS = 300_000;
 
 export function createOnlineDeadline(
   budgetMs: number = DEFAULT_ONLINE_BUDGET_MS,
@@ -81,4 +99,31 @@ export function deadlineDiagnosticMessage(
     `${check}: the per-run online budget (${deadline.budgetMs}ms) was spent before ` +
     `${skipped} lookup(s) could run; those findings kept their offline result`
   );
+}
+
+// The number embedded in every `deadlineDiagnosticMessage` this run raised,
+// summed. scan.ts's JSON `online.lookupsSkippedByDeadline` field is built
+// from this rather than from a second count kept alongside the deadline
+// object, on purpose: the four online steps already compute and report
+// this number (one of them, the typosquat asymmetry gate in scan.ts's own
+// enrichOnline, counts it BEFORE that step's internal-name and
+// private-origin filters run, so it can overstate skipped lookups but never
+// understate them), and a caller reading it back out of the diagnostics is
+// guaranteed to match what a human reading the same diagnostics sees,
+// rather than risking a second, independently-computed number drifting
+// from the first. The message format is this module's own
+// (deadlineDiagnosticMessage above), so the pattern below only ever has to
+// agree with one writer.
+export function sumDeadlineSkipped(diagnostics: readonly Diagnostic[]): number {
+  let total = 0;
+  for (const diagnostic of diagnostics) {
+    if (diagnostic.code !== ONLINE_DEADLINE_CODE) {
+      continue;
+    }
+    const match = /before (\d+) lookup/.exec(diagnostic.message);
+    if (match) {
+      total += Number(match[1]);
+    }
+  }
+  return total;
 }

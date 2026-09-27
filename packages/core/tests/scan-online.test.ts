@@ -49,6 +49,35 @@ function commitManifest(dir: string, deps: Record<string, string>): void {
   execFileSync('git', ['commit', '-q', '-m', 'update'], { cwd: dir });
 }
 
+// A minimal npm lockfile v3, the same shape trust-base.test.ts's own
+// lockJson helper builds. Needed here, and not by commitManifest above,
+// because findPublishAgeFindings (online/publish-age.ts) reads
+// ctx.delta.lockEntryChanges, not the manifest -- a manifest-only commit
+// never gives it a single candidate, which is exactly why a whole packument
+// increment site (cachedFetchPackumentVersionTimes) could be deleted from
+// scan.ts and every test in this file would still stay green (found in
+// review of issue #75's first round).
+function lockJson(dependencies: Record<string, string>): string {
+  const packages: Record<string, unknown> = {
+    '': { name: 'x', version: '1.0.0', dependencies },
+  };
+  for (const name of Object.keys(dependencies)) {
+    packages[`node_modules/${name}`] = {
+      version: '1.0.0',
+      resolved: `https://registry.npmjs.org/${name}/-/pkg-1.0.0.tgz`,
+      integrity: 'sha512-notreal',
+    };
+  }
+  return JSON.stringify({ name: 'x', version: '1.0.0', lockfileVersion: 3, requires: true, packages });
+}
+
+function commitManifestWithLock(dir: string, deps: Record<string, string>): void {
+  writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '1.0.0', dependencies: deps }));
+  writeFileSync(path.join(dir, 'package-lock.json'), lockJson(deps));
+  execFileSync('git', ['add', '.'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'update'], { cwd: dir });
+}
+
 const fetchWeeklyDownloadsMock: jest.MockedFunction<typeof fetchWeeklyDownloads> = jest.fn();
 const fetchPackumentMock: jest.MockedFunction<typeof fetchPackument> = jest.fn();
 
@@ -784,5 +813,308 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
     });
 
     expect(result.findings.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('critical');
+  });
+});
+
+// Issue #75: the run-level online budget and its JSON summary
+// (result.run.online). A name the fixture corpus does not know
+// ("published-after-the-corpus-walk", reused from the unknown-package
+// describe block above) gives resolveUnknownPackages exactly one real
+// candidate, which is all these tests need: either it is looked up (a real
+// mocked request, counted) or it is skipped by an already-spent deadline
+// (counted the other way).
+describe('scan(): run.online summary', () => {
+  beforeEach(async () => {
+    fetchWeeklyDownloadsMock.mockReset();
+    fetchPackumentMock.mockReset();
+    fetchPackumentMock.mockResolvedValue(null);
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map(), noRecord: new Set() });
+    process.env.XDG_CACHE_HOME = mkdtempSync(path.join(tmpdir(), 'depguard-online-cache-'));
+    jest.resetModules();
+    ({ scan, checkSingle } = await import('../src/scan.js'));
+  });
+
+  test('online off reports enabled:false and all zeros', async () => {
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: false,
+    });
+
+    expect(result.run.online).toEqual({
+      enabled: false,
+      budgetMs: 0,
+      lookupsAttempted: 0,
+      lookupsSkippedByDeadline: 0,
+      deadlineExceeded: false,
+    });
+  });
+
+  test('the onlineBudgetMs config key is honoured', async () => {
+    const dir = initRepo();
+    writeFileSync(
+      path.join(dir, '.dep-guard.json'),
+      JSON.stringify({ online: true, onlineBudgetMs: 12345 })
+    );
+    commitManifest(dir, {});
+
+    const result = await scan({ repoRoot: dir, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.run.online.enabled).toBe(true);
+    expect(result.run.online.budgetMs).toBe(12345);
+  });
+
+  test('the --online-budget-ms flag overrides the config key', async () => {
+    const dir = initRepo();
+    writeFileSync(
+      path.join(dir, '.dep-guard.json'),
+      JSON.stringify({ online: true, onlineBudgetMs: 12345 })
+    );
+    commitManifest(dir, {});
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'audit' },
+      corpusDir: FIXTURE_CORPUS,
+      onlineBudgetMs: 999,
+    });
+
+    expect(result.run.online.budgetMs).toBe(999);
+  });
+
+  test('the default is 20000 with no --base and no --trust-base', async () => {
+    const dir = initRepo();
+    commitManifest(dir, {});
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'audit' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    expect(result.run.online.budgetMs).toBe(20_000);
+  });
+
+  test('the default is 300000 with --base', async () => {
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    expect(result.run.online.budgetMs).toBe(300_000);
+  });
+
+  test('the default is 300000 with --trust-base, even without --base', async () => {
+    const dir = initRepo();
+    writeFileSync(path.join(dir, '.dep-guard.json'), JSON.stringify({ failOn: 'medium' }));
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'audit' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+      trustBase: 'HEAD~1',
+    });
+
+    expect(result.run.online.budgetMs).toBe(300_000);
+  });
+
+  // checkSingle has its own isPullRequestRun (scan.ts, "controls !== null"
+  // -- checkSingle has no --base concept at all, only --trust-base), a
+  // separate line from scan()'s own. A coverage gap in the previous round:
+  // every default-budget test above went through scan(), so a mutation
+  // that broke checkSingle's line specifically had nothing here to catch
+  // it.
+  test('checkSingle: the default is 300000 with --trust-base, even with no flag or key', async () => {
+    const dir = initRepo();
+    writeFileSync(path.join(dir, '.dep-guard.json'), JSON.stringify({ failOn: 'medium' }));
+    commitManifest(dir, {});
+    writeFileSync(path.join(dir, '.dep-guard.json'), JSON.stringify({ failOn: 'high' }));
+    commitManifest(dir, {});
+
+    const result = await checkSingle({
+      repoRoot: dir,
+      name: 'some-name-for-budget-default-test',
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+      trustBase: 'HEAD~1',
+    });
+
+    expect(result.run.online.budgetMs).toBe(300_000);
+  });
+
+  // lookupsAttempted has to count NAMES, not wrapper calls or raw HTTP
+  // requests -- issue #75's review found the first version counted once
+  // per CALL to cachedFetchWeeklyDownloads regardless of how many names
+  // were batched into it, which undercounts badly the moment more than one
+  // name misses the cache in the same bulk downloads call (registered-squat
+  // and the typosquat asymmetry step each issue exactly one such call for
+  // every candidate they have, never one per name -- see registered-squat.ts
+  // and asymmetry.ts). It also has to stay in the same unit as
+  // lookupsSkippedByDeadline (already a name count, read out of the
+  // diagnostics), or the two fields cannot be added to answer "how many
+  // names did the online checks want to look at".
+  //
+  // The three tests below sum lookups the SAME way scan.ts now does --
+  // every name in every downloads batch call, plus one per packument call
+  // (each already for exactly one name) -- and compare that sum against
+  // result.run.online.lookupsAttempted, rather than asserting a
+  // hand-computed magic number. That keeps each test tied to the real
+  // fetch traffic instead of to internal step-ordering details that could
+  // shift for unrelated reasons.
+  function namesAttemptedFromMocks(): number {
+    const downloadsNames = fetchWeeklyDownloadsMock.mock.calls.reduce(
+      (total, call) => total + (call[0] as string[]).length,
+      0
+    );
+    return downloadsNames + fetchPackumentMock.mock.calls.length;
+  }
+
+  test('lookupsAttempted counts every name in one batched downloads call, not once per call', async () => {
+    const names = ['brand-new-one', 'brand-new-two', 'brand-new-three'];
+    // High enough to clear registered-squat's download floor, so its own
+    // per-candidate packument loop never fires here -- this test isolates
+    // the downloads BATCH call's own counting. The next test covers the
+    // packument path, including publish-age's.
+    fetchWeeklyDownloadsMock.mockResolvedValue({
+      counts: new Map(names.map((name) => [name, 100_000])),
+      noRecord: new Set(),
+    });
+    fetchPackumentMock.mockResolvedValue(null);
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, Object.fromEntries(names.map((name) => [name, '^1.0.0'])));
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    // All three names batched into exactly one bulk call, the real shape a
+    // large dependency change takes -- never one call per name.
+    expect(fetchWeeklyDownloadsMock).toHaveBeenCalledTimes(1);
+    expect(fetchWeeklyDownloadsMock.mock.calls[0][0]).toEqual(expect.arrayContaining(names));
+    expect(namesAttemptedFromMocks()).toBeGreaterThanOrEqual(3);
+    expect(result.run.online.lookupsAttempted).toBe(namesAttemptedFromMocks());
+  });
+
+  test('a cache hit adds nothing to lookupsAttempted', async () => {
+    const names = ['brand-new-cache-a', 'brand-new-cache-b'];
+    fetchWeeklyDownloadsMock.mockResolvedValue({
+      counts: new Map(names.map((name) => [name, 100_000])),
+      noRecord: new Set(),
+    });
+    fetchPackumentMock.mockResolvedValue(null);
+    const dir = initRepo();
+    commitManifest(dir, {});
+    commitManifest(dir, Object.fromEntries(names.map((name) => [name, '^1.0.0'])));
+
+    const scanOpts = {
+      repoRoot: dir,
+      mode: { kind: 'base' as const, ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    };
+
+    await scan(scanOpts);
+    expect(fetchWeeklyDownloadsMock).toHaveBeenCalledTimes(1);
+    const packumentCallsAfterFirst = fetchPackumentMock.mock.calls.length;
+
+    // Same repo, same on-disk cache (XDG_CACHE_HOME is not reset between
+    // these two calls, deliberately): both names' downloads answers are now
+    // cached, so a second scan must not ask the registry again for them.
+    const second = await scan(scanOpts);
+
+    expect(fetchWeeklyDownloadsMock).toHaveBeenCalledTimes(1);
+    const packumentNamesInSecondRun = fetchPackumentMock.mock.calls.length - packumentCallsAfterFirst;
+    // unknown-package's existence check is deliberately never cached (see
+    // liveFetchPackument's own comment), so it still contributes to the
+    // second run's count; the cached downloads batch must contribute
+    // nothing beyond that -- a pure cache hit adds zero.
+    expect(second.run.online.lookupsAttempted).toBe(packumentNamesInSecondRun);
+  });
+
+  test('a lockfile change exercises publish-age own packument fetch, and it counts', async () => {
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map(), noRecord: new Set() });
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: '2020-01-01T00:00:00.000Z',
+      latestVersion: '1.0.0',
+      latestPublishedAt: new Date().toISOString(),
+      deprecated: false,
+      unpublished: false,
+      securityHolder: false,
+      versionTimes: { '1.0.0': new Date().toISOString() },
+    });
+    const dir = initRepo();
+    commitManifestWithLock(dir, {});
+    commitManifestWithLock(dir, { 'freshly-resolved-thing': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    // Proof this actually reached publish-age's own candidate loop (built
+    // from ctx.delta.lockEntryChanges, which only a real lockfile change
+    // populates), not just the name-only checks: a real publish-age
+    // finding for the freshly-resolved, today-published version.
+    expect(result.findings.some((f) => f.ruleId === 'publish-age')).toBe(true);
+    expect(namesAttemptedFromMocks()).toBeGreaterThan(0);
+    expect(result.run.online.lookupsAttempted).toBe(namesAttemptedFromMocks());
+  });
+
+  test('an exceeded deadline is reported: enabled, the configured budget, no lookups, and a skipped count matching the diagnostics', async () => {
+    const dir = initRepo();
+    writeFileSync(
+      path.join(dir, '.dep-guard.json'),
+      // A budget of 0 is expired from the very first question (see
+      // online-deadline.test.ts), the same device that file's own unit
+      // tests use to force expiry, applied here at the scan() level.
+      JSON.stringify({ online: true, onlineBudgetMs: 0 })
+    );
+    commitManifest(dir, {});
+    commitManifest(dir, { 'published-after-the-corpus-walk': '^1.0.0' });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+    });
+
+    expect(fetchPackumentMock).not.toHaveBeenCalled();
+    expect(fetchWeeklyDownloadsMock).not.toHaveBeenCalled();
+    expect(result.run.online.enabled).toBe(true);
+    expect(result.run.online.budgetMs).toBe(0);
+    expect(result.run.online.lookupsAttempted).toBe(0);
+    expect(result.run.online.deadlineExceeded).toBe(true);
+
+    // The number has to match what a human reading the diagnostics would
+    // add up themselves, not a second, independently-derived count.
+    const skippedFromDiagnostics = result.run.diagnostics
+      .filter((d) => d.code === 'online-deadline-exceeded')
+      .reduce((total, d) => {
+        const match = /before (\d+) lookup/.exec(d.message);
+        return total + (match ? Number(match[1]) : 0);
+      }, 0);
+    expect(skippedFromDiagnostics).toBeGreaterThan(0);
+    expect(result.run.online.lookupsSkippedByDeadline).toBe(skippedFromDiagnostics);
   });
 });

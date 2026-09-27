@@ -1476,6 +1476,123 @@ not a config key today. If it ever becomes one, it becomes a config key
 -- it does not become a second constant somewhere else that has to be
 kept in step with this one.
 
+### The budget has two defaults, one per run shape, and the choice is a config key (issue #75)
+
+The paragraph above is now only half true, and is kept rather than deleted
+because the reasoning it states -- one constant, not two, and a future
+config key rather than a second constant -- is exactly what happened.
+`DEFAULT_ONLINE_BUDGET_MS` (twenty seconds, `online/deadline.ts`) is sized
+for a pre-commit hook, where a developer is waiting on the command to
+finish. On a `--base` or `--trust-base` run that trade-off is backwards:
+CI has minutes to spend, and the expensive failure is not a slow job but a
+large dependency change whose remaining lookups silently keep their
+offline result once the hook-sized budget runs out, with only an
+`online-deadline-exceeded` diagnostic to show for it (the observed case,
+issue #75: a full local scan against a real dependency-heavy repository
+gave up after 657 lookups). `CI_ONLINE_BUDGET_MS` (`online/deadline.ts`,
+300,000ms) is the second default, chosen by `scan.ts`'s
+`resolveOnlineBudgetMs` from the run shape alone: `--base` or
+`--trust-base` present selects it, everything else keeps the hook default.
+
+Precedence, in order, mirrors `resolveOnline`/`applyFailOnOverride`
+exactly: an explicit `--online-budget-ms` CLI override wins outright; absent
+that, an explicit `onlineBudgetMs` key in `.dep-guard.json` wins; only with
+neither does the run-shape default apply at all. Both the config key and
+the CLI flag are meaningless without `online: true` or `--online` --
+`resolveOnlineBudgetMs` is only ever consulted from the branch that already
+decided online checks are on.
+
+`onlineBudgetMs` is validated in `config.ts` exactly the way `minAgeDays`
+is (a non-negative integer; `0` is honoured, not special-cased, since
+`createOnlineDeadline` already treats a zero-or-less budget as expired from
+the first question) and is a CONTROL INPUT like every other key in
+`.dep-guard.json`: on a pull-request run it reaches `scan()` through
+`controls.config`, sourced from the base ref by the same trust-base path
+every other config key already uses, so a head-side edit to it is reported
+as a proposal (`trust-base.ts`'s `describeConfigChange`, with a regression
+test in `trust-base.test.ts`) and never takes effect for
+that run. The `--online-budget-ms` CLI flag is not a control input in the
+same sense -- it is the workflow file's decision, and the workflow file is
+already a pull-request-controlled input the README covers separately, the
+same as any other flag a CI job bakes in.
+
+An exhausted budget still never fails the run by itself: the standing
+degrade rule two sections up applies unchanged regardless of which default,
+or which override, produced the deadline that expired.
+
+#### The JSON `online` summary (issue #75)
+
+`ScanResult.run.online` is a sibling of `run.corpusBuiltAt`
+(`scan.ts:buildResult`), always present so a JSON consumer -- the conductor
+umbrella (issue conductor#72) in particular -- can read it unconditionally
+rather than branching on whether `--online` was on for this run. Five
+fields:
+
+- `enabled`: were online checks on for this run at all.
+- `budgetMs`: the budget actually used (`resolveOnlineBudgetMs`'s result),
+  zero when `enabled` is false.
+- `lookupsAttempted`: package NAMES for which a lookup was actually issued,
+  counted at each of scan.ts's own cached-fetch call sites
+  (`cachedFetchWeeklyDownloads`, `cachedFetchPackument`,
+  `cachedFetchPackumentVersionTimes`, `liveFetchPackument`) rather than
+  estimated from candidate counts -- a cache hit costs nothing and is never
+  counted, only a name that actually reaches `registry-client.ts` is. Names,
+  not wrapper calls and not raw HTTP requests, because those two units
+  disagree with each other and with `lookupsSkippedByDeadline` (below) the
+  moment more than one name is batched into a single call: registered-squat
+  and the typosquat asymmetry step each issue exactly ONE bulk
+  `fetchWeeklyDownloads` call carrying every one of their candidates (never
+  one call per name), and that one call can in turn cost
+  `registry-client.ts` several real HTTP requests internally (a 128-name
+  unscoped batch, one request per scoped name, and a possible sentinel
+  probe). An earlier version of this field counted 1 per call to
+  `cachedFetchWeeklyDownloads` regardless of `misses.length`, which
+  undercounted badly on exactly this batched path -- a 300-name pull
+  request with 20 scoped names reported roughly 1 where about 23 real
+  lookups had actually gone out (found in independent review). The fix
+  (`cachedFetchWeeklyDownloads`) increments by `misses.length`, the number
+  of names that were not already cached, rather than by 1 per call; the
+  other three cached fetches already take one name per call, so "1 per
+  call" and "1 per name" already agreed there and needed no change. Names
+  are the one unit `lookupsAttempted` and `lookupsSkippedByDeadline` can
+  share, which is what lets a consumer add them to answer "how many name
+  lookups did the online checks want to make in total". Both are counted
+  per check, never per distinct name: a new name the corpus does not know
+  can be looked up by unknown-package, twice by registered-squat, and by
+  publish-age, and counts once in each -- the reason the fields
+  are two counts of the same kind of thing rather than one being requests
+  and the other being candidates. A fresh counter is created per
+  `enrichOnline` call (never a module-level total) so two scans in one
+  process, which the shared on-disk cache singleton above already
+  anticipates, cannot mix each other's counts.
+- `lookupsSkippedByDeadline`: skipped LOOKUPS, read back out of every
+  `online-deadline-exceeded` diagnostic this run raised (`deadline.ts`'s
+  `sumDeadlineSkipped`, parsing the count each diagnostic's own message
+  already states) rather than kept as a second, independently-incremented
+  count -- deliberately, so this number can never drift from what a human
+  reading the same diagnostics would add up themselves. Not a count of
+  distinct packages the budget cost coverage for: each of the three
+  per-name-loop online steps tracks and reports its own skips
+  independently, so the same package name can be counted here more than
+  once if it was still queued in two different steps when the budget ran
+  out. This also inherits the asymmetry step's own pre-filter asymmetry
+  noted above: its count is taken before that step's internal-name and
+  private-origin filters run, so it can overstate skipped lookups but never
+  understate them, exactly as the diagnostic it is read from already does.
+- `deadlineExceeded`: `deadline.expired()` at the end of the run, not
+  merely "a diagnostic was raised" -- a deadline can be spent with nothing
+  left to skip (every candidate already resolved) and this still reports
+  true.
+
+Disabled online checks (`enabled: false`) report every number as zero
+rather than omitting the object, the same "always present, zero when
+inapplicable" shape `suppressed`/`ignored`/`allowed` already use elsewhere
+in `ScanResult`. Never reaches SARIF output -- a diagnostic is not a
+finding, and this is run-level metadata, not either one -- but the text
+renderer prints one line under its own run summary when `enabled` is true,
+since that summary already prints other run-level facts (mode, findings,
+blocking, exit).
+
 ## Minimum publish age reads the lockfile diff, not the manifest diff (0.7.x, issue #58)
 
 `findPublishAgeFindings` (`online/publish-age.ts`) is the fourth

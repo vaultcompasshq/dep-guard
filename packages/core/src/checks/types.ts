@@ -32,6 +32,16 @@ export interface ResolvedConfig {
   // this list is for -- a reviewed exception for one specific fresh
   // release.
   minAgeAllow: string[];
+  // The per-run online wall-clock budget, in milliseconds (issue #75).
+  // Undefined means "not set here" -- config.ts never fills in a default,
+  // because the right default depends on the run shape (a commit hook vs. a
+  // --base/--trust-base pull-request run), a decision scan.ts's
+  // resolveOnlineBudgetMs makes, not this file. Only matters alongside
+  // `online: true` or the CLI's --online; see online/deadline.ts for the
+  // two defaults and docs/INVARIANTS.md's "one wall clock" section for why
+  // one budget covers every online step in a run rather than one per
+  // request.
+  onlineBudgetMs?: number;
 }
 
 // Everything a check may read, plus one thing it may write.

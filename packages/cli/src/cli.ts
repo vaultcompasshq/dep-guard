@@ -74,6 +74,21 @@ const ONLINE_FLAG_DESCRIPTION =
 const NO_ONLINE_FLAG_DESCRIPTION =
   'force the registry-backed checks off, overriding "online": true in .dep-guard.json';
 
+// Issue #75: only matters alongside --online or "online": true -- the flag
+// (and the matching onlineBudgetMs config key the README documents) have
+// no effect at all when the online checks are off. The two defaults are
+// named here rather than left implicit, because the whole point of the
+// flag is that a repository's own workflow file gets to choose the number
+// CI runs with. That workflow file is already a pull-request-controlled
+// input the same way every other flag baked into a CI job is (the README
+// says so for the job's other flags too), so setting this one is the
+// workflow file's decision, not something dep-guard adjudicates per run.
+const ONLINE_BUDGET_MS_FLAG_DESCRIPTION =
+  'override the online checks wall-clock budget for one run, in milliseconds -- only matters ' +
+  'alongside --online or "online": true in .dep-guard.json. Defaults to 20000 (twenty ' +
+  'seconds) unless --base or --trust-base is also given on this command line, in which case ' +
+  'it defaults to 300000 (five minutes) instead';
+
 // A bad --format or --fail-on value, or an unusable combination of flags
 // (--staged with --base). Kept distinct from DepGuardError -- which only
 // core code throws -- so reportError can say "core rejected this" and
@@ -91,6 +106,28 @@ function parseFailOn(value: string | undefined): FailOn | undefined {
     );
   }
   return value as FailOn;
+}
+
+// Issue #75. commander hands this to us as a string (or undefined, when
+// the flag was never given); undefined has to reach scan()/checkSingle()
+// unchanged so .dep-guard.json's onlineBudgetMs key (or, absent that, the
+// two run-shape defaults) gets to decide -- see core's resolveOnlineBudgetMs.
+// Digits only, and at least one of them: `Number(value)` alone would also
+// accept "" (coerces to 0), "0x10" (a hex literal, 16), and "1e3"
+// (scientific notation, 1000) as valid non-negative integers, none of which
+// is what a person typing a millisecond count on a command line means
+// (found in independent review). This regex is checked before any numeric
+// conversion runs, so none of those three ever reaches Number().
+const NON_NEGATIVE_INTEGER_LITERAL = /^\d+$/;
+
+function parseOnlineBudgetMs(value: string | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!NON_NEGATIVE_INTEGER_LITERAL.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new CliUsageError(`--online-budget-ms must be a non-negative integer (got "${value}")`);
+  }
+  return Number(value);
 }
 
 // Validated against init.ts's own list rather than a second copy of the
@@ -136,6 +173,7 @@ interface ScanCliOptions {
   failOn?: string;
   corpusDir?: string;
   online?: boolean;
+  onlineBudgetMs?: string;
 }
 
 interface CheckCliOptions {
@@ -143,6 +181,7 @@ interface CheckCliOptions {
   failOn?: string;
   corpusDir?: string;
   online?: boolean;
+  onlineBudgetMs?: string;
   trustBase?: string;
 }
 
@@ -259,11 +298,13 @@ function buildProgram(): Command {
     .option('--corpus-dir <dir>', 'override the corpus directory')
     .option('--online', ONLINE_FLAG_DESCRIPTION)
     .option('--no-online', NO_ONLINE_FLAG_DESCRIPTION)
+    .option('--online-budget-ms <ms>', ONLINE_BUDGET_MS_FLAG_DESCRIPTION)
     .exitOverride()
     .action(async (targetPath: string, options: ScanCliOptions) => {
       try {
         const format = parseFormat(options.format);
         const failOn = parseFailOn(options.failOn);
+        const onlineBudgetMs = parseOnlineBudgetMs(options.onlineBudgetMs);
         const mode = resolveMode(options);
         const result = await scan({
           repoRoot: path.resolve(targetPath),
@@ -271,6 +312,7 @@ function buildProgram(): Command {
           corpusDir: options.corpusDir,
           failOn,
           online: options.online,
+          onlineBudgetMs,
           trustBase: options.trustBase,
         });
         emit(result, format);
@@ -293,17 +335,20 @@ function buildProgram(): Command {
     .option('--corpus-dir <dir>', 'override the corpus directory')
     .option('--online', ONLINE_FLAG_DESCRIPTION)
     .option('--no-online', NO_ONLINE_FLAG_DESCRIPTION)
+    .option('--online-budget-ms <ms>', ONLINE_BUDGET_MS_FLAG_DESCRIPTION)
     .exitOverride()
     .action(async (name: string, options: CheckCliOptions) => {
       try {
         const format = parseFormat(options.format);
         const failOn = parseFailOn(options.failOn);
+        const onlineBudgetMs = parseOnlineBudgetMs(options.onlineBudgetMs);
         const result = await checkSingle({
           repoRoot: process.cwd(),
           name,
           corpusDir: options.corpusDir,
           failOn,
           online: options.online,
+          onlineBudgetMs,
           trustBase: options.trustBase,
         });
         emit(result, format);
