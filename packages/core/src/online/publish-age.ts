@@ -343,7 +343,7 @@ export async function findPublishAgeFindings(
         // unknown-package case above.
         diagnostics.push({
           code: 'publish-age-version-unknown',
-          message: `publish-age: "${candidate.name}@${candidate.version}" is missing from the registry's publish-time record for "${candidate.name}"; publish age could not be checked for this version`,
+          message: `publish-age: "${candidate.name}@${candidate.version}" is missing from the registry's publish-time record for "${candidate.lookupName}"; publish age could not be checked for this version`,
         });
         continue;
       }
