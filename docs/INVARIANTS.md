@@ -1374,8 +1374,11 @@ fields:
   other three cached fetches already take one name per call, so "1 per
   call" and "1 per name" already agreed there and needed no change. Names
   are the one unit `lookupsAttempted` and `lookupsSkippedByDeadline` can
-  share, which is what lets a consumer add them to answer "how many names
-  did the online checks want to look up in total" -- the reason the fields
+  share, which is what lets a consumer add them to answer "how many name
+  lookups did the online checks want to make in total". Both are counted
+  per check, never per distinct name: a new name the corpus does not know
+  can be looked up by unknown-package, twice by registered-squat, and by
+  publish-age, and counts once in each -- the reason the fields
   are two counts of the same kind of thing rather than one being requests
   and the other being candidates. A fresh counter is created per
   `enrichOnline` call (never a module-level total) so two scans in one

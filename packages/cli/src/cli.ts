@@ -124,7 +124,7 @@ function parseOnlineBudgetMs(value: string | undefined): number | undefined {
   if (value === undefined) {
     return undefined;
   }
-  if (!NON_NEGATIVE_INTEGER_LITERAL.test(value)) {
+  if (!NON_NEGATIVE_INTEGER_LITERAL.test(value) || !Number.isSafeInteger(Number(value))) {
     throw new CliUsageError(`--online-budget-ms must be a non-negative integer (got "${value}")`);
   }
   return Number(value);

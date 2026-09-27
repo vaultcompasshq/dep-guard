@@ -265,9 +265,10 @@ exposure.
 The run's JSON output always carries an `online` object under `run`,
 whether or not online checks ran, so a CI consumer (the conductor umbrella
 in particular) can read it unconditionally: `enabled`, the `budgetMs`
-actually used, `lookupsAttempted` (package names for which a lookup was
-actually issued -- a downloads lookup may batch many names into one
-request, and this counts the names, not the requests), `lookupsSkippedByDeadline`
+actually used, `lookupsAttempted` (name lookups actually issued, counted per
+check, so one name that three checks each looked up counts three times; a
+downloads lookup may batch many names into one request, and this counts
+the names, not the requests), `lookupsSkippedByDeadline`
 (skipped lookups once the budget was spent, matching what the
 `online-deadline-exceeded` diagnostics already say -- the same name can be
 counted here more than once if two different online checks both had it

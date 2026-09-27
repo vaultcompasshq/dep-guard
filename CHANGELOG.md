@@ -32,9 +32,10 @@ GitHub release notes, which are generated from the commit history.
   still never fails the run by itself -- it stays a diagnostic, exactly as
   before. The JSON output gained a `run.online` object (a sibling of
   `run.corpusBuiltAt`), always present, reporting whether online checks
-  ran, the budget actually used, how many package names a lookup was
-  actually issued for (a downloads lookup can batch many names into one
-  request, so this counts names, not requests), how many lookups were
+  ran, the budget actually used, how many name lookups were actually
+  issued (counted per check, so a name three checks looked up counts three
+  times; a downloads lookup can batch many names into one request, so this
+  counts names, not requests), how many lookups were
   skipped once the budget was spent, and whether the deadline was exceeded
   at all -- so the conductor umbrella (vaultcompasshq/conductor#72) and any
   other JSON consumer can tell a genuine clean run apart from one that quietly

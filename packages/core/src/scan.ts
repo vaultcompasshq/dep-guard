@@ -555,7 +555,9 @@ export interface OnlineRunSummary {
   // LookupCounter's own doc comment above for why this counts names, never
   // wrapper calls or raw HTTP requests: a single batched downloads call can
   // carry many names in one request, and this field has to stay in the same
-  // unit as lookupsSkippedByDeadline for the two to be addable.
+  // unit as lookupsSkippedByDeadline for the two to be addable. Counted per
+  // check, never per distinct name: a name that unknown-package,
+  // registered-squat and publish-age each look up counts once for each.
   lookupsAttempted: number;
   // Skipped LOOKUPS once the budget was spent, read back out of every
   // online-deadline-exceeded diagnostic this run raised (deadline.ts's
