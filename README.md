@@ -16,7 +16,11 @@ contract, and change budgets). Each one installs, configures and runs on its
 own;
 [conductor](https://www.npmjs.com/package/@vaultcompass/conductor) is the
 optional umbrella that runs them from one policy file, one hook and one
-report.
+report, beside two scanners you install yourself:
+[gitleaks](https://github.com/gitleaks/gitleaks) for secrets anywhere in git
+history and [osv-scanner](https://github.com/google/osv-scanner) for known
+vulnerabilities. conductor scans nothing itself and installs nothing that
+is not its own.
 <!-- /guardrails-family -->
 
 ```bash
