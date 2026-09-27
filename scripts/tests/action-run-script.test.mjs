@@ -51,7 +51,7 @@ const actionYml = action.text;
 const { extractRunScript, evaluateStepEnv, cwdForStep } = action;
 
 const DEFAULT_INPUTS = {
-  version: '0.8.0',
+  version: '0.9.0',
   path: '.',
   online: 'false',
   'fail-on': '',
@@ -354,7 +354,7 @@ describe('action.yml "Install dep-guard outside the workspace"', () => {
   test('installs the pinned version globally, and nothing else', () => {
     const run = runInstall();
     expect(run.status).toBe(0);
-    expect(run.record).toContain('argv=install -g --ignore-scripts @vaultcompass/dep-guard@0.8.0');
+    expect(run.record).toContain('argv=install -g --ignore-scripts @vaultcompass/dep-guard@0.9.0');
   });
 
   test('installs the version the input asked for, not a hardcoded one', () => {
@@ -823,15 +823,15 @@ function tagScannerPart(part) {
 }
 
 // The same step, with the tag's scanner constant advanced by one minor
-// version: the action as it will be the day a 0.9.0 scanner ships and this tag
+// version: the action as it will be the day a 0.10.0 scanner ships and this tag
 // starts shipping it.
 //
 // This is NOT here because the rule is invisible on the shipped file. It is
-// visible: ten scanners are published below the tag scanner (0.1.0 through
-// 0.7.0), and the first case in the block below drives the unmodified step with
+// visible: eleven scanners are published below the tag scanner (0.1.0 through
+// 0.8.0), and the first case in the block below drives the unmodified step with
 // `version: 0.5.9` and watches it refuse. The future constant exists to exercise the comparison
 // at a boundary the published set cannot reach today, one where the refused
-// version is itself in the 0.8.x family and so the minor leg of the
+// version is itself in the 0.9.x family and so the minor leg of the
 // comparison does the work. It is not a weakened program: every line of the check
 // is the shipped one. The replacement is asserted to have MATCHED, so deleting
 // or renaming the constant turns this red rather than silently testing the
@@ -849,8 +849,8 @@ function scriptWithFutureTagScanner() {
 describe('action.yml "Validate inputs", pinning the scanner backward on a pull request', () => {
   test('refuses a below-tag pin on a pull request, on the SHIPPED file', () => {
     // The rule is observable on the unmodified action, so this case proves it
-    // there rather than on a future-constant copy. Eleven scanners are published,
-    // 0.1.0 through 0.8.0, so ten of them sit below the tag scanner and every
+    // there rather than on a future-constant copy. Twelve scanners are published,
+    // 0.1.0 through 0.9.0, so eleven of them sit below the tag scanner and every
     // one clears the shape check. `0.5.9` stands in for that whole family: a
     // well-formed version, below the constant, refused.
     //
@@ -863,7 +863,7 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
     expect(refused.status).not.toBe(0);
     // Both numbers, for the same reason the npm floor names both.
     expect(refused.stdout).toContain('0.5.9');
-    expect(refused.stdout).toContain('0.8.0');
+    expect(refused.stdout).toContain('0.9.0');
     expect(refused.stdout).toContain('pull request');
     expect(refused.stdout).toContain('REMOVE the `version` input');
 
@@ -880,16 +880,16 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
     // exists a pull request can pin back to an older one and be judged by the
     // rule set it chose for itself. `trust-base: off` was refused by name for
     // exactly this reason; the difference is that deleting a security step
-    // reads as deleting a security step, while `version: 0.8.0` reads as
+    // reads as deleting a security step, while `version: 0.9.0` reads as
     // ordinary version management.
     const future = scriptWithFutureTagScanner();
-    const run = runValidateScript(future, { version: '0.8.0' }, { GITHUB_BASE_REF: 'main' });
+    const run = runValidateScript(future, { version: '0.9.0' }, { GITHUB_BASE_REF: 'main' });
     expect(run.status).not.toBe(0);
     // BOTH numbers, for the same reason the npm floor names both: a refusal
     // that does not say which two values disagree sends the reader away to work
     // it out.
-    expect(run.stdout).toContain('0.8.0');
     expect(run.stdout).toContain('0.9.0');
+    expect(run.stdout).toContain('0.10.0');
     expect(run.stdout).toContain('pull request');
     // And the remedy, which is to stop pinning at all.
     expect(run.stdout).toContain('REMOVE the `version` input');
@@ -909,14 +909,14 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
   test('allows pinning forward on a pull request, and orders numerically', () => {
     // Pinning FORWARD stays allowed, on the rule's unenforced assumption that a
     // newer scanner is at least as strict; forward pins are not bounded.
-    // `0.10.0` is the case a lexicographic comparison gets wrong: it sorts
-    // below `0.9.0` as text and above it as a version, and refusing it would
-    // refuse the very direction this rule exists to leave open. (The future
-    // constant's own next-minor and the lexicographic-trap value are the same
-    // number this cycle -- 0.9.0's next minor is 0.10.0 -- so the list carries
-    // it once rather than twice.)
+    // The future constant itself is `0.10.0` this cycle -- the same
+    // two-digit-minor number earlier releases of this test used as the
+    // separate lexicographic-trap example, since it sorts below a
+    // single-digit minor like `0.9.0` as text despite being the larger
+    // version. There is no longer a distinct trap value to list beside it:
+    // `0.11.0` stands in as the value one minor further forward instead.
     const future = scriptWithFutureTagScanner();
-    for (const ok of ['0.9.0', '0.9.1', '0.10.0', '1.0.0', '10.0.0']) {
+    for (const ok of ['0.10.0', '0.10.1', '0.11.0', '1.0.0', '10.0.0']) {
       expect([
         ok,
         runValidateScript(future, { version: ok }, { GITHUB_BASE_REF: 'main' }).status,
@@ -931,7 +931,7 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
     const shipped = `${tagScannerPart('MAJOR')}.${tagScannerPart('MINOR')}.${tagScannerPart('PATCH')}`;
     expect(runValidateWith({ version: shipped }, { GITHUB_BASE_REF: 'main' }).status).toBe(0);
     expect(runValidateWith({}, { GITHUB_BASE_REF: 'main' }).status).toBe(0);
-    for (const ok of ['0.8.0', '0.8.1', '0.10.0', '1.0.0']) {
+    for (const ok of ['0.9.0', '0.9.1', '0.10.0', '1.0.0']) {
       expect([ok, runValidateWith({ version: ok }, { GITHUB_BASE_REF: 'main' }).status]).toEqual([
         ok,
         0,

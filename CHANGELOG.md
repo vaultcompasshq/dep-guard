@@ -10,6 +10,105 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-27
+
+Minor on both published packages, per the stability policy: 0.x minors may
+change scanner behavior. `@vaultcompass/dep-guard` and
+`@vaultcompass/dep-guard-core` move from 0.8.0 to 0.9.0. The action's
+`version` input default and the `DG_TAG_SCANNER` constant move with them, so
+`vaultcompasshq/dep-guard@v0.9.0` installs `@vaultcompass/dep-guard@0.9.0`.
+All four `--online` checks now share one name-visibility rule,
+`isNonPublicName`, closing a gap where the typosquat popularity-asymmetry
+check sent every low-popularity name to the registry with no scope or
+internal-name filter of its own; a scope pinned to the public registry is
+now checked even under a private default registry, and a pull request that
+changes only the default registry line is reported as a proposal rather
+than as no change. The online checks' wall-clock budget is now
+configurable: a new `onlineBudgetMs` key and `--online-budget-ms` flag
+override the default, which stays 20000ms with neither `--base` nor
+`--trust-base` on the command line and rises to 300000ms when either is
+present, and the JSON output gains a `run.online` summary of whether online
+checks ran, the budget used, and how many lookups were attempted or
+skipped. `publish-age` also now resolves a purely transitive npm alias
+under the name its own resolved tarball vouches for, rather than the
+installed alias name, with identity unchanged: fingerprints, baselines,
+allow and pin behavior all still key off the lockfile entry itself.
+
+- Fixed a publish-age coverage loss: a scope pinned to the PUBLIC registry
+  in `.npmrc` used to be treated as private just because it had a pin at
+  all, so a dependency under that scope never reached the publish-age
+  check. A pin now decides by its own origin, and still outranks the
+  project's default registry either way: a scope pinned to the public
+  registry is checked even under a private default, and a scope pinned
+  away from the public registry is skipped even under a public default.
+  Independent review then found a regression the first version of this fix
+  introduced: a public pin was letting a lockfile entry's own `resolvedUrl`
+  get ignored, so an entry that actually resolved from a *private* host
+  under a publicly-pinned scope was fetched anyway. Only a *private* pin
+  now decides unconditionally; otherwise a present `resolvedUrl` decides
+  by its own origin before the pin or the default registry ever get a say.
+  README and `docs/INVARIANTS.md` updated (fixes #67).
+
+- Fixed a privacy gap, found across all three of the online checks that
+  predate publish-age: `unknown-package` and `registered-squat` used to
+  send every manifest-declared name to the public registry regardless of
+  `.npmrc` scope pins or the project's default registry, and a later
+  independent review found the same gap in the typosquat
+  popularity-asymmetry escalation (`applyTyposquatAsymmetry`), which also
+  had no `internalScopes`/`internalPrefixes` filter of its own -- the
+  identical leak shape publish-age was built to close, reached through the
+  three checks that predate it or were never re-audited against it. The
+  name-level decision is now shared across all four checks
+  (`online/registry-scope.ts`'s `isNonPublicName`), and a `.npmrc`-derived
+  skip is never silently dropped: `unknown-package` raises
+  `unknown-package-private-origin-skipped`, `registered-squat` raises
+  `registered-squat-private-origin-skipped`, and the asymmetry check raises
+  `typosquat-asymmetry-private-origin-skipped`, each naming the package. An
+  `internalScopes`/`internalPrefixes` skip stays silent by design, in all
+  four checks alike: an adopter's own committed list needs no diagnostic
+  reminder. README and `docs/INVARIANTS.md` updated (fixes #70).
+
+- Fixed a pull-request misreport: `trust-base.ts`'s `npmrcChanged` only
+  compared the `.npmrc` scope pins and the file's shape, so a pull request
+  that edited nothing but the unscoped `registry=` line was reported as an
+  unchanged `.npmrc` even though that line is a control input the run
+  already judges from the base ref. `npmrcChanged` now also ORs in a
+  difference between the base and head default registry, and
+  `describeNpmrcChange` names it ("proposed: default registry changed").
+  README and `docs/INVARIANTS.md` updated (fixes #66).
+
+- Made the online checks' wall-clock budget configurable and CI-aware
+  (issue #75). The four online checks used to share a single hardcoded
+  twenty-second budget, sized for a pre-commit hook; on a `--base` or
+  `--trust-base` run that traded the wrong way, since a large dependency
+  change could exhaust it and leave the remaining lookups quietly at their
+  offline result with only an `online-deadline-exceeded` diagnostic to show
+  for it. The budget now defaults to twenty seconds with no `--base` and no
+  `--trust-base` on the command line, and to five minutes
+  (`CI_ONLINE_BUDGET_MS`) only when one of those two flags is actually
+  given -- not "in CI" more broadly: a push-triggered job or a bare
+  `dep-guard check` with neither flag still gets twenty seconds. A new
+  `onlineBudgetMs` key in `.dep-guard.json` and a matching
+  `--online-budget-ms` CLI flag override either default for one run, in that
+  order of precedence; both are meaningless without `online: true` or
+  `--online`. `onlineBudgetMs` is a control input like every other
+  `.dep-guard.json` key, so a pull request cannot raise or lower it for the
+  run judging it; `--online-budget-ms` itself is a workflow-file decision,
+  protected the same way every other flag baked into a job is (see
+  "Protecting the workflow file itself" in the README). An exhausted budget
+  still never fails the run by itself -- it stays a diagnostic, exactly as
+  before. The JSON output gained a `run.online` object (a sibling of
+  `run.corpusBuiltAt`), always present, reporting whether online checks
+  ran, the budget actually used, how many name lookups were actually
+  issued (counted per check, so a name three checks looked up counts three
+  times; a downloads lookup can batch many names into one request, so this
+  counts names, not requests), how many lookups were
+  skipped once the budget was spent, and whether the deadline was exceeded
+  at all -- so the conductor umbrella (vaultcompasshq/conductor#72) and any
+  other JSON consumer can tell a genuine clean run apart from one that quietly
+  ran out of time. README, `docs/INVARIANTS.md`, and the CLI help text
+  updated.
+
 - Fixed a minimum-publish-age miss on a purely transitive npm alias (one
   only some other package's own dependency introduces, which no manifest
   declares): `publish-age` asked the registry about the installed alias
@@ -54,80 +153,6 @@ GitHub release notes, which are generated from the commit history.
   rather than identity, so two entries that report under the same name but
   resolve to different real packages are always looked up separately.
   README and `docs/INVARIANTS.md` updated (fixes #69).
-- Made the online checks' wall-clock budget configurable and CI-aware
-  (issue #75). The four online checks used to share a single hardcoded
-  twenty-second budget, sized for a pre-commit hook; on a `--base` or
-  `--trust-base` run that traded the wrong way, since a large dependency
-  change could exhaust it and leave the remaining lookups quietly at their
-  offline result with only an `online-deadline-exceeded` diagnostic to show
-  for it. The budget now defaults to twenty seconds with no `--base` and no
-  `--trust-base` on the command line, and to five minutes
-  (`CI_ONLINE_BUDGET_MS`) only when one of those two flags is actually
-  given -- not "in CI" more broadly: a push-triggered job or a bare
-  `dep-guard check` with neither flag still gets twenty seconds. A new
-  `onlineBudgetMs` key in `.dep-guard.json` and a matching
-  `--online-budget-ms` CLI flag override either default for one run, in that
-  order of precedence; both are meaningless without `online: true` or
-  `--online`. `onlineBudgetMs` is a control input like every other
-  `.dep-guard.json` key, so a pull request cannot raise or lower it for the
-  run judging it; `--online-budget-ms` itself is a workflow-file decision,
-  protected the same way every other flag baked into a job is (see
-  "Protecting the workflow file itself" in the README). An exhausted budget
-  still never fails the run by itself -- it stays a diagnostic, exactly as
-  before. The JSON output gained a `run.online` object (a sibling of
-  `run.corpusBuiltAt`), always present, reporting whether online checks
-  ran, the budget actually used, how many name lookups were actually
-  issued (counted per check, so a name three checks looked up counts three
-  times; a downloads lookup can batch many names into one request, so this
-  counts names, not requests), how many lookups were
-  skipped once the budget was spent, and whether the deadline was exceeded
-  at all -- so the conductor umbrella (vaultcompasshq/conductor#72) and any
-  other JSON consumer can tell a genuine clean run apart from one that quietly
-  ran out of time. README, `docs/INVARIANTS.md`, and the CLI help text
-  updated.
-
-- Fixed a publish-age coverage loss: a scope pinned to the PUBLIC registry
-  in `.npmrc` used to be treated as private just because it had a pin at
-  all, so a dependency under that scope never reached the publish-age
-  check. A pin now decides by its own origin, and still outranks the
-  project's default registry either way: a scope pinned to the public
-  registry is checked even under a private default, and a scope pinned
-  away from the public registry is skipped even under a public default.
-  Independent review then found a regression the first version of this fix
-  introduced: a public pin was letting a lockfile entry's own `resolvedUrl`
-  get ignored, so an entry that actually resolved from a *private* host
-  under a publicly-pinned scope was fetched anyway. Only a *private* pin
-  now decides unconditionally; otherwise a present `resolvedUrl` decides
-  by its own origin before the pin or the default registry ever get a say.
-  README and `docs/INVARIANTS.md` updated (fixes #67).
-
-- Fixed a privacy gap, found across all three of the online checks that
-  predate publish-age: `unknown-package` and `registered-squat` used to
-  send every manifest-declared name to the public registry regardless of
-  `.npmrc` scope pins or the project's default registry, and a later
-  independent review found the same gap in the typosquat
-  popularity-asymmetry escalation (`applyTyposquatAsymmetry`), which also
-  had no `internalScopes`/`internalPrefixes` filter of its own -- the
-  identical leak shape publish-age was built to close, reached through the
-  three checks that predate it or were never re-audited against it. The
-  name-level decision is now shared across all four checks
-  (`online/registry-scope.ts`'s `isNonPublicName`), and a `.npmrc`-derived
-  skip is never silently dropped: `unknown-package` raises
-  `unknown-package-private-origin-skipped`, `registered-squat` raises
-  `registered-squat-private-origin-skipped`, and the asymmetry check raises
-  `typosquat-asymmetry-private-origin-skipped`, each naming the package. An
-  `internalScopes`/`internalPrefixes` skip stays silent by design, in all
-  four checks alike: an adopter's own committed list needs no diagnostic
-  reminder. README and `docs/INVARIANTS.md` updated (fixes #70).
-
-- Fixed a pull-request misreport: `trust-base.ts`'s `npmrcChanged` only
-  compared the `.npmrc` scope pins and the file's shape, so a pull request
-  that edited nothing but the unscoped `registry=` line was reported as an
-  unchanged `.npmrc` even though that line is a control input the run
-  already judges from the base ref. `npmrcChanged` now also ORs in a
-  difference between the base and head default registry, and
-  `describeNpmrcChange` names it ("proposed: default registry changed").
-  README and `docs/INVARIANTS.md` updated (fixes #66).
 
 ## [0.8.0] - 2026-09-26
 
