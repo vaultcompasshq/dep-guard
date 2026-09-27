@@ -48,7 +48,7 @@ scores it before anything is fetched.
 
 ## What it checks
 
-Six rules, all offline and deterministic (plus three optional online checks
+Six rules, all offline and deterministic (plus four optional online checks
 -- see below):
 
 - **Unknown package** -- a new name absent from a corpus of real npm package
@@ -113,7 +113,7 @@ every invocation, pre-commit hooks included, which is why a
 latency-sensitive setup is usually better off passing `--online` in CI
 alone.
 
-Three checks, all backed by npm's public downloads and registry metadata
+Four checks, all backed by npm's public downloads and registry metadata
 APIs, all degrading to the offline result with a diagnostic on any network
 failure rather than blocking:
 
@@ -158,7 +158,51 @@ failure rather than blocking:
   risk the offline existence check has: a legitimately brand-new package
   looks identical to a squat by age and downloads alone.
 
-All three share one wall-clock budget of twenty seconds per run, not per
+- **Minimum publish age.** A `high`-severity finding for a resolved
+  dependency version published more recently than `minAgeDays` (default 7)
+  days ago, or with a future-dated publish timestamp at any floor including
+  `0`. Lets a repository align dep-guard's "too new to trust" judgment with
+  its own Dependabot minimum-release-age cooldown, rather than only ever
+  answering that question through registered-squat's hardcoded thirty-day
+  window, which exists to catch a squatted *name* rather than to express a
+  general age-acceptance policy. Reads the LOCKFILE's resolved versions,
+  not manifest ranges: in `--base` mode, every dependency whose resolved
+  version was added or changed in the diff; with no `--base`, every
+  resolved dependency in the lockfile, exactly as every other check reads
+  "added" with no earlier revision to compare against. A package the
+  registry does not know, or a version still missing from its publish-time
+  record after a live lookup, is left unflagged rather than guessed at --
+  the unknown-package check above is what says a name itself looks wrong --
+  but each case is recorded as a diagnostic rather than passed over in
+  silence, since this check's own candidates come from the lockfile, which
+  is mostly transitive entries no manifest ever names and unknown-package
+  never sees. `minAgeAllow` (an array of exact `name@version` strings) is a
+  reviewed exception for one specific release, never a standing exemption
+  for the name, and a config entry may not itself be a semver range. This
+  check never sends a name to the registry that resolved from anywhere
+  other than the public npm registry, or whose scope is pinned to a
+  different registry in `.npmrc` -- a private dependency's name is not put
+  on the wire to a public service just to price this heuristic. pnpm does
+  not record which registry served an ordinary resolution at all, so a
+  pnpm lockfile entry with no recorded resolution URL is judged against the
+  project `.npmrc`'s own unscoped default registry instead: when that is
+  set to a private registry, such an entry is skipped the same way a
+  scope-pinned one is; when none is set (or it names the public registry),
+  the entry is checked as public, since nothing in the project's own
+  configuration says otherwise. A *user*-level `~/.npmrc` default registry,
+  or an `npm_config_registry` environment variable, is invisible to this
+  check and to the rest of the scan -- a repository relying on either of
+  those instead of a project `.npmrc` must list the private names under
+  `internalScopes` or `internalPrefixes`. The same gap applies to an npm
+  lockfile written with its own registry-resolved URLs omitted.
+
+A registry error in any of the four checks degrades to a diagnostic
+rather than a block, the design every check above already follows for its
+own network failure: it never turns an otherwise-clean scan's exit 0 into
+an exit 1 by itself, so a registry outage does not turn a required CI
+check red on its own.
+
+All four share one wall-clock budget of twenty seconds per run, not per
 request. Once it is spent the remaining lookups are skipped, the affected
 findings keep exactly the result the offline checks gave them, and an
 `online-deadline-exceeded` diagnostic says how many were skipped. Without
@@ -293,6 +337,13 @@ scanning enabled).
 The SARIF is uploaded *before* the run is failed, so a scan that found
 something still gets its findings into code scanning. `security-events:
 write` is required for the upload; `actions/checkout` must run first.
+
+Publish age (like the other three `--online` checks) needs `online: 'true'`
+set on the Action itself, not merely in `.dep-guard.json`: the Action's own
+`online` input defaults to `false` and, in that case, always appends
+`--no-online` to the scan command, which overrides a committed
+`"online": true` rather than merely leaving it alone (see "Online checks"
+above).
 
 ### Where the scanner comes from
 
@@ -433,7 +484,12 @@ config did, and what this change wanted instead.
 decides what the change is compared against; `--trust-base` decides by
 whose rules it is judged. They usually name the same ref in CI, because the
 base branch is both the state you diverged from and the state whose rules
-were approved, but either can be passed without the other.
+were approved, but either can be passed without the other. When
+`--trust-base` is present, an explicit `--base` that resolves to HEAD's own
+commit or tree is refused with exit 2 rather than silently comparing HEAD
+against itself and going quiet on every comparison-based signal; a bare
+`--base` with no `--trust-base` is unaffected, since comparing a dirty
+working tree against HEAD locally is legitimate.
 
 **Without a `--base`, every dependency reads as newly added**, because the
 scan has no earlier revision to compare against. That is not a special
@@ -449,6 +505,7 @@ run in that state, derived from what each check reads rather than guessed:
 | Lockfile tamper | does not run for comparison signals* | runs |
 | Version hygiene | runs | runs |
 | Dependency confusion | runs | runs |
+| Publish age (`--online` only)** | runs, over every resolved dependency in the lockfile | runs, over only the dependencies whose resolved version was added or changed |
 
 \* Lockfile tamper's resolved-URL, integrity, and source-host comparison
 signals need a lockfile entry on both sides of the change, so they are
@@ -481,6 +538,15 @@ flag at all, with or without `--base`, so its coverage is limited to
 `onlyBuiltDependencies` additions regardless (see
 [Lockfile support](#lockfile-support)). That limitation stays as
 documented; this table is about the comparison-based signals only.
+
+\*\* Publish age is one of the four `--online` checks (see "Online checks"
+above) and does not run at all without `--online` or `"online": true`,
+regardless of `--base`. When it does run, it reads `delta.lockEntryChanges`
+directly rather than `delta.changes`: with no earlier revision every
+resolved lockfile entry reads as added (the same rule every other row in
+this table follows), so every dependency in the lockfile is a candidate;
+with a `--base`, only a resolved version that was added or changed in the
+diff is (`packages/core/src/online/publish-age.ts`).
 
 The gate fails closed, exit 2, with nothing scanned, when the ref does not
 resolve, when it resolves to HEAD's own commit, and when it is a different
@@ -651,7 +717,9 @@ Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
   "internalScopes": ["@acme"],
   "internalPrefixes": ["acme-"],
   "extraAliases": { "unused-imports": ["eslint-plugin-unused-imports"] },
-  "ignorePaths": ["fixtures"]
+  "ignorePaths": ["fixtures"],
+  "minAgeDays": 7,
+  "minAgeAllow": ["some-package@1.2.3"]
 }
 ```
 
@@ -661,6 +729,14 @@ which is a fact about where bytes come from rather than about the package.
 And `ignorePaths` drops findings before the gate sees them, so a pattern
 broad enough to match everything would switch the tool off; patterns made
 only of wildcards are rejected for that reason.
+
+`minAgeDays` and `minAgeAllow` configure the minimum-publish-age online
+check (see "Online checks" above); they have no
+effect without `--online` or `"online": true`. `minAgeDays` defaults to 7
+and accepts `0` (only future-dated publishes are refused). `minAgeAllow`
+takes exact `name@version` strings, never a bare name -- allowing a bare
+name would silence every future version of it too, the same much-bigger
+door `allow` is for, not a one-release exception.
 
 Every key here, the baseline file beside it, and the scope pins in
 `.npmrc`, are **control inputs**: they decide what dep-guard reports rather

@@ -25,6 +25,8 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'extraAliases',
   'ignorePaths',
   'online',
+  'minAgeDays',
+  'minAgeAllow',
 ]);
 
 // Exported so the CLI can validate --fail-on against the exact same set
@@ -85,6 +87,11 @@ const DANGEROUS_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor',
 // spreading `{...DEFAULT_CONFIG}` only copies the top-level object, not
 // the arrays and the extraAliases object nested inside it. A factory
 // returns a fresh set of empty collections on every call instead.
+// The floor issue #58 asks for by default: aligned with a commonly used
+// Dependabot minimum-release-age cooldown, and overridable per repository
+// via "minAgeDays" for a project that runs a different one.
+export const DEFAULT_MIN_AGE_DAYS = 7;
+
 function defaultConfig(): ResolvedConfig {
   return {
     failOn: 'medium',
@@ -94,6 +101,8 @@ function defaultConfig(): ResolvedConfig {
     extraAliases: {},
     ignorePaths: [],
     online: false,
+    minAgeDays: DEFAULT_MIN_AGE_DAYS,
+    minAgeAllow: [],
   };
 }
 
@@ -141,6 +150,46 @@ function readJsonFile(filePath: string, label: string): Record<string, unknown> 
   }
 
   return parseJsonConfig(content, label);
+}
+
+// An exact release, never a range: digits only in each of the three core
+// fields (no leading zeros are refused here -- that stricter rule belongs
+// to whoever mints a version, not to whoever names one that already
+// exists), an optional dot-separated prerelease, and an optional
+// dot-separated build metadata tag, per semver's own grammar. No leading
+// operator (`^`, `~`, `>=`), no `x`/`*` wildcard segment, and no space --
+// which also refuses a hyphen RANGE ("1.0.0 - 2.0.0") for free, since a
+// range's two endpoints are joined by whitespace around the hyphen and this
+// pattern admits none. A bare hyphen inside a prerelease identifier
+// ("1.0.0-beta-2") is untouched by that and stays valid, as it must: it
+// still names one exact release.
+const EXACT_VERSION_PATTERN =
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+function isExactVersion(version: string): boolean {
+  return EXACT_VERSION_PATTERN.test(version.trim());
+}
+
+// Split the way delta.ts's versionRangeOf splits an alias target ("npm:" +
+// name + "@" + range): the LAST "@" is the separator, and it has to sit
+// past index 0 so a scoped name's own leading "@" ("@scope/pkg") is never
+// mistaken for it. A "minAgeAllow" entry with no version half at all --
+// just a bare package name -- is exactly the much bigger door the field
+// comment on ResolvedConfig.minAgeAllow warns against (silencing every
+// future version of a name, not one reviewed release), so it is rejected
+// here rather than accepted and silently matching nothing at check time.
+// The version half also has to be an EXACT version, not a semver range:
+// "foo@^1.2.3" or "foo@1.x" would silence every future release matching
+// that range too, the identical much-bigger-door problem a bare name has,
+// just spelled with a version-shaped suffix instead of no suffix at all.
+function isValidNameAtVersionEntry(entry: string): boolean {
+  const separator = entry.lastIndexOf('@');
+  if (separator <= 0) {
+    return false;
+  }
+  const name = entry.slice(0, separator);
+  const version = entry.slice(separator + 1);
+  return name.trim().length > 0 && isExactVersion(version);
 }
 
 function validateExtraAliases(value: unknown, label: string): Record<string, string[]> {
@@ -220,6 +269,37 @@ function validateSection(raw: Record<string, unknown>, label: string): Partial<R
 
   if (raw.extraAliases !== undefined) {
     result.extraAliases = validateExtraAliases(raw.extraAliases, label);
+  }
+
+  if (raw.minAgeDays !== undefined) {
+    // An integer floor, and non-negative: 0 is meaningful (issue #58 --
+    // "only future-dated publishes are refused"), but a negative number
+    // would flag nothing yet still read as configured, silently
+    // disagreeing with a repository's own Dependabot cooldown rather than
+    // failing loudly the way a garbage value should.
+    if (
+      typeof raw.minAgeDays !== 'number' ||
+      !Number.isInteger(raw.minAgeDays) ||
+      raw.minAgeDays < 0
+    ) {
+      throw new DepGuardError(`${label}: "minAgeDays" must be a non-negative integer`, 'config-invalid');
+    }
+    result.minAgeDays = raw.minAgeDays;
+  }
+
+  if (raw.minAgeAllow !== undefined) {
+    if (!isStringArray(raw.minAgeAllow)) {
+      throw new DepGuardError(`${label}: "minAgeAllow" must be an array of strings`, 'config-invalid');
+    }
+    for (const entry of raw.minAgeAllow) {
+      if (!isValidNameAtVersionEntry(entry)) {
+        throw new DepGuardError(
+          `${label}: "minAgeAllow" entry "${entry}" must be an exact "name@version" string, with a concrete version rather than a semver range`,
+          'config-invalid'
+        );
+      }
+    }
+    result.minAgeAllow = raw.minAgeAllow;
   }
 
   return result;

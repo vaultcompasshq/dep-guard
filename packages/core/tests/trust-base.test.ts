@@ -717,6 +717,89 @@ describe('pull-request mode and --base are different concepts', () => {
   });
 });
 
+// Issue #64: an explicit --base that resolves to HEAD is not itself a
+// trust-base misconfiguration (assertTrustBaseUsable never looks at
+// --base), but once --trust-base is also present it is exactly as empty a
+// comparison -- every dependency reads as unchanged, so every
+// comparison-based signal goes quiet with nothing saying why. This is the
+// companion refusal to "pull-request mode: the ref itself" above, reusing
+// the same commit/tree resolution for the same reason.
+describe('--base resolving to HEAD is refused when --trust-base is present (issue #64)', () => {
+  test('--base HEAD with --trust-base exits with a message naming the tree being judged', async () => {
+    await makeBase();
+    await addUnknownDependency();
+    await commitAll('add the dependency');
+
+    await expect(
+      scan({
+        repoRoot: repo,
+        mode: { kind: 'base', ref: 'HEAD' },
+        corpusDir: FIXTURE_CORPUS,
+        trustBase: 'main',
+      })
+    ).rejects.toMatchObject({
+      code: 'base-is-head',
+      message: expect.stringContaining('the comparison base is the tree being judged'),
+    });
+  });
+
+  test('--base HEAD without --trust-base still runs: a local dirty-tree-vs-HEAD comparison is legitimate', async () => {
+    await makeBase();
+    await addUnknownDependency();
+    await commitAll('add the dependency');
+
+    const result = await scan({
+      repoRoot: repo,
+      mode: { kind: 'base', ref: 'HEAD' },
+      corpusDir: FIXTURE_CORPUS,
+    });
+
+    // HEAD compared against itself is an empty delta -- no findings -- but
+    // the run itself is not refused, which is the property under test.
+    expect(result.findings).toEqual([]);
+    expect(result.trustBase).toBeUndefined();
+  });
+
+  test('a real base ref with --trust-base still runs', async () => {
+    await makeBase();
+    await addUnknownDependency();
+    await write('.dep-guard.json', JSON.stringify({ failOn: 'medium', allow: [UNKNOWN_NAME] }));
+    await commitAll('add the dependency and allow it');
+
+    const result = await scan({
+      repoRoot: repo,
+      mode: { kind: 'base', ref: 'main' },
+      corpusDir: FIXTURE_CORPUS,
+      trustBase: 'main',
+    });
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.trustBase?.ref).toBe('main');
+  });
+
+  test('a different commit carrying an identical tree as --base is refused the same way', async () => {
+    await makeBase();
+    await addUnknownDependency();
+    await commitAll('add the dependency');
+    // Same trick "pull-request mode: the ref itself" uses for --trust-base:
+    // a commit with a different sha and HEAD's exact tree, which is what a
+    // pull request's merge ref looks like when the base has not moved.
+    const twin = (await git('commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'twin')).trim();
+
+    await expect(
+      scan({
+        repoRoot: repo,
+        mode: { kind: 'base', ref: twin },
+        corpusDir: FIXTURE_CORPUS,
+        trustBase: 'main',
+      })
+    ).rejects.toMatchObject({
+      code: 'base-same-tree',
+      message: expect.stringContaining('identical tree'),
+    });
+  });
+});
+
 describe('checkSingle in pull-request mode', () => {
   test('an allow entry the pull request adds does not make a name safe', async () => {
     await makeBase();

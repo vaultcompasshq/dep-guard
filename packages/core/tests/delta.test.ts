@@ -43,6 +43,7 @@ function state(manifests: ParsedManifest[], overrides: Partial<RepoState> = {}):
     lockfile: null,
     onlyBuilt: [],
     npmrcRegistryPins: new Map<string, string>(),
+    npmrcDefaultRegistry: null,
     workspaceLocalNames: new Set(),
     ...overrides,
   };

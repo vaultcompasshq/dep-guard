@@ -13,7 +13,8 @@ export type RuleId =
   | 'lockfile-tamper'
   | 'version-hygiene'
   | 'dependency-confusion'
-  | 'registered-squat';
+  | 'registered-squat'
+  | 'publish-age';
 
 export interface Finding {
   ruleId: RuleId;

@@ -859,7 +859,9 @@ Current diagnostic codes: `audit-anchor-differs`,
 `online-deadline-exceeded`,
 `path-outside-root`, `pnpm-lockfile-invalid-entry`,
 `pnpm-multi-document-lockfile`,
-`pnpm-no-install-script-flag`, `symlink-cycle`,
+`pnpm-no-install-script-flag`, `publish-age-allowed`,
+`publish-age-package-unknown`, `publish-age-private-origin-skipped`,
+`publish-age-version-unknown`, `symlink-cycle`,
 `tamper-resolution-unreadable`, `workspace-dir-unreadable`,
 `workspace-duplicate-directory`, `workspace-glob-unsupported`.
 
@@ -1257,9 +1259,14 @@ The deadline is re-asked before every name in a per-name loop, not once
 at the top of a step. A single slow lookup can spend the whole budget, so
 a loop that legitimately started inside the budget can be outside it
 three names later, and a step that only checked on entry would run the
-remaining nineteen requests it had already decided to make. The two
-places this matters are `resolveUnknownPackages` and
-`findRegisteredSquats`'s packument loop.
+remaining nineteen requests it had already decided to make. The three
+places this matters are `resolveUnknownPackages`, `findRegisteredSquats`'s
+packument loop, and `findPublishAgeFindings`'s per-name loop
+(`online/publish-age.ts`), which is grouped by NAME rather than by
+candidate for the same reason `resolveUnknownPackages` is: several
+resolved versions of one package (a monorepo declaring it at two versions
+across workspace manifests) answer from a single packument, so the
+deadline is spent once per distinct name, not once per lockfile entry.
 
 `applyTyposquatAsymmetry` is gated from OUTSIDE, in `enrichOnline`,
 rather than internally, and that asymmetry is deliberate rather than an
@@ -1268,20 +1275,244 @@ so it has exactly one point at which it could stop, and that point is
 before it starts. Adding a deadline parameter to it would be a second
 copy of a decision with only one branch.
 
-The order the three steps run in is a priority decision about how the
+The order the four steps run in is a priority decision about how the
 budget is spent, and it is written down because it looks arbitrary and is
 not. unknown-package resolution runs FIRST because it is the only step
 that can withdraw a false positive from the check that actually blocks,
 and the only one whose absence gets steadily worse as a release ages away
-from its corpus walk. The other two only ever add or escalate, so a
-budget spent before them costs a signal that would not have existed
-offline either; a budget spent before the first one leaves a user
-holding a blocking finding they have no way to clear.
+from its corpus walk. The other three (typosquat asymmetry, registered-squat,
+publish-age, in that order) only ever add or escalate, so a budget spent
+before them costs a signal that would not have existed offline either; a
+budget spent before the first one leaves a user holding a blocking finding
+they have no way to clear. publish-age runs LAST among the three
+add-or-escalate steps for no reason beyond the order they were written in
+-- nothing orders them against each other, only against unknown-package.
 
 The budget is a constant (`DEFAULT_ONLINE_BUDGET_MS`, twenty seconds) and
 not a config key today. If it ever becomes one, it becomes a config key
 -- it does not become a second constant somewhere else that has to be
 kept in step with this one.
+
+## Minimum publish age reads the lockfile diff, not the manifest diff (0.7.x, issue #58)
+
+`findPublishAgeFindings` (`online/publish-age.ts`) is the fourth
+`--online` step, and it is deliberately built on
+`ctx.delta.lockEntryChanges` rather than `candidates.ts`'s
+`newRegistryNames`, which is what the other three online steps (and the
+offline existence/typosquat checks) read. The two answer different
+questions. `newRegistryNames` answers "which manifest-declared names are
+new", which is right for a check that judges a NAME. This check judges a
+RESOLVED VERSION, and a manifest range can stay unchanged while `npm
+update` moves the lockfile to a version published five minutes ago -- the
+exact case a minimum-publish-age policy exists to catch, and one
+`newRegistryNames` cannot see at all.
+
+The reason is worth stating precisely, because an earlier version of this
+paragraph got it backwards. `computeDelta` (`delta.ts:575-576`) does NOT
+skip a held specifier outright: `specifierHeld` only suppresses a change
+when the specifier held AND the selected before/after lock entries do
+NOT differ (`delta.ts`'s `!lockEntriesDiffer` clause). A held specifier
+whose lock entry DOES differ -- exactly the `npm update` case above --
+still reaches `changes` with `kind: 'changed'`, the identical entry a
+manifest-level bump would produce. What actually keeps `newRegistryNames`
+blind to it is its OWN filter (`checks/candidates.ts`): it admits only
+`kind === 'added'` (or the alias protocol), so a `'changed'` entry is
+excluded regardless of why it changed. The manifest walk sees the bump;
+the name-based checks' own candidate filter is what does not.
+
+`delta.lockEntryChanges` already answers the right question on its own
+terms, with no special-casing needed in this check for base vs. audit
+mode: `diffLockEntries` (`delta.ts`) treats every lockfile entry as
+`'added'` whenever `beforeEntries` is empty, which is unconditionally true
+when there is no before lockfile at all (audit mode) and conditionally
+true per-name otherwise. So in base mode this array is exactly "every
+resolved version added or changed in the diff", and with no earlier
+revision it is exactly "every resolved dependency in the lockfile" --
+the same "no before, everything reads as added" rule every other row in
+the README's pull-request-mode table follows, arrived at for free rather
+than by branching on `hasComparisonBase` inside this check.
+
+This also means an npm workspace-local sibling is never a candidate
+without this check doing anything to exclude it: `lockfiles/npm.ts` never
+puts a `link: true` entry into `ParsedLockfile.entries` in the first
+place (it goes into `workspaceLocalNames` instead), so `lockEntryChanges`
+-- which is built by walking `entries` -- structurally cannot contain one.
+The check still checks `ctx.delta.workspaceLocalNames` defensively, the
+same belt-and-suspenders posture `candidates.ts`'s own comment describes
+for the name-based checks, but the invariant this section is naming does
+not depend on that defensive check firing.
+
+Internal names (`internalScopes`, `internalPrefixes`) ARE filtered before
+any request goes out, for the identical reason `registered-squat.ts`
+filters them: a private package name is not something this tool may put
+on the wire to a public registry just to price a heuristic, not merely
+that the answer would look suspicious.
+
+### Publish age never asks a private registry's own names (0.7.x, review of #58)
+
+`internalScopes`/`internalPrefixes` is a name-shaped declaration a user
+has to remember to configure, and it is not the only source of truth
+about which names are private. Before any request goes out,
+`isNonPublicResolution` (`online/publish-age.ts`) also excludes a
+candidate on either of two independent grounds, checked in this order:
+
+1. The name's scope is pinned to a registry other than the public one in
+   `.npmrc` (`ctx.npmrcRegistryPins`, the same map
+   `checks/confusion.ts`'s pin-mismatch rule reads, via the identical
+   `scopeOf` helper -- exported from there rather than re-derived here,
+   for the same reason every other shared predicate in this engine is
+   written once). This check has to fire even when the entry's
+   `resolvedUrl` happens to be the PUBLIC registry: that combination is a
+   pin MISMATCH, which is `checks/confusion.ts`'s rule 1's own finding to
+   raise, not evidence that this check may treat the name as public. A
+   name the project has declared private by its own `.npmrc` must never
+   reach the public registry through this check regardless of what a
+   possibly-mismatched resolution says.
+2. The entry's `resolvedUrl` origin is not the public registry's origin
+   (`originOf(DEFAULT_REGISTRY)`, computed once from
+   `registry-client.ts`'s own constant rather than a second literal that
+   could drift from it).
+
+   An entry with no `resolvedUrl` at all is the COMMON case for a pnpm
+   lockfile, not a rare fallthrough: pnpm never records which registry
+   served an ordinary (non-tarball-URL) resolution -- `lockfiles/pnpm.ts`'s
+   `entryFromPackageValue` sets `resolvedUrl` only from a resolution's own
+   `tarball` field -- so this is the ONE shape this check cannot judge from
+   the lockfile entry itself. `state.ts`'s `parseNpmrcDefaultRegistry`
+   reads the project `.npmrc`'s unscoped `registry=` line into
+   `ctx.npmrcDefaultRegistry` for exactly this case (a sibling to
+   `parseNpmrcPins`, which only ever reads the SCOPED `@scope:registry`
+   keys): when the project set one and it names a non-public origin, every
+   resolution with no `resolvedUrl` is treated as coming from it, by the
+   same reasoning as ground 1 above. When none is configured, or it names
+   the public registry, an absent `resolvedUrl` is genuinely neither public
+   nor private evidence, and this still returns false rather than
+   guessing. A *user*-level `~/.npmrc` default registry or an
+   `npm_config_registry` environment variable is invisible here and to the
+   rest of the scan; a repository relying on either instead of a project
+   `.npmrc` must list the private names under `internalScopes` /
+   `internalPrefixes`. An npm lockfile written with its own
+   registry-resolved URLs omitted has the identical gap, for the identical
+   reason -- this check has no registry to judge such an entry against
+   beyond the same project `.npmrc` default.
+
+   Like `npmrcRegistryPins`, `npmrcDefaultRegistry` is a CONTROL INPUT in
+   pull-request mode: `scan.ts` sources it from the base ref
+   (`TrustedControls.npmrcDefaultRegistry`), not from the head side under
+   judgment, so a pull request cannot add or change this one `.npmrc` line
+   to silence this check for a package the same pull request introduces.
+
+A candidate excluded by either ground raises
+`publish-age-private-origin-skipped`, naming the package, rather than a
+silent drop -- the same "a suppressed decision must be reported" rule the
+allowlist skip below follows.
+
+One packument fetch per distinct package NAME, not per candidate:
+`findPublishAgeFindings` groups its candidates by name before fetching
+(the same shape `resolveUnknownPackages` uses for the identical reason),
+so a package resolved at two different versions across a monorepo's
+workspace manifests still costs one request, and every version found in
+its `versionTimes` map is judged against that one answer.
+
+That grouping is also what made this check's cache entry fail open for a
+while (found in review, 0.7.x). `scan.ts`'s
+`cachedFetchPackumentVersionTimes` caches a name's whole `versionTimes`
+map for a day (`DOWNLOADS_TTL_MS`), because the map grows every time the
+package publishes again and a day is the same staleness bound the
+downloads cache already accepts. A bound on STALENESS is not the same
+thing as a guarantee of COVERAGE, though, and the gap between those two
+is exactly this check's own reason to exist: a version published minutes
+after the cache entry was written is missing from that map for as long
+as the entry lives, which used to read as "not in the time map" -- the
+outcome described below -- for up to a full day, silently
+absorbing the exact fresh release this check exists to catch. The fix is
+that a cache hit is trusted only when it already carries every version
+the caller is currently asking about (`deps.fetchPackument`'s `versions`
+parameter, threaded from `findPublishAgeFindings`'s per-name group);
+anything short of that bypasses the cache, fetches live, and overwrites
+the stale entry. A hit can therefore only ever save a request, never
+manufacture a false "unknown" for a version the registry has actually
+published. See the two-run regression test in
+`scan-online-publish-age.test.ts`.
+
+Four outcomes are diagnostics rather than findings, and each says
+something a silent `continue` used to hide entirely. The registry not
+knowing the name at all (`publish-age-package-unknown`) and the registry
+knowing the name but not this exact resolved version, even after the
+live-refetch guarantee above (`publish-age-version-unknown`), are both
+loud now, not quiet notes. An earlier version of this section justified
+the silent form of the first case by claiming the unknown-package check
+already says the same thing under a different rule id -- that claim is
+false for the overwhelming majority of this check's own candidates.
+unknown-package's online resolution (`resolveUnknownPackages`) only ever
+re-examines an EXISTING `unknown-package` finding, and that finding is
+raised only for a name `newRegistryNames` surfaces -- which reads only
+`ctx.delta.changes`, the MANIFEST walk (`checks/existence.ts:20`). This
+check's candidates come from `ctx.delta.lockEntryChanges`, the LOCKFILE
+walk, which is overwhelmingly transitive entries no manifest ever names.
+A transitive dependency the registry no longer recognizes therefore never
+reaches `newRegistryNames`, never becomes an `unknown-package` finding,
+and so was never actually covered by the claim -- it would have vanished
+with no trace at all. The two diagnostics close that gap: no finding of
+this check's own (a name the registry cannot resolve at all is still
+`unknown-package`'s rule id to own, for the direct dependencies it does
+cover), but a visible record that the coverage gap exists for this
+candidate.
+
+The other two outcomes are also diagnostics, for the same "a suppressed
+decision must be reported" reason `checks/allow.ts`'s `allowClears`
+states for the offline `allow` list. An entry in the configured
+`minAgeAllow` list is skipped with `publish-age-allowed`, naming the
+`name@version`. And a lockfile entry that did not resolve from the public
+npm registry, or whose scope is pinned to a different registry in
+`.npmrc`, is excluded before any request goes out at all, with
+`publish-age-private-origin-skipped` naming the package -- see "Publish
+age never asks a private registry's own names" above for what that guard
+actually checks and why it is two independent conditions rather than one.
+
+Only a genuine registry error (a thrown fetch) was ever loud before this
+review, and stays loud: it raises `online-check-unreachable` and never
+silently drops the affected names, per the degrade rule above -- a
+network problem may cost this check a signal it would otherwise have
+added, but it may never manufacture a false sense that nothing needed
+checking. The four diagnostics above extend that same posture to every
+other path this check can decline a candidate through, rather than
+leaving the unreachable-registry case as the only one with a trace.
+
+The age comparison is a single inequality, `ageInDays(...) < minAgeDays`,
+deliberately not two separate conditions for "too new" and "future
+dated". A future-dated publish produces a negative age, and a negative
+number is less than any non-negative `minAgeDays` (config.ts's own
+validation refuses a negative `minAgeDays`), so the future case is the
+general rule's own boundary rather than a second branch that could drift
+from it -- including at `minAgeDays: 0`, where only a future timestamp
+(age exactly zero does not qualify; the comparison is strict) can still
+fire.
+
+`minAgeAllow` entries are exact `name@version` strings, matched by exact
+string equality against `"${candidate.name}@${candidate.version}"` --
+never a bare name, and never a semver range. Config validation
+(`config.ts`'s `isValidNameAtVersionEntry`) refuses an entry with no
+version half, including a scoped name's own leading `@` mistaken for one
+(`@acme/widget` alone is refused; `@acme/widget@1.0.0` is not), for the
+same reason the field comment on `ResolvedConfig.minAgeAllow` gives: a
+bare name would silence every future version of it too, which is the
+much bigger door `allow` already is, not the one-release exception this
+list exists to be.
+
+"Never a semver range" used to be prose only, not an enforced rule:
+`foo@^1.2.3` and `foo@1.x` both satisfied the old check, since it asked
+only for a non-empty version half. That was the identical bare-name
+problem wearing a version-shaped suffix -- a range silences every future
+release matching it, not one reviewed release. `isValidNameAtVersionEntry`
+now also runs the version half through `isExactVersion`
+(`EXACT_VERSION_PATTERN`): three required numeric fields, an optional
+dot-separated prerelease, an optional dot-separated build tag, no leading
+operator, no `x`/`*` wildcard segment, and no space -- which refuses a
+hyphen RANGE (`"1.0.0 - 2.0.0"`) for free, since a range's two endpoints
+are joined by whitespace and the pattern admits none, while a bare hyphen
+INSIDE a prerelease identifier (`"1.0.0-beta-2"`) is untouched by that and
+still names one exact release.
 
 ## The popularity list is a trust input, and it is sized for its own rule
 

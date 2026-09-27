@@ -95,6 +95,7 @@ const RULE_DESCRIPTIONS: Record<RuleId, string> = {
   'version-hygiene': 'A dependency specifier that does not pin a reviewable version',
   'dependency-confusion': 'A dependency name or resolution that crosses an internal boundary',
   'registered-squat': 'A recently published, near-unused package name',
+  'publish-age': 'A resolved dependency version published more recently than the configured minimum age',
 };
 
 // Severity to SARIF level. Total over Severity for the same reason

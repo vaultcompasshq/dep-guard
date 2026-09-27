@@ -474,6 +474,27 @@ describe('fetchPackument', () => {
       deprecated: false,
       unpublished: false,
       securityHolder: false,
+      versionTimes: { '1.0.0': '2026-08-01T00:00:00.000Z' },
+    });
+  });
+
+  test('versionTimes excludes the created/modified/unpublished keys but keeps every real version', async () => {
+    const fetchImpl = scriptedFetch([
+      jsonResponse({
+        time: {
+          created: '2020-01-01T00:00:00.000Z',
+          modified: '2026-08-01T00:00:00.000Z',
+          '1.0.0': '2020-01-01T00:00:00.000Z',
+          '2.0.0': '2022-06-15T00:00:00.000Z',
+        },
+        'dist-tags': { latest: '2.0.0' },
+        versions: { '1.0.0': {}, '2.0.0': {} },
+      }),
+    ]);
+    const packument = await fetchPackument('multi-version-pkg', { fetchImpl, sleepImpl: noSleep });
+    expect(packument?.versionTimes).toEqual({
+      '1.0.0': '2020-01-01T00:00:00.000Z',
+      '2.0.0': '2022-06-15T00:00:00.000Z',
     });
   });
 

@@ -10,6 +10,29 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+- New `--online` check: minimum publish age. Flags a resolved dependency
+  version published less than `minAgeDays` (a new `.dep-guard.json` key,
+  default 7) days ago, or with a future-dated publish timestamp at any
+  floor including `0`. Lets a repository align dep-guard's judgment with
+  its own Dependabot minimum-release-age cooldown, rather than only ever
+  answering that question through registered-squat's hardcoded thirty-day
+  window. Reads the lockfile's resolved versions: in `--base` mode, every
+  dependency added or changed in the diff; with no `--base`, every resolved
+  dependency in the lockfile. A new `minAgeAllow` key takes exact
+  `name@version` strings for a reviewed one-release exception. README,
+  CHANGELOG, and `docs/INVARIANTS.md` updated (fixes #58).
+
+- The CLI refuses an explicit `--base` that resolves to HEAD's own commit
+  or tree when `--trust-base` is also present, exiting 2 with a message
+  naming the comparison base as the tree being judged. Closes a quieter
+  companion to the case the Action's `base` input refusal already closes:
+  on an event that sets no `GITHUB_BASE_REF` (`push`, `merge_group`), an
+  explicit `--base` of HEAD was not previously caught, and it degrades
+  silently rather than failing, since HEAD compared against itself is
+  simply an empty delta with every comparison-based signal going quiet. A
+  bare `--base` with no `--trust-base` is unaffected: comparing a dirty
+  working tree against HEAD locally is legitimate (fixes #64).
+
 - The Action gained a `base` input, wired to the scanner's `--base` flag the
   same way `trust-base` is wired to `--trust-base`: on a pull_request event
   it defaults to `origin/$GITHUB_BASE_REF` and cannot be redirected there,

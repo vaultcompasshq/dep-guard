@@ -55,7 +55,7 @@ import { BASELINE_FILE, parseBaseline } from './baseline.js';
 import type { ResolvedConfig } from './checks/types.js';
 import { CONFIG_FILE, LOCAL_CONFIG_FILE, loadConfigFromTexts } from './config.js';
 import { NPMRC, isUsableRef } from './git-source.js';
-import { parseNpmrcPins } from './state.js';
+import { parseNpmrcDefaultRegistry, parseNpmrcPins } from './state.js';
 import { DepGuardError } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -134,6 +134,18 @@ export interface TrustedControls {
    * has anything to compare against, which is why they come from the base.
    */
   npmrcPins: Map<string, string>;
+  /**
+   * The base ref's .npmrc unscoped default registry, or null when the base
+   * carries none. Sourced from the base for the same reason npmrcPins is:
+   * online/publish-age.ts's isNonPublicResolution treats a resolved
+   * lockfile entry with no resolvedUrl as private only when this names a
+   * non-public registry, so a pull request that ADDED or CHANGED this line
+   * would otherwise be able to silence publish-age's check of a package it
+   * introduces via a pnpm integrity-only resolution -- the exact "control
+   * input a pull request can rewrite" this base-sourcing pattern exists to
+   * close.
+   */
+  npmrcDefaultRegistry: string | null;
   /** True when the head proposes a different config. */
   configChanged: boolean;
   /** True when the head proposes a different baseline. */
@@ -290,6 +302,71 @@ export async function assertTrustBaseUsable(root: string, ref: string): Promise<
         'base branch (for example origin/main), not the head or merge commit. Nothing was ' +
         'checked.',
       'trust-base-same-tree'
+    );
+  }
+}
+
+/**
+ * Refuse an explicit `--base` that resolves to the same commit or the same
+ * tree as HEAD, when `--trust-base` is also present (issue #64).
+ *
+ * `assertTrustBaseUsable` already refuses a trust base that IS the head
+ * commit or shares its tree, because a trust base drawn from the tree under
+ * judgment puts the whole boundary back where it started. `--base` has the
+ * companion failure: on an event that sets no GITHUB_BASE_REF (`push`,
+ * `merge_group`), an explicit `--base` of HEAD is not caught by anything
+ * pull-request mode does today, and it is quieter than a misconfigured
+ * trust base -- the run does not fail, it just computes an empty delta,
+ * because HEAD compared against itself has nothing changed. Every
+ * comparison-based signal goes quiet with no diagnostic saying why.
+ *
+ * Reuses the exact same commit/tree resolution `assertTrustBaseUsable`
+ * uses, for the same reason that function compares resolved commits and
+ * trees rather than ref spellings: two different names (a branch, a tag, a
+ * raw SHA) for one commit are one hole, and a merge ref can carry an
+ * identical tree under a different commit whenever the base has not moved.
+ *
+ * Deliberately narrow. This is not called when `--trust-base` is absent:
+ * comparing the dirty working tree against HEAD with a bare `--base HEAD`
+ * and no `--trust-base` is a legitimate local operation (the case issue
+ * #64 explicitly carves out), and refusing an unresolvable `--base` ref at
+ * all is loadStates' job, not this function's -- a ref that does not
+ * resolve here is left alone so that the existing, more specific
+ * unresolvable-ref failure is the one a user sees.
+ */
+export async function assertBaseNotHeadUnderTrustBase(root: string, baseRef: string): Promise<void> {
+  const base = await resolve(root, baseRef, 'commit');
+  if (base === null) {
+    // An unresolvable --base is loadStates' failure to raise, not this
+    // one's -- returning here lets that happen with its own, more specific
+    // message rather than a confusing one about HEAD.
+    return;
+  }
+  const head = await resolve(root, 'HEAD', 'commit');
+  if (head === null) {
+    // No head commit to compare against at all; loadStates will fail on
+    // this long before it matters which message explains it.
+    return;
+  }
+  if (base === head) {
+    throw new DepGuardError(
+      `refusing "--base ${baseRef}" together with --trust-base: it resolves to ${head}, the ` +
+        'same commit as HEAD, so the comparison base is the tree being judged and every ' +
+        'dependency would read as unchanged. Pass the branch this change is actually based ' +
+        'on. Nothing was checked.',
+      'base-is-head'
+    );
+  }
+
+  const baseTree = await resolve(root, baseRef, 'tree');
+  const headTree = await resolve(root, 'HEAD', 'tree');
+  if (baseTree !== null && headTree !== null && baseTree === headTree) {
+    throw new DepGuardError(
+      `refusing "--base ${baseRef}" together with --trust-base: it is a different commit from ` +
+        `HEAD but carries an identical tree (${headTree}), so the comparison base is the tree ` +
+        'being judged and every dependency would read as unchanged. Pass the branch this ' +
+        'change is actually based on. Nothing was checked.',
+      'base-same-tree'
     );
   }
 }
@@ -739,6 +816,10 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
   const headNpmrcPins = parseNpmrcPins(
     headNpmrcFile !== null && isRegularFileMode(headNpmrcFile.mode) ? headNpmrcFile.text : null
   );
+  // Same base-file text already validated above; no second read.
+  const npmrcDefaultRegistry = parseNpmrcDefaultRegistry(
+    baseNpmrcFile === null ? null : baseNpmrcFile.text
+  );
 
   // The config input is the PAIR of files, because that is what the
   // overlay makes it. A pull request that leaves .dep-guard.json alone and
@@ -821,6 +902,7 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
     config,
     baseline,
     npmrcPins,
+    npmrcDefaultRegistry,
     configChanged,
     baselineChanged,
     npmrcChanged,

@@ -23,11 +23,12 @@ import {
   resolveScanRoot,
 } from './git-source.js';
 import type { ScanMode } from './git-source.js';
-import { loadTrustedControls } from './trust-base.js';
+import { assertBaseNotHeadUnderTrustBase, loadTrustedControls } from './trust-base.js';
 import type { ControlShapeChange, TrustedControls } from './trust-base.js';
 import { DepGuardError } from './types.js';
 import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
 import { applyTyposquatAsymmetry } from './online/asymmetry.js';
+import { findPublishAgeFindings } from './online/publish-age.js';
 import { findRegisteredSquats } from './online/registered-squat.js';
 import { resolveUnknownPackages } from './online/unknown-package.js';
 import {
@@ -216,9 +217,18 @@ function runChecks(
   corpus: Corpus,
   config: ResolvedConfig,
   delta: DependencyDelta,
-  npmrcRegistryPins: Map<string, string>
+  npmrcRegistryPins: Map<string, string>,
+  npmrcDefaultRegistry: string | null
 ): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
-  const ctx: CheckContext = { corpus, config, delta, npmrcRegistryPins, diagnostics: [], allowed: [] };
+  const ctx: CheckContext = {
+    corpus,
+    config,
+    delta,
+    npmrcRegistryPins,
+    npmrcDefaultRegistry,
+    diagnostics: [],
+    allowed: [],
+  };
   const findings: Omit<Finding, 'fingerprint'>[] = [];
   for (const check of CHECKS) {
     findings.push(...check(ctx));
@@ -354,7 +364,60 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
   return packument;
 }
 
-// The three online steps, in the order the run's one wall-clock budget is
+// publish-age.ts's own cached fetch. Deliberately keyed and cached
+// DIFFERENTLY from cachedFetchPackument's `created:` entries just above,
+// even though both read the same underlying packument: `created:` is safe
+// to cache forever because a package's creation date never changes once
+// set, but a version-times MAP grows every time the package publishes
+// again, and the whole point of this check is to catch a version that was
+// published recently -- exactly the version most likely to be missing from
+// a map fetched before that publish happened. Caching it forever would make
+// the check permanently blind to a name's newest release on any machine
+// that happened to query it before that release went out. DOWNLOADS_TTL_MS
+// (a day) bounds that staleness window the same way it already bounds the
+// downloads cache's, and a miss (the name does not exist at all) is never
+// cached, for the same not-yet-registered reason cachedFetchPackument's own
+// miss is not cached above.
+//
+// The TTL bound alone is not enough, and used to be the whole story: a
+// cache entry written just before a package published a fresh release
+// stayed the answer for up to a full day, so the exact release this check
+// exists to catch -- a lockfile bump that landed minutes ago -- read as
+// "not in the time map" and was silently treated as a note rather than a
+// finding for as long as the entry lived. `requestedVersions` closes that
+// gap: a cache hit is only trusted when its map already carries every
+// version this call was actually asked about. Anything short of that
+// bypasses the cache entirely, asks the registry live, and overwrites the
+// stale entry with the fresh answer -- so a hit can only ever save a
+// request, never manufacture a false "unknown" for a version the registry
+// has actually published. See the two-run regression test in
+// scan-online-publish-age.test.ts.
+async function cachedFetchPackumentVersionTimes(
+  name: string,
+  requestedVersions: string[]
+): Promise<{ versionTimes: Record<string, string> } | null> {
+  const store = sharedCache();
+  const hit = store.get(`version-times:${name}`);
+  if (hit !== undefined) {
+    const cached = hit as Record<string, string>;
+    if (requestedVersions.every((version) => version in cached)) {
+      return { versionTimes: cached };
+    }
+    // A version this call needs is missing from the cached map -- refetch
+    // live rather than serve a map known to be incomplete for this
+    // question, and fall through to the same live-fetch-and-overwrite path
+    // a cold cache takes.
+  }
+  const packument = await fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
+  if (packument === null) {
+    return null;
+  }
+  store.set(`version-times:${name}`, packument.versionTimes, DOWNLOADS_TTL_MS);
+  store.save();
+  return { versionTimes: packument.versionTimes };
+}
+
+// The four online steps, in the order the run's one wall-clock budget is
 // spent on them. The order is a priority decision, not an accident:
 //
 //  1. unknown-package resolution, because it is the only step that can
@@ -364,11 +427,12 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
 //     is the one worth having.
 //  2. typosquat popularity asymmetry, which escalates an existing low.
 //  3. registered-squat, which adds a new medium.
+//  4. publish-age, which adds a new high.
 //
-// Steps 2 and 3 both only ever add or escalate, so a budget spent before
-// them costs a signal that would not have existed offline either. Step 1
-// is the one whose omission leaves a user with a blocking finding they
-// have no way to clear, which is why it goes first.
+// Steps 2 through 4 all only ever add or escalate, so a budget spent
+// before them costs a signal that would not have existed offline either.
+// Step 1 is the one whose omission leaves a user with a blocking finding
+// they have no way to clear, which is why it goes first.
 //
 // Never throws, per docs/INVARIANTS.md: each step owns its own error
 // handling and turns a failure into a diagnostic, because --online
@@ -447,7 +511,18 @@ async function enrichOnline(
     ctx.diagnostics,
     deadline
   );
-  return [...resolved, ...registeredSquats];
+
+  // 4. publish-age, added last for the same reason registered-squat is
+  // third: it only ever ADDS a new finding, so a budget spent before it
+  // costs a signal that would not have existed offline either, unlike
+  // step 1's removals.
+  const publishAgeFindings = await findPublishAgeFindings(
+    ctx,
+    { fetchPackument: cachedFetchPackumentVersionTimes },
+    ctx.diagnostics,
+    deadline
+  );
+  return [...resolved, ...registeredSquats, ...publishAgeFindings];
 }
 
 interface RunInfo {
@@ -644,6 +719,16 @@ export async function scan(opts: {
   // existed.
   const controls =
     opts.trustBase === undefined ? null : await loadTrustedControls(root, opts.trustBase);
+  // Issue #64's companion refusal to assertTrustBaseUsable's own: an
+  // explicit --base of HEAD is not itself a trust-base misconfiguration,
+  // so loadTrustedControls above would not have caught it, but it is
+  // exactly as empty a comparison once --trust-base is also present. Gated
+  // on controls !== null (opts.trustBase given) and mode.kind === 'base'
+  // (opts.base given): a local --base run with no --trust-base is
+  // untouched, per the issue.
+  if (controls !== null && opts.mode.kind === 'base') {
+    await assertBaseNotHeadUnderTrustBase(root, opts.mode.ref);
+  }
   const config = applyFailOnOverride(controls?.config ?? loadConfig(root), opts.failOn);
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const statePair = await loadStates(opts.repoRoot, opts.mode);
@@ -710,11 +795,18 @@ export async function scan(opts: {
   // had just been removed. loadStates still reads the head-side .npmrc as
   // it always did; its pins are simply not what the rule is judged
   // against here.
+  //
+  // The unscoped default registry is the same kind of control input, for
+  // the same reason: online/publish-age.ts's isNonPublicResolution reads
+  // it to judge a pnpm integrity-only resolution, and sourcing it from
+  // statePair.after would let a pull request silence that check for a
+  // package it introduces by adding or changing this one .npmrc line.
   const { findings: checkedFindings, ctx } = runChecks(
     corpus,
     config,
     delta,
-    controls === null ? statePair.after.npmrcRegistryPins : controls.npmrcPins
+    controls === null ? statePair.after.npmrcRegistryPins : controls.npmrcPins,
+    controls === null ? statePair.after.npmrcDefaultRegistry : controls.npmrcDefaultRegistry
   );
   const rawFindings = resolveOnline(config, opts.online)
     ? await enrichOnline(checkedFindings, ctx)
@@ -812,12 +904,14 @@ function syntheticDelta(name: string): DependencyDelta {
 // repository with no history) so a caller -- the CLI's `dep-guard check`,
 // and later an MCP tool -- can treat both results identically.
 //
-// npmrcRegistryPins is intentionally empty rather than read from the real
-// repository: the synthetic delta carries no lockfile resolution for the
-// dependency-confusion pin-mismatch rule to compare against a pin, so that
-// rule can never fire here regardless; the internal-name rule (the other
-// half of confusionCheck) still runs, since it only needs config and the
-// name itself.
+// npmrcRegistryPins is intentionally empty, and npmrcDefaultRegistry
+// intentionally null, rather than read from the real repository: the
+// synthetic delta carries no lockfile resolution at all -- neither for the
+// dependency-confusion pin-mismatch rule to compare against a pin, nor for
+// publish-age's isNonPublicResolution to judge against a default registry
+// -- so neither rule can act on either value here regardless; the
+// internal-name rule (the other half of confusionCheck) still runs, since
+// it only needs config and the name itself.
 export async function checkSingle(opts: {
   repoRoot: string;
   name: string;
@@ -863,7 +957,7 @@ export async function checkSingle(opts: {
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const delta = syntheticDelta(opts.name);
 
-  const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map());
+  const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map(), null);
   const rawFindings = resolveOnline(config, opts.online)
     ? await enrichOnline(checkedFindings, ctx)
     : checkedFindings;
