@@ -150,7 +150,12 @@ export interface TrustedControls {
   configChanged: boolean;
   /** True when the head proposes a different baseline. */
   baselineChanged: boolean;
-  /** True when the head proposes different .npmrc scope pins. */
+  /**
+   * True when the head proposes different .npmrc scope pins, a different
+   * unscoped default registry, or a shape change (issue #66 added the
+   * default-registry half: editing only that line changes neither the pins
+   * nor the shape, and used to be reported as no change at all).
+   */
   npmrcChanged: boolean;
   /** How the head changed the SHAPE of a config file, or null. */
   configShapeChange: ControlShapeChange | null;
@@ -646,10 +651,22 @@ function pinsDiffer(base: Map<string, string>, head: Map<string, string>): boole
   return false;
 }
 
-/** The short parenthetical for an .npmrc proposal, or null. */
+/**
+ * The short parenthetical for an .npmrc proposal, or null.
+ *
+ * Takes the unscoped default registry alongside the scope pins (issue #66):
+ * `npmrcChanged` ORs in a difference between `baseDefaultRegistry` and
+ * `headDefaultRegistry` (see its own computation below), and a pull request
+ * that touches only that line -- no scope pin added, removed, or repointed --
+ * would otherwise reach here with all three pin-derived lists empty and
+ * report nothing at all, which is the same "control input changed, report
+ * says no" misreport this whole file exists to close.
+ */
 function describeNpmrcChange(
   base: Map<string, string>,
-  head: Map<string, string>
+  head: Map<string, string>,
+  baseDefaultRegistry: string | null,
+  headDefaultRegistry: string | null
 ): string | null {
   const added: string[] = [];
   const removed: string[] = [];
@@ -677,6 +694,9 @@ function describeNpmrcChange(
   }
   if (added.length > 0) {
     parts.push(`proposed: pin ${nameList(added.sort())}`);
+  }
+  if (baseDefaultRegistry !== headDefaultRegistry) {
+    parts.push('proposed: default registry changed');
   }
   return parts.length === 0 ? null : parts.join('; ');
 }
@@ -820,6 +840,14 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
   const npmrcDefaultRegistry = parseNpmrcDefaultRegistry(
     baseNpmrcFile === null ? null : baseNpmrcFile.text
   );
+  // The head side of the same comparison (issue #66): read the same way
+  // headNpmrcPins is, including the isRegularFileMode guard, so a head
+  // .npmrc turned into a symlink is not read as though its target's text
+  // were the default registry line (npmrcShapeChange below is what reports
+  // that case; this is purely the CONTENT comparison's other half).
+  const headNpmrcDefaultRegistry = parseNpmrcDefaultRegistry(
+    headNpmrcFile !== null && isRegularFileMode(headNpmrcFile.mode) ? headNpmrcFile.text : null
+  );
 
   // The config input is the PAIR of files, because that is what the
   // overlay makes it. A pull request that leaves .dep-guard.json alone and
@@ -844,12 +872,21 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
   );
   const baselineChanged = baselineContentChanged || baselineShapeChange !== null;
 
-  // Pins OR shape, the same pairing as the other two. The shape half is
-  // what catches an .npmrc turned into a symlink whose target carries the
-  // base's exact pins: the pin comparison sees no difference at all, and
-  // the link target can be widened later in a diff that never mentions
-  // .npmrc.
-  const npmrcChanged = pinsDiffer(npmrcPins, headNpmrcPins) || npmrcShapeChange !== null;
+  // Pins, OR the default registry, OR shape. The shape half is what catches
+  // an .npmrc turned into a symlink whose target carries the base's exact
+  // pins: the pin comparison sees no difference at all, and the link target
+  // can be widened later in a diff that never mentions .npmrc. The default
+  // registry half closes issue #66: a pull request that edits only the
+  // unscoped `registry=` line changes neither a scope pin nor the file's
+  // shape, so without this it was reported as no change at all while
+  // silently deciding a different answer for online/publish-age.ts's
+  // isNonPublicResolution (and, since #70, unknown-package's and
+  // registered-squat's shared isNonPublicName) on every pnpm-resolved or
+  // no-.npmrc-pin package in the repository.
+  const npmrcChanged =
+    pinsDiffer(npmrcPins, headNpmrcPins) ||
+    npmrcShapeChange !== null ||
+    npmrcDefaultRegistry !== headNpmrcDefaultRegistry;
 
   // "Added" is the first-adoption case: the head carries a control input
   // the base does not. The run uses the defaults (or an empty baseline),
@@ -889,8 +926,14 @@ export async function loadTrustedControls(root: string, ref: string): Promise<Tr
   if (npmrcChanged) {
     proposals.push(
       npmrcAdded
-        ? withDetail(NPMRC_ADDED_LINE, describeNpmrcChange(npmrcPins, headNpmrcPins))
-        : withDetail(NPMRC_PROPOSAL_LINE, describeNpmrcChange(npmrcPins, headNpmrcPins))
+        ? withDetail(
+            NPMRC_ADDED_LINE,
+            describeNpmrcChange(npmrcPins, headNpmrcPins, npmrcDefaultRegistry, headNpmrcDefaultRegistry)
+          )
+        : withDetail(
+            NPMRC_PROPOSAL_LINE,
+            describeNpmrcChange(npmrcPins, headNpmrcPins, npmrcDefaultRegistry, headNpmrcDefaultRegistry)
+          )
     );
   }
   if (npmrcShapeChange !== null) {

@@ -451,6 +451,58 @@ describe('scan(): publish-age through the real delta', () => {
     expect(finding).toMatchObject({ packageName: 'private-thing' });
   });
 
+  // Issue #66: the unscoped default registry is a control input read from
+  // the base ref in pull-request mode (scan.ts sources
+  // controls.npmrcDefaultRegistry, not statePair.after's), same as the
+  // scope pins -- that sourcing already worked. What trust-base.ts got
+  // wrong is the REPORT: npmrcChanged used to OR together only pinsDiffer
+  // and the shape change, so a pull request editing nothing but the
+  // `registry=` line was reported as an unchanged .npmrc even though the
+  // run judged the pull request's own new dependency against the BASE's
+  // private default the whole time. This proves both halves at once: the
+  // base value is still honoured (no fetch), and the edit is now visible
+  // as a proposal.
+  test('trust-base: a pull request that removes only the default registry line is honoured from the base and reported as a proposal', async () => {
+    const dir = initRepo();
+    // Base: a pnpm lockfile entry with no resolvedUrl (pnpm's ordinary
+    // shape) under a project .npmrc naming a private default registry.
+    writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', version: '1.0.0', dependencies: {} })
+    );
+    writeFileSync(path.join(dir, 'pnpm-lock.yaml'), pnpmLockYaml({ 'private-thing': '1.0.0' }));
+    writeFileSync(path.join(dir, '.npmrc'), 'registry=https://npm.corp.example/\n');
+    execFileSync('git', ['add', '.'], { cwd: dir });
+    execFileSync('git', ['commit', '-q', '-m', 'base state with a private default registry'], { cwd: dir });
+    execFileSync('git', ['branch', '-M', 'main'], { cwd: dir });
+    execFileSync('git', ['checkout', '-q', '-b', 'feature'], { cwd: dir });
+    // The pull request: same lockfile, but the .npmrc's only line -- the
+    // default registry -- is gone. The file itself still exists (a regular,
+    // empty file), so neither the scope pins nor the file's shape changed.
+    writeFileSync(path.join(dir, '.npmrc'), '');
+    execFileSync('git', ['add', '.'], { cwd: dir });
+    execFileSync('git', ['commit', '-q', '-m', 'remove the default registry line'], { cwd: dir });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: { kind: 'audit' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+      trustBase: 'main',
+    });
+
+    // Judged against the BASE's private default: never sent to the wire.
+    expect(fetchPackumentMock).not.toHaveBeenCalled();
+    expect(result.run.diagnostics.some((d) => d.code === 'publish-age-private-origin-skipped')).toBe(true);
+    expect(result.findings.some((f) => f.ruleId === 'publish-age')).toBe(false);
+    // And the edit is no longer invisible: it is reported as a proposal.
+    expect(result.trustBase?.npmrcChanged).toBe(true);
+    expect(result.trustBase?.npmrcShapeChange).toBeNull();
+    expect(
+      result.trustBase?.proposals.some((p) => p.includes('default registry changed'))
+    ).toBe(true);
+  });
+
   // Folded in from a reviewer's leftover scratch file (zz-review-cache2):
   // the pure cache-HIT path, where a second scan's cache already carries
   // every version the run asks about and must be served from it with no
