@@ -184,6 +184,12 @@ failure rather than blocking:
   different registry in `.npmrc` -- a private dependency's name is not put
   on the wire to a public service just to price this heuristic.
 
+A registry error in any of the four checks degrades to a diagnostic
+rather than a block, the design every check above already follows for its
+own network failure: it never turns an otherwise-clean scan's exit 0 into
+an exit 1 by itself, so a registry outage does not turn a required CI
+check red on its own.
+
 All four share one wall-clock budget of twenty seconds per run, not per
 request. Once it is spent the remaining lookups are skipped, the affected
 findings keep exactly the result the offline checks gave them, and an
@@ -319,6 +325,13 @@ scanning enabled).
 The SARIF is uploaded *before* the run is failed, so a scan that found
 something still gets its findings into code scanning. `security-events:
 write` is required for the upload; `actions/checkout` must run first.
+
+Publish age (like the other three `--online` checks) needs `online: 'true'`
+set on the Action itself, not merely in `.dep-guard.json`: the Action's own
+`online` input defaults to `false` and, in that case, always appends
+`--no-online` to the scan command, which overrides a committed
+`"online": true` rather than merely leaving it alone (see "Online checks"
+above).
 
 ### Where the scanner comes from
 

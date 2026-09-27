@@ -22,11 +22,15 @@ export interface ResolvedConfig {
   // finding. Lets a repository align dep-guard's "too new to trust"
   // judgment with its own Dependabot minimum-release-age cooldown (#58).
   minAgeDays: number;
-  // Exact `name@version` strings the publish-age check skips outright,
-  // with a note rather than silence. Deliberately name@version, not a bare
-  // name: allowing a name would keep silencing every future version of it
-  // too, which is a much bigger door than the one this list is for -- a
-  // reviewed exception for one specific fresh release.
+  // Exact `name@version` strings the publish-age check skips, recording a
+  // `publish-age-allowed` diagnostic naming the entry rather than dropping
+  // it in silence. Deliberately name@version, not a bare name, and
+  // deliberately an EXACT version, not a semver range (config.ts's
+  // isValidNameAtVersionEntry rejects both a bare name and a range like
+  // "^1.2.3" or "1.x" at load time): either one would keep silencing every
+  // future version matching it, which is a much bigger door than the one
+  // this list is for -- a reviewed exception for one specific fresh
+  // release.
   minAgeAllow: string[];
 }
 
