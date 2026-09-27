@@ -10,17 +10,39 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
-- New `--online` check: minimum publish age. Flags a resolved dependency
-  version published less than `minAgeDays` (a new `.dep-guard.json` key,
-  default 7) days ago, or with a future-dated publish timestamp at any
-  floor including `0`. Lets a repository align dep-guard's judgment with
-  its own Dependabot minimum-release-age cooldown, rather than only ever
-  answering that question through registered-squat's hardcoded thirty-day
-  window. Reads the lockfile's resolved versions: in `--base` mode, every
-  dependency added or changed in the diff; with no `--base`, every resolved
-  dependency in the lockfile. A new `minAgeAllow` key takes exact
-  `name@version` strings for a reviewed one-release exception. README,
-  CHANGELOG, and `docs/INVARIANTS.md` updated (fixes #58).
+## [0.8.0] - 2026-09-26
+
+- New `--online` check: minimum publish age. Only runs under `--online`
+  (gated the same way as the other three registry-backed checks), and
+  flags a resolved dependency version published less than `minAgeDays` (a
+  new `.dep-guard.json` key, default 7) days ago, or with a future-dated
+  publish timestamp at any floor including `0`. Lets a repository align
+  dep-guard's judgment with its own Dependabot minimum-release-age
+  cooldown, rather than only ever answering that question through
+  registered-squat's hardcoded thirty-day window. Reads the lockfile's
+  resolved versions, not manifest ranges: in `--base` mode, every
+  dependency whose resolved version was added or changed in the diff; with
+  no `--base`, every resolved dependency in the lockfile. A package the
+  registry does not know, and a resolved version still missing from its
+  publish-time record after a live lookup, each raise no finding of their
+  own but are never silent: `publish-age-package-unknown` and
+  `publish-age-version-unknown` diagnostics say so, because this check's
+  own candidates come from the lockfile walk -- overwhelmingly transitive
+  entries no manifest names, which unknown-package's own online resolution
+  never sees. A new `minAgeAllow` key takes exact `name@version` strings
+  for a reviewed one-release exception, never a semver range, and a
+  cleared entry is reported with its own `publish-age-allowed` diagnostic
+  rather than passed over in silence. A lockfile entry that did not
+  resolve from the public npm registry, or whose scope is pinned to a
+  different registry in `.npmrc`, is excluded before it is ever sent to
+  the registry, with a `publish-age-private-origin-skipped` diagnostic
+  naming it; a pnpm entry with no recorded resolution URL (pnpm never
+  records which registry served an ordinary resolution) is judged instead
+  against the project `.npmrc`'s own unscoped default registry, and on a
+  pull request that default registry is read from the base ref alongside
+  the config, the baseline and the scope pins, so a pull request cannot
+  add or change it to silence the check for a package it introduces.
+  README, CHANGELOG, and `docs/INVARIANTS.md` updated (fixes #58).
 
 - The CLI refuses an explicit `--base` that resolves to HEAD's own commit
   or tree when `--trust-base` is also present, exiting 2 with a message
