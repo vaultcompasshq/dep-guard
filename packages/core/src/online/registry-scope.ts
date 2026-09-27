@@ -1,4 +1,4 @@
-// The name-level rule shared by every online check that must decide,
+// The name-level rule shared by all four online checks that must decide,
 // before any request leaves the machine, whether a package NAME is
 // resolved from the public npm registry or from something the project has
 // declared private through its own .npmrc.
@@ -7,19 +7,27 @@
 // (issue #70, from the review of #58): unknown-package and registered-squat
 // used to send every manifest-declared name to registry.npmjs.org
 // regardless of the project's own .npmrc scope pins or default registry --
-// the exact leak publish-age was built to avoid, just reached through the
-// two checks that predate it. All three checks have to agree on the
-// answer, so it is written once here and every online check reads it from
-// this one place rather than keeping its own copy.
+// the exact leak publish-age was built to avoid, just reached through two
+// checks that predate it. A later independent review found the FOURTH
+// online check, applyTyposquatAsymmetry (online/asymmetry.ts), still
+// outside this rule entirely -- it had no internalScopes/internalPrefixes
+// filter of its own either -- so it is wired in too. All four checks have
+// to agree on the answer, so it is written once here and every online
+// check reads it from this one place rather than keeping its own copy.
 //
 // This is the NAME-level half of the decision only: it never reads a
-// resolvedUrl, because unknown-package's and registered-squat's own
-// candidates come from the manifest walk (candidates.ts's
-// newRegistryNames), which carries no resolved lockfile URL at all.
+// resolvedUrl, because unknown-package's, registered-squat's, and
+// applyTyposquatAsymmetry's own candidates all come from a manifest-level
+// walk (candidates.ts's newRegistryNames, or an existing typosquat
+// finding's packageName), which carries no resolved lockfile URL at all.
 // publish-age's own isNonPublicResolution (online/publish-age.ts) is the
-// RESOLUTION-level check built on top of this one: it defers to this
-// function for the scope-pin and no-resolvedUrl cases, and judges the
-// resolvedUrl itself only when neither applies.
+// RESOLUTION-level check built on top of this one, and the two are not
+// interchangeable: a PRIVATE pin decides on its own regardless of a
+// resolvedUrl, but a PUBLIC (or absent) pin does NOT let this function
+// short-circuit a resolvedUrl that is actually present -- publish-age
+// consults the resolvedUrl's own origin first in that case, and only
+// falls back to this function when there is no resolvedUrl to read at
+// all. See the ordered list on isNonPublicResolution itself.
 import { scopeOf } from '../checks/confusion.js';
 import type { CheckContext } from '../checks/types.js';
 import { originOf } from '../resolution.js';

@@ -14,7 +14,24 @@
 // The 2,000/week floor is a measured starting point (see the design doc),
 // not a permanent constant -- refine it via the dogfood harness's --online
 // mode.
+//
+// This is the fourth online check, and until an independent review after
+// issues 66/67/70 it was the one left outside the shared npmrc-scoped rule
+// (online/registry-scope.ts's isNonPublicName): it sent every low
+// typosquat finding's packageName to the downloads API regardless of
+// internalScopes/internalPrefixes or the project's own .npmrc, the exact
+// leak shape unknown-package and registered-squat had before #70. It now
+// filters the same way they do, before the fetch: an internal name is
+// dropped silently (the same silent-by-design filter every other check
+// applies -- an adopter's own configured list needs no diagnostic
+// reminding them of it), and a name isNonPublicName excludes is dropped
+// with its own `typosquat-asymmetry-private-origin-skipped` diagnostic
+// naming it, the same visibility the other three checks' own npmrc-derived
+// skips give.
 
+import type { CheckContext } from '../checks/types.js';
+import { isInternalName } from '../checks/allow.js';
+import { isNonPublicName } from './registry-scope.js';
 import type { DownloadCountsResult } from './registry-client.js';
 import type { Diagnostic, Finding } from '../types.js';
 
@@ -26,10 +43,30 @@ export interface AsymmetryDeps {
 
 export async function applyTyposquatAsymmetry(
   findings: Omit<Finding, 'fingerprint'>[],
+  ctx: CheckContext,
   deps: AsymmetryDeps,
   diagnostics: Diagnostic[]
 ): Promise<void> {
-  const candidates = findings.filter((f) => f.ruleId === 'typosquat' && f.severity === 'low');
+  const candidates: Omit<Finding, 'fingerprint'>[] = [];
+  for (const finding of findings) {
+    if (finding.ruleId !== 'typosquat' || finding.severity !== 'low') {
+      continue;
+    }
+    if (isInternalName(finding.packageName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
+      continue;
+    }
+    if (isNonPublicName(ctx, finding.packageName)) {
+      diagnostics.push({
+        code: 'typosquat-asymmetry-private-origin-skipped',
+        message:
+          `typosquat popularity asymmetry: "${finding.packageName}" is declared private by the ` +
+          "project's .npmrc (its scope is pinned to another registry, or the default registry is " +
+          'private), so it was not sent to the downloads API',
+      });
+      continue;
+    }
+    candidates.push(finding);
+  }
   if (candidates.length === 0) {
     return;
   }

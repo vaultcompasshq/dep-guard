@@ -437,6 +437,51 @@ describe('findRegisteredSquats', () => {
     expect(findings.map((f) => f.packageName)).toEqual(['public-fresh-thing']);
   });
 
+  // The two precedence cases isNonPublicName itself is built around (issue
+  // #67, re-verified per-check from the independent review): a pin decides
+  // by its own origin and always outranks the default registry.
+  test('a scope pinned to the public registry is checked even under a private project default registry', async () => {
+    const ctx = makeContext([makeChange({ name: '@types/node' })]);
+    ctx.config = { ...ctx.config, internalScopes: [], internalPrefixes: [] };
+    ctx.npmrcRegistryPins.set('@types', 'https://registry.npmjs.org/');
+    ctx.npmrcDefaultRegistry = 'https://npm.acme.example/';
+    const askedDownloads: string[][] = [];
+    const deps = {
+      fetchWeeklyDownloads: async (names: string[]) => {
+        askedDownloads.push(names);
+        return { counts: new Map(names.map((n) => [n, 1])), noRecord: new Set<string>() };
+      },
+      fetchPackument: async () => ({ createdAt: NEW_DATE }),
+    };
+
+    const findings = await findRegisteredSquats(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(askedDownloads).toEqual([['@types/node']]);
+    expect(findings.map((f) => f.packageName)).toEqual(['@types/node']);
+  });
+
+  test('an unscoped name with no pin is skipped under a private project default registry', async () => {
+    const ctx = makeContext([makeChange({ name: 'unscoped-thing' })]);
+    ctx.config = { ...ctx.config, internalScopes: [], internalPrefixes: [] };
+    ctx.npmrcDefaultRegistry = 'https://npm.acme.example/';
+    const askedDownloads: string[][] = [];
+    const deps = {
+      fetchWeeklyDownloads: async (names: string[]) => {
+        askedDownloads.push(names);
+        return { counts: new Map(names.map((n) => [n, 1])), noRecord: new Set<string>() };
+      },
+      fetchPackument: async () => ({ createdAt: NEW_DATE }),
+    };
+
+    const findings = await findRegisteredSquats(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(askedDownloads).toEqual([]);
+    expect(findings).toEqual([]);
+    expect(ctx.diagnostics.some((d) => d.code === 'registered-squat-private-origin-skipped')).toBe(
+      true
+    );
+  });
+
   test('a spent per-run deadline skips the whole check and records why', async () => {
     const ctx = makeContext([makeChange({ name: 'react-codeshift' })]);
     const diagnostics: Diagnostic[] = [];

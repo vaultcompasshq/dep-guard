@@ -426,6 +426,58 @@ describe('resolveUnknownPackages', () => {
     expect(result.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('critical');
   });
 
+  // The two precedence cases isNonPublicName itself is built around (issue
+  // #67, re-verified per-check from the independent review): a pin decides
+  // by its own origin and always outranks the default registry.
+  test('a scope pinned to the public registry is checked even under a private project default registry', async () => {
+    const asked: string[] = [];
+    const ctx = makeContext();
+    ctx.npmrcRegistryPins.set('@types', 'https://registry.npmjs.org/');
+    ctx.npmrcDefaultRegistry = 'https://npm.acme.example/';
+    const findings = [unknownPackageFinding('@types/node')];
+
+    const result = await resolveUnknownPackages(
+      findings,
+      ctx,
+      {
+        fetchPackument: async (name: string) => {
+          asked.push(name);
+          return null;
+        },
+      },
+      [],
+      freshDeadline()
+    );
+
+    expect(asked).toEqual(['@types/node']);
+    expect(result.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('critical');
+  });
+
+  test('an unscoped name with no pin is skipped under a private project default registry', async () => {
+    const asked: string[] = [];
+    const diagnostics: Diagnostic[] = [];
+    const ctx = makeContext();
+    ctx.npmrcDefaultRegistry = 'https://npm.acme.example/';
+    const findings = [unknownPackageFinding('unscoped-thing')];
+
+    const result = await resolveUnknownPackages(
+      findings,
+      ctx,
+      {
+        fetchPackument: async (name: string) => {
+          asked.push(name);
+          return null;
+        },
+      },
+      diagnostics,
+      freshDeadline()
+    );
+
+    expect(asked).toEqual([]);
+    expect(result.find((f) => f.ruleId === 'unknown-package')?.severity).toBe('high');
+    expect(diagnostics.some((d) => d.code === 'unknown-package-private-origin-skipped')).toBe(true);
+  });
+
   // A 200 is not the same as "this package exists and can be installed".
   // npm keeps answering 200 for a name whose every version has been
   // unpublished, and for a name it has taken over for security reasons.

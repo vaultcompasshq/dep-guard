@@ -68,46 +68,49 @@ function dedupeKey(candidate: Candidate): string {
   return JSON.stringify([candidate.manifestPath, candidate.name, candidate.version]);
 }
 
-// True when a lockfile entry must never be sent to the public registry:
-// either its name is declared private by the project's own .npmrc alone
-// (registry-scope.ts's isNonPublicName, shared with unknown-package and
-// registered-squat -- a scope pin, checked by the PIN'S OWN ORIGIN, or
-// (absent a pin for this scope) the project default registry), or its
-// resolvedUrl names some other origin outright.
+// True when a lockfile entry must never be sent to the public registry.
+// Three grounds, checked in this exact order, because the order is what
+// keeps a public pin from overriding a more specific fact:
 //
-// The scope-pin and no-resolvedUrl cases both defer entirely to
-// isNonPublicName -- a pin decides unconditionally by its own origin
-// (issue #67: treating any pin as private, regardless of what registry it
-// actually named, cost this check coverage of a scope a project pinned at
-// the PUBLIC registry on purpose), and take precedence over both the
-// default registry and a resolvedUrl either way: a name the project has
-// declared private by its own .npmrc must never reach the public registry
-// through this check regardless of what a possibly-mismatched resolution
-// says (confusion.ts's pin-mismatch rule is what judges that mismatch
-// itself; this check simply must not act on a name that mismatch could
-// apply to).
-//
-// pnpm does not record which registry served an ordinary resolution --
-// lockfiles/pnpm.ts only ever sets resolvedUrl from a resolution's own
-// `tarball` field, and an ordinary registry install has none -- so an
-// undefined resolvedUrl is the COMMON case for a pnpm lockfile, not a
-// defensive fallthrough, and it says nothing about origin on its own; the
-// project .npmrc's unscoped default registry (read by isNonPublicName) is
-// the only signal available to judge it. See the docs note on
-// isNonPublicResolution in README.md and docs/INVARIANTS.md for what a
-// repository relying on a USER-level ~/.npmrc or npm_config_registry
-// instead has to configure, since neither of those reaches this function
-// (or isNonPublicName) at all.
-//
-// Only once neither of those applies -- an unpinned (or public-pinned)
-// scope with a real resolvedUrl -- does the resolvedUrl's own origin decide.
+// 1. A PRIVATE scope pin decides unconditionally, regardless of what the
+//    resolvedUrl says (registry-scope.ts's isNonPublicName reads
+//    ctx.npmrcRegistryPins by the PIN'S OWN ORIGIN, shared with
+//    unknown-package and registered-squat). A name the project has
+//    declared private by its own .npmrc must never reach the public
+//    registry through this check regardless of what a possibly-mismatched
+//    resolution says (confusion.ts's pin-mismatch rule is what judges that
+//    mismatch itself; this check simply must not act on a name that
+//    mismatch could apply to).
+// 2. Otherwise -- no pin for this scope, or a pin that names the PUBLIC
+//    registry -- a resolvedUrl, when present, decides by its own origin.
+//    This is the regression an earlier version of this rule had (found in
+//    independent review): a public pin used to skip the resolvedUrl check
+//    entirely and defer straight to isNonPublicName, so a scope pinned to
+//    the public registry sent a name to the wire even when its resolvedUrl
+//    actually named a PRIVATE host -- the pin said nothing about where the
+//    entry in hand actually came from, and a present resolvedUrl is always
+//    the more specific fact.
+// 3. Only with NO resolvedUrl at all does the pin (already established
+//    absent or public here) or the project default registry decide, via
+//    isNonPublicName -- pnpm's ordinary case: lockfiles/pnpm.ts only ever
+//    sets resolvedUrl from a resolution's own `tarball` field, and an
+//    ordinary registry install has none, so an undefined resolvedUrl says
+//    nothing about origin on its own and the project .npmrc's unscoped
+//    default registry is the only signal left to judge it. See the docs
+//    note on isNonPublicResolution in README.md and docs/INVARIANTS.md for
+//    what a repository relying on a USER-level ~/.npmrc or
+//    npm_config_registry instead has to configure, since neither of those
+//    reaches this function (or isNonPublicName) at all.
 function isNonPublicResolution(ctx: CheckContext, name: string, resolvedUrl: string | undefined): boolean {
   const scope = scopeOf(name);
-  const hasPin = scope !== null && ctx.npmrcRegistryPins.has(scope);
-  if (hasPin || resolvedUrl === undefined) {
-    return isNonPublicName(ctx, name);
+  const pin = scope !== null ? ctx.npmrcRegistryPins.get(scope) : undefined;
+  if (pin !== undefined && originOf(pin) !== PUBLIC_REGISTRY_ORIGIN) {
+    return true;
   }
-  return originOf(resolvedUrl) !== PUBLIC_REGISTRY_ORIGIN;
+  if (resolvedUrl !== undefined) {
+    return originOf(resolvedUrl) !== PUBLIC_REGISTRY_ORIGIN;
+  }
+  return isNonPublicName(ctx, name);
 }
 
 function collectCandidates(ctx: CheckContext, diagnostics: Diagnostic[]): Candidate[] {

@@ -500,6 +500,7 @@ async function enrichOnline(
   } else {
     await applyTyposquatAsymmetry(
       resolved,
+      ctx,
       { fetchWeeklyDownloads: cachedFetchWeeklyDownloads },
       ctx.diagnostics
     );

@@ -127,8 +127,11 @@ unscoped default registry when no pin applies to that scope. A pin decides
 by its **own origin**, not by merely existing, and always outranks the
 default registry: a scope pinned to the public registry is checked even
 under a private project default, and a scope pinned away from the public
-registry is skipped even under a public project default. A skip is recorded
-as a diagnostic naming the package, never silent.
+registry is skipped even under a public project default. A `.npmrc`-derived
+skip (a scope pin, or the default registry) is recorded as a diagnostic
+naming the package; an `internalScopes`/`internalPrefixes` skip is silent
+by design, not diagnosed -- a name your own committed config already lists
+needs no reminder that it was excluded.
 
 - **Unknown package resolution.** The offline unknown-package rule answers
   from a corpus built on one dated registry walk, so every package
@@ -190,17 +193,23 @@ as a diagnostic naming the package, never silent.
   never sees. `minAgeAllow` (an array of exact `name@version` strings) is a
   reviewed exception for one specific release, never a standing exemption
   for the name, and a config entry may not itself be a semver range. This
-  check applies the shared .npmrc rule above to the RESOLUTION as well as
-  the name: when neither a scope pin nor the default registry already
-  settles it, a resolvedUrl from anywhere other than the public npm
-  registry also skips it -- a private dependency's name is not put on the
-  wire to a public service just to price this heuristic. pnpm does not
-  record which registry served an ordinary resolution at all, so a pnpm
-  lockfile entry with no recorded resolution URL falls back to the shared
-  rule's own default-registry step: when the project's default is private,
-  such an entry is skipped the same way a privately-pinned scope is; when
-  none is set (or it names the public registry), the entry is checked as
-  public, since nothing in the project's own configuration says otherwise.
+  check applies the shared `.npmrc` rule above to the RESOLUTION as well as
+  the name, and the order matters: a scope pinned to a *private* registry
+  skips the entry unconditionally, whatever its resolvedUrl says (a
+  resolvedUrl that disagrees with a private pin is a pin *mismatch*, which
+  dependency confusion's own rule is what raises, not evidence this check
+  may proceed). Otherwise -- no pin, or a pin naming the public registry --
+  a resolvedUrl, when the lockfile entry has one, decides by its own origin
+  before anything else does; a public (or absent) pin never overrides a
+  resolvedUrl actually in hand. Only when the entry has no resolvedUrl at
+  all does the default registry decide, the same way a privately-pinned
+  scope is skipped. pnpm does not record which registry served an ordinary
+  resolution at all, so this is the ordinary shape of a pnpm lockfile entry:
+  when the project's default is private it is skipped; when none is set (or
+  it names the public registry), the entry is checked as public, since
+  nothing in the project's own configuration says otherwise -- a private
+  dependency's name is not put on the wire to a public service just to
+  price this heuristic.
   A *user*-level `~/.npmrc` default registry, or an `npm_config_registry`
   environment variable, is invisible to this check and to the rest of the
   scan -- a repository relying on either of those instead of a project

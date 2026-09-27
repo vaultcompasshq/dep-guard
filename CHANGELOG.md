@@ -17,18 +17,32 @@ GitHub release notes, which are generated from the commit history.
   project's default registry either way: a scope pinned to the public
   registry is checked even under a private default, and a scope pinned
   away from the public registry is skipped even under a public default.
+  Independent review then found a regression the first version of this fix
+  introduced: a public pin was letting a lockfile entry's own `resolvedUrl`
+  get ignored, so an entry that actually resolved from a *private* host
+  under a publicly-pinned scope was fetched anyway. Only a *private* pin
+  now decides unconditionally; otherwise a present `resolvedUrl` decides
+  by its own origin before the pin or the default registry ever get a say.
   README and `docs/INVARIANTS.md` updated (fixes #67).
 
-- Fixed a privacy gap in the two online checks that predate publish-age:
-  `unknown-package` and `registered-squat` used to send every
-  manifest-declared name to the public registry regardless of `.npmrc`
-  scope pins or the project's default registry, the same leak shape
-  publish-age was built to close. The name-level decision is now shared
-  across all three checks (`online/registry-scope.ts`'s `isNonPublicName`),
-  and a name it excludes is never silently dropped: `unknown-package`
-  raises `unknown-package-private-origin-skipped` and `registered-squat`
-  raises `registered-squat-private-origin-skipped`, each naming the
-  package. README and `docs/INVARIANTS.md` updated (fixes #70).
+- Fixed a privacy gap, found across all three of the online checks that
+  predate publish-age: `unknown-package` and `registered-squat` used to
+  send every manifest-declared name to the public registry regardless of
+  `.npmrc` scope pins or the project's default registry, and a later
+  independent review found the same gap in the typosquat
+  popularity-asymmetry escalation (`applyTyposquatAsymmetry`), which also
+  had no `internalScopes`/`internalPrefixes` filter of its own -- the
+  identical leak shape publish-age was built to close, reached through the
+  three checks that predate it or were never re-audited against it. The
+  name-level decision is now shared across all four checks
+  (`online/registry-scope.ts`'s `isNonPublicName`), and a `.npmrc`-derived
+  skip is never silently dropped: `unknown-package` raises
+  `unknown-package-private-origin-skipped`, `registered-squat` raises
+  `registered-squat-private-origin-skipped`, and the asymmetry check raises
+  `typosquat-asymmetry-private-origin-skipped`, each naming the package. An
+  `internalScopes`/`internalPrefixes` skip stays silent by design, in all
+  four checks alike: an adopter's own committed list needs no diagnostic
+  reminder. README and `docs/INVARIANTS.md` updated (fixes #70).
 
 - Fixed a pull-request misreport: `trust-base.ts`'s `npmrcChanged` only
   compared the `.npmrc` scope pins and the file's shape, so a pull request

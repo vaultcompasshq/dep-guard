@@ -348,6 +348,36 @@ describe('findPublishAgeFindings', () => {
     expect(ctx.diagnostics.some((d) => d.code === 'publish-age-private-origin-skipped')).toBe(true);
   });
 
+  // Regression from the independent review: a scope pinned to the PUBLIC
+  // registry must not make this check ignore a resolvedUrl that names a
+  // PRIVATE host. Before this fix, any pin (public or not) skipped the
+  // resolvedUrl check entirely and deferred straight to isNonPublicName,
+  // which reads only the pin and the default registry -- so a public pin
+  // plus a resolvedUrl that actually resolved from a private registry (a
+  // pin mismatch) was fetched anyway, sending the name to the wire on the
+  // strength of a pin that did not describe where the entry actually came
+  // from. A resolvedUrl, when present, is the more specific fact and must
+  // decide over a public (i.e. non-deciding) pin.
+  test('a scope pinned to the public registry does not override a resolvedUrl that names a private host', async () => {
+    const ctx = makeContext([
+      makeLockEntryChange({
+        name: '@types/node',
+        after: {
+          version: '1.0.0',
+          resolvedUrl: 'https://npm.acme.example/@types/node/-/node-1.0.0.tgz',
+        },
+      }),
+    ]);
+    ctx.npmrcRegistryPins.set('@types', 'https://registry.npmjs.org/');
+    const deps = fakeDeps({ '@types/node': { '1.0.0': FRESH_DATE } });
+
+    const findings = await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(findings).toEqual([]);
+    expect(deps.calls).toEqual([]);
+    expect(ctx.diagnostics.some((d) => d.code === 'publish-age-private-origin-skipped')).toBe(true);
+  });
+
   test('does nothing, and calls nothing, when the delta has no candidates', async () => {
     const ctx = makeContext([]);
     const deps = fakeDeps({});

@@ -863,6 +863,7 @@ Current diagnostic codes: `audit-anchor-differs`,
 `publish-age-package-unknown`, `publish-age-private-origin-skipped`,
 `publish-age-version-unknown`, `registered-squat-private-origin-skipped`,
 `symlink-cycle`, `tamper-resolution-unreadable`,
+`typosquat-asymmetry-private-origin-skipped`,
 `unknown-package-private-origin-skipped`, `workspace-dir-unreadable`,
 `workspace-duplicate-directory`, `workspace-glob-unsupported`.
 
@@ -1381,22 +1382,36 @@ with no lockfile resolution to read:
    evidence, so this does not guess).
 
 `online/publish-age.ts`'s own `isNonPublicResolution` is built on top of
-this: it defers to `isNonPublicName` for the scope-pin case and for a
-lockfile entry with no `resolvedUrl` at all (pnpm's ordinary shape --
-`lockfiles/pnpm.ts`'s `entryFromPackageValue` sets `resolvedUrl` only from
-a resolution's own `tarball` field, so an ordinary registry install never
-has one, and `state.ts`'s `parseNpmrcDefaultRegistry` is the only signal
-available to judge such an entry), and judges the `resolvedUrl`'s own
-origin (`originOf(DEFAULT_REGISTRY)`, computed once in
-`registry-scope.ts` from `registry-client.ts`'s own constant so the two
-can never name a different "public registry" if it ever changes) only when
-neither applies. This check has to fire even when the entry's `resolvedUrl`
-happens to be the PUBLIC registry while the scope is pinned elsewhere: that
-combination is a pin MISMATCH, which is `checks/confusion.ts`'s rule 1's
-own finding to raise, not evidence that this check may treat the name as
-public -- a name the project has declared private by its own `.npmrc` must
-never reach the public registry through any online check regardless of
-what a possibly-mismatched resolution says.
+this, and the ORDER of its three checks is load-bearing, not incidental --
+an earlier version got it wrong in a way an independent review caught. The
+order is:
+
+1. A PRIVATE scope pin decides unconditionally, regardless of what the
+   entry's `resolvedUrl` says. This is `checks/confusion.ts`'s rule 1's own
+   territory to raise as a MISMATCH finding, not evidence that this check
+   may treat the name as public: a name the project has declared private
+   by its own `.npmrc` must never reach the public registry through any
+   online check regardless of what a possibly-mismatched resolution says.
+2. Otherwise -- no pin for this scope, or a pin naming the PUBLIC registry
+   -- a `resolvedUrl`, when present, decides by its own origin
+   (`originOf(DEFAULT_REGISTRY)`, computed once in `registry-scope.ts` from
+   `registry-client.ts`'s own constant so the two can never name a
+   different "public registry" if it ever changes). A public pin does NOT
+   short-circuit this step. The first version of this fix did exactly that
+   -- deferred straight to `isNonPublicName` (step 1 or step 3 below)
+   whenever a pin existed at all, public or not -- so a scope pinned to the
+   public registry sent a name to the wire even when its `resolvedUrl`
+   actually resolved from a PRIVATE host: the pin said nothing about where
+   THIS entry came from, and a present `resolvedUrl` is always the more
+   specific fact. A pin only ever narrows what step 2 needs to ask; it
+   never overrides a `resolvedUrl` already in hand.
+3. Only with NO `resolvedUrl` at all does `isNonPublicName` decide, from
+   the pin (already established absent or public here) or the project
+   default registry -- pnpm's ordinary shape: `lockfiles/pnpm.ts`'s
+   `entryFromPackageValue` sets `resolvedUrl` only from a resolution's own
+   `tarball` field, so an ordinary registry install never has one, and
+   `state.ts`'s `parseNpmrcDefaultRegistry` is the only signal left to
+   judge such an entry.
 
 A *user*-level `~/.npmrc` default registry or an `npm_config_registry`
 environment variable is invisible to `isNonPublicName` and to the rest of
@@ -1437,10 +1452,38 @@ skipped package -- `unknown-package-private-origin-skipped` and
 publish-age's code, because a reader has to be able to tell which check
 declined to ask.
 
-A candidate excluded on either of `isNonPublicName`'s two grounds, or by
-publish-age's own resolvedUrl check, raises a diagnostic naming the
-package rather than a silent drop -- the same "a suppressed decision must
-be reported" rule the allowlist skip below follows.
+**The fourth online check was still outside this rule, and an earlier
+version of this section claimed otherwise (found in independent review).**
+`applyTyposquatAsymmetry` (`online/asymmetry.ts`) is the typosquat
+popularity-asymmetry escalation, and it predates `isNonPublicName`
+entirely, with no `internalScopes`/`internalPrefixes` filter of its own
+either -- so it sent every low typosquat finding's `packageName` to the
+downloads API regardless of a project's `.npmrc` or its internal-name
+configuration, the same leak shape `unknown-package` and `registered-squat`
+had before #70, just left unaudited in the one online check nobody had
+revisited once the shared rule existed. It now filters both ways before
+`fetchWeeklyDownloads` is called, taking `ctx: CheckContext` as a new
+parameter for exactly this (`scan.ts`'s `enrichOnline` passes it through
+alongside `resolved`): an internal name is dropped SILENTLY, the same
+silent-by-design filter every other check applies to `internalScopes`/
+`internalPrefixes` (see the note on silence below), and a name
+`isNonPublicName` excludes is dropped with its own
+`typosquat-asymmetry-private-origin-skipped` diagnostic naming it. All
+four online checks now consult `isNonPublicName` before any request
+leaves the machine; this is the properly-verified version of that claim,
+not the one this section made before the gap was found.
+
+A candidate `isNonPublicName` excludes, on either of its two grounds, or a
+publish-age candidate its own resolvedUrl check excludes, raises a
+diagnostic naming the package rather than a silent drop -- the same "a
+suppressed decision must be reported" rule the allowlist skip below
+follows. `internalScopes`/`internalPrefixes` exclusions are the
+deliberate exception, ACROSS ALL FOUR checks: they are silent, not
+diagnosed, because a name the adopter's own committed config already
+lists is not a suppressed decision that needs surfacing -- the config
+itself is the record. Only a `.npmrc`-derived skip (a scope pin, or the
+default registry) gets a diagnostic, because that is the decision a
+reader cannot see just by reading `.dep-guard.json`.
 
 One packument fetch per distinct package NAME, not per candidate:
 `findPublishAgeFindings` groups its candidates by name before fetching
