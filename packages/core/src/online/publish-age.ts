@@ -37,7 +37,17 @@ import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
 
 export interface PublishAgeDeps {
-  fetchPackument(name: string): Promise<{ versionTimes: Record<string, string> } | null>;
+  // `versions` names exactly the resolved versions this call needs an
+  // answer for, so a cached implementation (scan.ts's
+  // cachedFetchPackumentVersionTimes) can tell a genuinely stale cache
+  // entry -- one missing a version this call is asking about -- from one
+  // that simply has nothing new to say, and refetch live only for the
+  // former. See scan.ts's cache-fail-open note (issue found in review of
+  // #58) for why this parameter exists at all.
+  fetchPackument(
+    name: string,
+    versions: string[]
+  ): Promise<{ versionTimes: Record<string, string> } | null>;
 }
 
 interface Candidate {
@@ -174,7 +184,10 @@ export async function findPublishAgeFindings(
 
     let packument: { versionTimes: Record<string, string> } | null;
     try {
-      packument = await deps.fetchPackument(name);
+      packument = await deps.fetchPackument(
+        name,
+        group.map((candidate) => candidate.version)
+      );
     } catch (err) {
       diagnostics.push({
         code: 'online-check-unreachable',
@@ -186,11 +199,22 @@ export async function findPublishAgeFindings(
     }
 
     if (packument === null) {
-      // The registry does not know this name at all. That is the
-      // unknown-package online check's own question to answer (and it does,
-      // via resolveUnknownPackages) -- this check has nothing further to
-      // add for a name it cannot even look up an age for, so this is a
-      // note, not a finding.
+      // The registry does not know this name at all. unknown-package's own
+      // online resolution answers this for a name a MANIFEST declares (it
+      // reads only newRegistryNames -- see checks/existence.ts), but this
+      // check's own candidates come from the lockfile walk instead, which
+      // is overwhelmingly transitive entries no manifest ever names. A
+      // transitive dependency the registry no longer knows about would
+      // therefore reach no online check at all if this stayed a silent
+      // continue, so it is a diagnostic rather than a note: this check
+      // still raises no finding of its own (unknown-package's rule id is
+      // the right one for "this name looks wrong"), but the gap in
+      // coverage has to be visible rather than indistinguishable from
+      // "nothing needed checking".
+      diagnostics.push({
+        code: 'publish-age-package-unknown',
+        message: `publish-age: the npm registry does not know package "${name}"; ${group.length} dependency(ies) resolved to it were not checked for publish age`,
+      });
       continue;
     }
 
@@ -205,10 +229,19 @@ export async function findPublishAgeFindings(
       const publishedAt = packument.versionTimes[candidate.version];
       if (publishedAt === undefined) {
         // The registry knows the NAME but this exact resolved version is
-        // missing from its time map -- a malformed or unexpectedly shaped
-        // response, not evidence the version is suspicious. A note, not a
-        // finding: inventing a finding from data this check could not
-        // actually read would be worse than saying nothing.
+        // missing from its time map even after a live fetch that was asked
+        // about exactly this version (deps.fetchPackument's `versions`
+        // parameter -- see scan.ts's cachedFetchPackumentVersionTimes) -- a
+        // malformed or unexpectedly shaped response, not evidence the
+        // version is suspicious. Still no finding of its own (inventing one
+        // from data this check could not actually read would be worse than
+        // saying nothing), but a diagnostic rather than a silent continue,
+        // for the same "gap in coverage must be visible" reason as the
+        // unknown-package case above.
+        diagnostics.push({
+          code: 'publish-age-version-unknown',
+          message: `publish-age: "${candidate.name}@${candidate.version}" is missing from the registry's publish-time record for "${candidate.name}"; publish age could not be checked for this version`,
+        });
         continue;
       }
 

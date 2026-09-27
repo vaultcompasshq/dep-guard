@@ -369,13 +369,35 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
 // downloads cache's, and a miss (the name does not exist at all) is never
 // cached, for the same not-yet-registered reason cachedFetchPackument's own
 // miss is not cached above.
+//
+// The TTL bound alone is not enough, and used to be the whole story: a
+// cache entry written just before a package published a fresh release
+// stayed the answer for up to a full day, so the exact release this check
+// exists to catch -- a lockfile bump that landed minutes ago -- read as
+// "not in the time map" and was silently treated as a note rather than a
+// finding for as long as the entry lived. `requestedVersions` closes that
+// gap: a cache hit is only trusted when its map already carries every
+// version this call was actually asked about. Anything short of that
+// bypasses the cache entirely, asks the registry live, and overwrites the
+// stale entry with the fresh answer -- so a hit can only ever save a
+// request, never manufacture a false "unknown" for a version the registry
+// has actually published. See the two-run regression test in
+// scan-online-publish-age.test.ts.
 async function cachedFetchPackumentVersionTimes(
-  name: string
+  name: string,
+  requestedVersions: string[]
 ): Promise<{ versionTimes: Record<string, string> } | null> {
   const store = sharedCache();
   const hit = store.get(`version-times:${name}`);
   if (hit !== undefined) {
-    return { versionTimes: hit as Record<string, string> };
+    const cached = hit as Record<string, string>;
+    if (requestedVersions.every((version) => version in cached)) {
+      return { versionTimes: cached };
+    }
+    // A version this call needs is missing from the cached map -- refetch
+    // live rather than serve a map known to be incomplete for this
+    // question, and fall through to the same live-fetch-and-overwrite path
+    // a cold cache takes.
   }
   const packument = await fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
   if (packument === null) {

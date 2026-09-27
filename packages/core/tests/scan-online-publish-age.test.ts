@@ -239,6 +239,63 @@ describe('scan(): publish-age through the real delta', () => {
     expect(finding).toMatchObject({ packageName: 'moderately-fresh-thing', details: { minAgeDays: 30 } });
   });
 
+  test('a version published after the cached time map was written still flags, from exactly two fetches', async () => {
+    // Regression for the cache fail-open found in review of #58:
+    // cachedFetchPackumentVersionTimes (scan.ts) used to serve a cached
+    // version-times map for up to a full day even when the map predated a
+    // version this call was actually asked about. Run 1 caches a map that
+    // only knows 0.9.0 and 1.0.0; the registry then gains 1.0.1, published
+    // an hour ago; run 2 bumps the lockfile to 1.0.1, which the stale cache
+    // entry has never heard of. The fix bypasses the cache and refetches
+    // live whenever a requested version is missing from the cached map, so
+    // this must still flag -- and must cost exactly one fetch per run (two
+    // in total), not one per candidate, since a cache HIT never triggers a
+    // second request and a cache MISS still asks about "thing" only once.
+    let versionTimes: Record<string, string> = { '0.9.0': OLD_DATE, '1.0.0': OLD_DATE };
+    fetchPackumentMock.mockImplementation(async (name: string) =>
+      name === 'thing'
+        ? {
+            createdAt: OLD_DATE,
+            latestVersion: '1.0.0',
+            latestPublishedAt: OLD_DATE,
+            deprecated: false,
+            unpublished: false,
+            securityHolder: false,
+            versionTimes,
+          }
+        : null
+    );
+    const dir = initRepo();
+    commit(dir, { thing: '0.9.0' });
+    commit(dir, { thing: '1.0.0' });
+
+    const first = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+    expect(first.findings.some((f) => f.ruleId === 'publish-age')).toBe(false);
+    expect(fetchPackumentMock).toHaveBeenCalledTimes(1);
+
+    // 1.0.1 is published one hour ago, after the map above was cached.
+    const FRESH = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString();
+    versionTimes = { '0.9.0': OLD_DATE, '1.0.0': OLD_DATE, '1.0.1': FRESH };
+    commit(dir, { thing: '1.0.1' });
+
+    const second = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+
+    expect(second.findings.find((f) => f.ruleId === 'publish-age')).toMatchObject({
+      details: { version: '1.0.1' },
+    });
+    expect(fetchPackumentMock).toHaveBeenCalledTimes(2);
+  });
+
   test('a repository-level minAgeAllow override reaches the check end to end', async () => {
     fetchPackumentMock.mockImplementation(async (name: string) => {
       if (name === 'reviewed-release-thing') {

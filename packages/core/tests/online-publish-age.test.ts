@@ -170,17 +170,24 @@ describe('findPublishAgeFindings', () => {
     expect(findings).toHaveLength(1);
   });
 
-  test('a package the registry does not know is a note, not a finding', async () => {
+  test('a package the registry does not know is a diagnostic, never a finding', async () => {
     const ctx = makeContext([makeLockEntryChange({ name: 'ghost-pkg', after: { version: '1.0.0' } })]);
     const deps = fakeDeps({ 'ghost-pkg': null });
 
     const findings = await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
 
     expect(findings).toEqual([]);
-    expect(ctx.diagnostics).toEqual([]);
+    // This check's own candidates come from the lockfile walk, which is
+    // overwhelmingly transitive entries no manifest names -- unknown-package
+    // never sees those (it reads only manifest-declared names), so a
+    // transitive dependency the registry no longer knows about would
+    // otherwise vanish with no trace at all.
+    expect(ctx.diagnostics).toHaveLength(1);
+    expect(ctx.diagnostics[0].code).toBe('publish-age-package-unknown');
+    expect(ctx.diagnostics[0].message).toContain('ghost-pkg');
   });
 
-  test('a version missing from the time map is a note, not a finding', async () => {
+  test('a version missing from the time map is a diagnostic, never a finding', async () => {
     const ctx = makeContext([makeLockEntryChange({ name: 'partial-pkg', after: { version: '3.0.0' } })]);
     // The registry knows the name and has SOME versions on record, just not
     // this exact one.
@@ -189,7 +196,9 @@ describe('findPublishAgeFindings', () => {
     const findings = await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
 
     expect(findings).toEqual([]);
-    expect(ctx.diagnostics).toEqual([]);
+    expect(ctx.diagnostics).toHaveLength(1);
+    expect(ctx.diagnostics[0].code).toBe('publish-age-version-unknown');
+    expect(ctx.diagnostics[0].message).toContain('partial-pkg@3.0.0');
   });
 
   test('a registry error is a could-not-run for this check, never a silent pass', async () => {
@@ -244,6 +253,7 @@ describe('findPublishAgeFindings', () => {
     expect(findings).toEqual([]);
     expect(deps.calls).toEqual([]);
   });
+
 
   test('does nothing, and calls nothing, when the delta has no candidates', async () => {
     const ctx = makeContext([]);
