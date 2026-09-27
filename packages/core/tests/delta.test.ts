@@ -821,6 +821,100 @@ describe('computeDelta lockfile entry diffing', () => {
     const delta = computeDelta(previous, current);
     expect(delta.lockEntryChanges[0]).toMatchObject({ name: 'ui', packageName: 'lodash' });
   });
+
+  // Issue #69: a PURELY transitive alias -- no manifest anywhere declares
+  // the lockfile key, so `declared` is undefined -- must still resolve to
+  // the real registry name the entry itself recorded (LockEntry.
+  // registryName, npm.ts's capture of the packages entry's own "name"
+  // field), not fall all the way through to the installed/alias key.
+  //
+  // Mutation that turns this red: reverting the packageName line to
+  // `declared?.registryName ?? name` (dropping the `?? entry.registryName`
+  // step) -- packageName would then read 'ui-alias', the lockfile key,
+  // instead of 'lodash'.
+  test('a purely transitive alias entry reports the registry name the entry itself recorded', () => {
+    const delta = entryDelta(
+      [],
+      [['ui-alias', [{ version: '4.17.21', integrity: 'sha512-a', registryName: 'lodash' }]]]
+    );
+    expect(delta.lockEntryChanges[0]).toMatchObject({ name: 'ui-alias', packageName: 'lodash' });
+  });
+
+  // Resolution order, most specific first: a manifest declaration beats
+  // the entry's own recorded name. Realistic case is a re-aliased
+  // dependency where the manifest was edited to point somewhere new but
+  // the lockfile has not been refreshed to match yet; whichever the cause,
+  // the manifest is the more specific fact about what THIS repository's
+  // declared dependency resolves to.
+  //
+  // Mutation that turns this red: swapping the fallback order to
+  // `entry.registryName ?? declared?.registryName ?? name` -- packageName
+  // would then read 'stale-target' instead of 'fresh-target'.
+  test('a manifest declaration wins over the entry\'s own recorded registry name', () => {
+    const aliased = dep('ui', 'npm:fresh-target@^1.0.0', {
+      registryName: 'fresh-target',
+      protocol: 'alias',
+    });
+    const previous = state([manifest(ROOT, [aliased])], { lockfile: null });
+    const current = state([manifest(ROOT, [aliased])], {
+      lockfile: lockfile([
+        ['ui', [{ version: '1.0.0', integrity: 'sha512-a', registryName: 'stale-target' }]],
+      ]),
+    });
+    const delta = computeDelta(previous, current);
+    expect(delta.lockEntryChanges[0]).toMatchObject({ name: 'ui', packageName: 'fresh-target' });
+  });
+});
+
+// Issue #69, end to end: the real npm parser plus computeDelta together,
+// on a lockfile shape a manifest-only fixture cannot produce -- a
+// dependency's own transitive dependency on an npm: alias, which no
+// package.json anywhere declares. Modelled on
+// tests/fixtures/package-lock-v3.json's shape.
+describe('computeDelta resolves a purely transitive npm alias end to end (issue #69)', () => {
+  const TRANSITIVE_ALIAS_LOCKFILE = JSON.stringify({
+    name: 'test-app',
+    version: '1.0.0',
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': {
+        name: 'test-app',
+        version: '1.0.0',
+        dependencies: { 'host-pkg': '^1.0.0' },
+      },
+      'node_modules/host-pkg': {
+        version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/host-pkg/-/host-pkg-1.0.0.tgz',
+        integrity: 'sha512-host',
+      },
+      // host-pkg's own transitive dependency on "npm:lodash@^4.17.0",
+      // installed under the alias name "ui-alias" -- no manifest anywhere
+      // declares "ui-alias".
+      'node_modules/host-pkg/node_modules/ui-alias': {
+        name: 'lodash',
+        version: '4.17.21',
+        resolved: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
+        integrity: 'sha512-transitive-alias',
+      },
+    },
+  });
+
+  // Mutation that turns this red: either half of the fix alone is not
+  // enough -- reverting lockfiles/npm.ts's "name" field capture leaves
+  // entry.registryName undefined and this falls through to the key; or,
+  // with that capture in place, reverting delta.ts's fallback to
+  // `declared?.registryName ?? name` still ignores it. Either mutation
+  // makes packageName read 'ui-alias' instead of 'lodash'.
+  test('the delta reports the registry name the lockfile itself recorded, not the alias key', () => {
+    const after = parseNpmLockfile('package-lock.json', TRANSITIVE_ALIAS_LOCKFILE);
+    const delta = computeDelta(
+      state([manifest(ROOT, [dep('host-pkg', '^1.0.0')])], { lockfile: null }),
+      state([manifest(ROOT, [dep('host-pkg', '^1.0.0')])], { lockfile: after })
+    );
+    const aliasChange = delta.lockEntryChanges.find((c) => c.name === 'ui-alias');
+    expect(aliasChange).toMatchObject({ name: 'ui-alias', packageName: 'lodash' });
+  });
 });
 
 // A lockfile entry with no before side cannot be comparison-checked at

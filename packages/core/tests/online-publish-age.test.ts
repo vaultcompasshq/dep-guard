@@ -1,8 +1,12 @@
 import { findPublishAgeFindings } from '../src/online/publish-age.js';
 import { createOnlineDeadline } from '../src/online/deadline.js';
+import { computeDelta } from '../src/delta.js';
+import { parseNpmLockfile } from '../src/lockfiles/npm.js';
 import type { CheckContext, ResolvedConfig } from '../src/checks/types.js';
 import type { Corpus } from '../src/corpus.js';
 import type { LockEntryChange } from '../src/delta.js';
+import type { ManifestDep, ParsedManifest } from '../src/manifest.js';
+import type { RepoState } from '../src/state.js';
 import type { Diagnostic } from '../src/types.js';
 
 const STUB_CORPUS: Corpus = {
@@ -434,5 +438,98 @@ describe('findPublishAgeFindings', () => {
     expect(deps.calls).toEqual([]);
     expect(findings).toEqual([]);
     expect(diagnostics.some((d) => d.code === 'online-deadline-exceeded')).toBe(true);
+  });
+});
+
+// Issue #69, end to end through the real npm parser and computeDelta: a
+// purely transitive npm: alias entry -- one only some other package's own
+// dependency block introduces, which no package.json anywhere declares --
+// must send the REAL registry name to the registry, never the installed
+// alias key. Getting this wrong is exactly the silent-miss-or-wrong-finding
+// the issue describes: asking the registry about "ui-alias" either finds
+// nothing (a false publish-age-package-unknown diagnostic) or, worse, finds
+// an unrelated real package that happens to share that name and prices its
+// age instead of lodash's.
+describe('findPublishAgeFindings resolves a purely transitive npm alias (issue #69)', () => {
+  function dep(name: string, specifier: string, overrides: Partial<ManifestDep> = {}): ManifestDep {
+    return {
+      name,
+      registryName: name,
+      specifier,
+      depType: 'dependencies',
+      protocol: 'registry',
+      ...overrides,
+    };
+  }
+
+  function manifest(deps: ManifestDep[]): ParsedManifest {
+    return { path: 'package.json', deps, pnpmOnlyBuilt: [] };
+  }
+
+  function repoState(overrides: Partial<RepoState> = {}): RepoState {
+    return {
+      manifests: [manifest([dep('host-pkg', '^1.0.0')])],
+      lockfile: null,
+      onlyBuilt: [],
+      npmrcRegistryPins: new Map(),
+      npmrcDefaultRegistry: null,
+      workspaceLocalNames: new Set(),
+      ...overrides,
+    };
+  }
+
+  // Modelled on tests/fixtures/package-lock-v3.json's shape: host-pkg is an
+  // ordinary dependency, and its own transitive dependency on
+  // "npm:lodash@^4.17.0" installs under the name "ui-alias", nested under
+  // host-pkg's own node_modules -- the shape a manifest-built
+  // LockEntryChange fixture cannot produce, since it exists only inside the
+  // lockfile.
+  const TRANSITIVE_ALIAS_LOCKFILE = JSON.stringify({
+    name: 'test-app',
+    version: '1.0.0',
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': { name: 'test-app', version: '1.0.0', dependencies: { 'host-pkg': '^1.0.0' } },
+      'node_modules/host-pkg': {
+        version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/host-pkg/-/host-pkg-1.0.0.tgz',
+        integrity: 'sha512-host',
+      },
+      'node_modules/host-pkg/node_modules/ui-alias': {
+        name: 'lodash',
+        version: '4.17.21',
+        resolved: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
+        integrity: 'sha512-transitive-alias',
+      },
+    },
+  });
+
+  // Mutation that turns this red: either half of the delta-side fix alone
+  // is not enough (see delta.test.ts's own mutation notes for the same
+  // pair) -- with either reverted, deps.calls ends up containing
+  // 'ui-alias' instead of 'lodash', and the 'ui-alias' assertion below
+  // fails first.
+  test('asks the registry for the real name, never the installed alias key', async () => {
+    const after = parseNpmLockfile('package-lock.json', TRANSITIVE_ALIAS_LOCKFILE);
+    const delta = computeDelta(repoState(), repoState({ lockfile: after }));
+
+    const ctx: CheckContext = {
+      corpus: STUB_CORPUS,
+      config: BASE_CONFIG,
+      delta,
+      npmrcRegistryPins: new Map(),
+      diagnostics: [] as Diagnostic[],
+      allowed: [] as string[],
+    };
+    const deps = fakeDeps({
+      lodash: { '4.17.21': OLD_DATE },
+      'host-pkg': { '1.0.0': OLD_DATE },
+    });
+
+    await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(deps.calls).toContain('lodash');
+    expect(deps.calls).not.toContain('ui-alias');
   });
 });

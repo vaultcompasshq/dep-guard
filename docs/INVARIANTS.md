@@ -148,6 +148,73 @@ never reports a bump that leaves an already-true flag true. Tamper ignores
 `kind` for every signal: the git-source swap in particular almost always
 arrives as a changed specifier, never as a new dependency.
 
+## packageName has three sources, most specific first, and only one of them is per-format
+
+`LockEntryChange.packageName` (delta.ts) is what every lockfile-backed
+check and every online check reading `lockEntryChanges` treats as the
+dependency's real identity -- the name that goes in a finding, and the name
+`publish-age` sends to the registry. It is resolved in this order, and the
+order is load-bearing, not stylistic:
+
+1. `declared?.registryName` -- a manifest declares this lockfile key and
+   names its own registry target (`manifest.ts`'s alias parsing). This is
+   the only source with a `ManifestDep` behind it, so it is the most
+   specific fact available and wins outright.
+2. `entry.registryName` -- the lockfile ENTRY itself recorded the real
+   name, independently of any manifest. This is the field a purely
+   transitive alias depends on entirely: one only some other package's own
+   dependency block introduces has no `ManifestDep` at all, so step 1 is
+   never available for it.
+3. `name` -- the lockfile key itself, unchanged.
+
+Getting this wrong (delta.ts:444, the fix for issue #69) was silent in the
+usual direction: before step 2 existed, a purely transitive `npm:` alias
+fell straight through step 1 to the installed/alias key, and `publish-age`
+asked the registry about a name nobody published -- a
+`publish-age-package-unknown` diagnostic standing in for a real answer at
+best, and at worst a real but unrelated package sharing that name pricing
+its age instead of the actual dependency's.
+
+Step 2 only ever has something to contribute for a format whose OWN key is
+not already the registry name. Whether it does is a fact about the format,
+not a judgment call, and the three shipped formats fall into two different
+buckets for a reason worth keeping straight:
+
+- npm keys `entries` by the INSTALLED name (`lockfiles/npm.ts`'s
+  `installedNameFromKey`) -- the folder name under `node_modules/`, which
+  for an `npm:` alias is the alias itself, never the target. npm writes the
+  resolved package's own `name` field on such an entry (it has to, to know
+  what is actually installed there), and that field is the only place the
+  real name survives once no manifest names it. `entryFromPackageValue`
+  reads it into `LockEntry.registryName` there and nowhere else.
+- pnpm keys `entries` by REGISTRY identity already (`lockfiles/pnpm.ts`'s
+  `parsePackageKey` splits the packages-map key itself, `name@version`),
+  because a pnpm alias mapping lives entirely in the DEPENDENT's own
+  `dependencies` block (`myalias: real-target@1.0.0`), never in the target
+  package's own key. So `LockEntry.registryName` is deliberately never set
+  by `lockfiles/pnpm.ts` -- step 3's `name` already answers step 2's
+  question for this format, and setting it to the same value would be the
+  parallel-fact-that-can-drift this file warns against elsewhere, for no
+  behavioural gain.
+- yarn and bun contribute neither: `git-source.ts`'s `manifestOnlyLockfile`
+  never populates `entries` at all for either format (see "Lockfile
+  support" in README.md), so `lockEntryChanges` is always empty for them
+  regardless of what either lockfile actually contains, alias or not.
+  There is nothing to resolve wrongly because nothing is ever read from
+  the lockfile in the first place -- the existing
+  `lockfile-format-manifest-only` diagnostic already says so, and no
+  alias-specific diagnostic was added on top of it: inventing one would
+  claim to know something specific about an entry this parser never looked
+  at.
+
+None of this may change `packageName` for a NON-alias entry. An ordinary
+npm entry carries no `name` field at all when the installed name already is
+the registry name (there is nothing for npm itself to disambiguate), so
+`entry.registryName` stays `undefined` and step 3 answers exactly as it did
+before step 2 existed. The fingerprint tests that pin known npm/pnpm
+fixture entries are what prove this held; they are not alias fixtures, and
+they moved by zero bytes across this change.
+
 ## Pairing two lockfiles is a chain of guesses, and each guess owes a diagnostic
 
 `selectEntry` picks which of a name's entries a specifier resolves to, and

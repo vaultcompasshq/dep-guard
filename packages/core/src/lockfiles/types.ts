@@ -5,6 +5,22 @@ export interface LockEntry {
   resolvedUrl?: string;
   integrity?: string;
   hasInstallScript?: boolean;
+  // The real registry name this entry installs, when the lockfile format
+  // records that fact on the entry ITSELF rather than only in a manifest
+  // some dependent declares. This is the npm case: an npm: alias entry is
+  // keyed by the installed/alias name (see the entries map comment below),
+  // but npm always writes the resolved package's own "name" field on such
+  // an entry -- lockfiles/npm.ts is what reads it into this field. A
+  // purely transitive alias (one only some other package's own dependency
+  // block introduces, never the root manifest) has no ManifestDep to carry
+  // a registryName at all, so this is the only place that fact survives
+  // parsing; delta.ts's packageName resolution reads it as its second
+  // preference, after a manifest declaration and before falling back to
+  // the lockfile key itself. Left undefined for a format whose own key IS
+  // already the registry name (pnpm -- see lockfiles/pnpm.ts) or that
+  // never resolves aliasing at all (yarn, bun -- manifest-level only, see
+  // README.md's Lockfile support section).
+  registryName?: string;
 }
 
 export type LockfileFormat = 'npm' | 'pnpm' | 'yarn' | 'bun' | 'none';

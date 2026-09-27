@@ -143,6 +143,66 @@ describe('parseNpmLockfile entry extraction', () => {
   });
 });
 
+// Issue #69: an npm: alias entry is keyed by the installed/alias name (see
+// installedNameFromKey), but npm always writes the resolved package's own
+// "name" field on such an entry -- that is the only place the real
+// registry name survives for a PURELY TRANSITIVE alias, one no manifest
+// anywhere declares (a dependency's own dependency, not a root
+// package.json line). Modelled on package-lock-v3.json's shape: host-pkg
+// is an ordinary dependency, and its own transitive dependency on
+// "npm:lodash@^4.17.0" installs under the name "ui-alias", nested under
+// host-pkg's own node_modules.
+describe('parseNpmLockfile alias name recovery (issue #69)', () => {
+  const TRANSITIVE_ALIAS_CONTENT = JSON.stringify({
+    name: 'test-app',
+    version: '1.0.0',
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': {
+        name: 'test-app',
+        version: '1.0.0',
+        dependencies: { 'host-pkg': '^1.0.0' },
+      },
+      'node_modules/host-pkg': {
+        version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/host-pkg/-/host-pkg-1.0.0.tgz',
+        integrity: 'sha512-host',
+      },
+      'node_modules/host-pkg/node_modules/ui-alias': {
+        name: 'lodash',
+        version: '4.17.21',
+        resolved: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
+        integrity: 'sha512-transitive-alias',
+      },
+    },
+  });
+
+  // Mutation that turns this red: dropping the "if (typeof value.name ===
+  // 'string')" branch from entryFromPackageValue (npm.ts) -- the entry
+  // would then carry no registryName at all, and this reads undefined
+  // instead of 'lodash'.
+  test('a transitively aliased entry carries the real registry name from the packages-entry "name" field', () => {
+    const result = parseNpmLockfile(PATH, TRANSITIVE_ALIAS_CONTENT);
+    expect(only(result, 'ui-alias')).toMatchObject({
+      version: '4.17.21',
+      registryName: 'lodash',
+    });
+  });
+
+  // An ordinary (non-aliased) entry has no "name" field npm needs to write
+  // -- the key-derived name already is the real one -- so registryName
+  // must stay absent rather than being defaulted to the key. A check that
+  // ever started reading `registryName ?? name` without the `?? name`
+  // fallback would otherwise be safe by accident here and break the
+  // moment a lockfile omitted the field, which real ones do for every
+  // unaliased entry.
+  test('an ordinary entry with no "name" field leaves registryName undefined', () => {
+    const result = parseNpmLockfile(PATH, TRANSITIVE_ALIAS_CONTENT);
+    expect(only(result, 'host-pkg')?.registryName).toBeUndefined();
+  });
+});
+
 // Reproduces the real npm/cli shape: a workspace sibling declared with an
 // ordinary version range (npm gives it no "workspace:" specifier the way
 // pnpm and yarn do) and a "link": true entry in the lockfile that is the

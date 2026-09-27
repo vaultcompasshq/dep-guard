@@ -25,9 +25,18 @@ export interface DepChange {
 // them, and that is precisely where a tampered resolution hides.
 //
 // `name` is the key the lockfile itself uses (the installed name for npm,
-// the registry name for pnpm); `packageName` is the registry name a
-// manifest declares for it when one does, so an aliased dependency is
-// reported under what actually installs rather than under the alias key.
+// the registry name for pnpm); `packageName` is resolved in three steps,
+// most specific first -- the registry name a manifest declares for this
+// key, when one does; otherwise the registry name the lockfile ENTRY
+// itself recorded (LockEntry.registryName -- npm's own "name" field on an
+// aliased entry, the only place a purely transitive alias's target
+// survives parsing, see lockfiles/npm.ts and issue #69); otherwise the
+// lockfile key `name` itself, which for pnpm already IS the registry name
+// (lockfiles/pnpm.ts keys its entries by the packages-map name, not by any
+// installed/alias name) and for a format with no alias resolution at all
+// (yarn, bun) is simply the only name there ever was. So an aliased
+// dependency is reported under what actually installs rather than under
+// the alias key, whether or not a manifest happens to declare it.
 export interface LockEntryChange {
   name: string;
   packageName: string;
@@ -441,7 +450,7 @@ function diffLockEntries(
       const counterpart = pickCounterpart(entry, beforeEntries);
       entryChanges.push({
         name,
-        packageName: declared?.registryName ?? name,
+        packageName: declared?.registryName ?? entry.registryName ?? name,
         kind: beforeEntries.length === 0 ? 'added' : 'changed',
         // An entry no manifest declares is anchored to the LOCKFILE, not
         // to the root package.json. Three consumers key off this path and

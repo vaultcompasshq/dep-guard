@@ -10,6 +10,23 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+- Fixed a transitive npm alias resolving to the wrong package name:
+  `entryChange.packageName` fell back to the lockfile key -- the installed
+  alias name -- whenever no manifest declared that key, which is the
+  ordinary case for a purely transitive `npm:` alias (one only some other
+  package's own dependency introduces). `publish-age`, and any other online
+  check reading `lockEntryChanges`, then asked the registry about the alias
+  name instead of the package actually installed: a silent miss, or a wrong
+  finding against an unrelated package that happens to share the name.
+  `lockfiles/npm.ts` now reads the packages entry's own `name` field (which
+  npm always writes for such an entry) into a new `LockEntry.registryName`,
+  and `delta.ts` prefers it, after a manifest declaration and before the
+  lockfile key. pnpm needed no fix: its `packages` map is already keyed by
+  registry identity, not by an alias name some dependent used to reach it.
+  Yarn and bun lockfiles are unaffected for the same reason they carry no
+  other lockfile-backed finding: neither format's entries are parsed at
+  all. README and `docs/INVARIANTS.md` updated (fixes #69).
+
 - Fixed a publish-age coverage loss: a scope pinned to the PUBLIC registry
   in `.npmrc` used to be treated as private just because it had a pin at
   all, so a dependency under that scope never reached the publish-age

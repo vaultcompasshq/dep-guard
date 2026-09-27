@@ -39,6 +39,18 @@ function entryFromPackageValue(value: Record<string, unknown>): LockEntry {
   if (value.hasInstallScript === true) {
     entry.hasInstallScript = true;
   }
+  // npm writes this entry's OWN "name" field whenever the resolved
+  // package's real name differs from the installed/alias name the key
+  // resolves to (installedNameFromKey above) -- an npm: alias entry, most
+  // often. That is the only place the real registry name survives for a
+  // purely transitive alias: one a dependency's own dependency block
+  // introduces, which no manifest anywhere declares (issue #69). An
+  // ordinary entry has no reason to carry this field at all, so it is left
+  // undefined rather than defaulted to the key-derived name -- delta.ts's
+  // packageName resolution supplies that fallback itself.
+  if (typeof value.name === 'string') {
+    entry.registryName = value.name;
+  }
   return entry;
 }
 

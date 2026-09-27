@@ -178,6 +178,45 @@ describe('parsePnpmLockfile registry-name key extraction (scoped/unscoped, slash
   });
 });
 
+// Issue #69's transitive-alias problem is npm-specific: npm keys its
+// entries by the INSTALLED name (installedNameFromKey in npm.ts), so an
+// alias's real target has to be recovered from elsewhere. pnpm never has
+// that problem, for any alias no matter how transitive, because its
+// top-level "packages" map is keyed by REGISTRY identity -- name@version --
+// not by whatever name some dependent's own "dependencies" block used to
+// reach it. A dependent aliasing "myalias" to lodash records that mapping
+// only in ITS OWN dependencies block ("myalias: lodash@4.17.21"); the
+// resolved package's own packages-map key is still "lodash@4.17.21", and
+// parsePackageKey (above) reads the name straight out of it. So
+// LockEntry.registryName (see lockfiles/types.ts) is deliberately never
+// set here -- this parser's `name` key already IS the answer.
+//
+// This test does not go red before the fix in this repository: pnpm never
+// had this bug, and no production code in lockfiles/pnpm.ts changed. It
+// pins the invariant lockfiles/pnpm.ts already documents (the "Keying
+// note" comment above entryFromPackageValue) against a mutation that WOULD
+// turn it red -- parsePackageKey reading the dependent's alias name instead
+// of the packages-map key's own name, e.g. by resolving through a
+// dependency block rather than splitting the key itself.
+describe('parsePnpmLockfile a transitive alias is already keyed by its real registry name (issue #69)', () => {
+  test('the aliased target is keyed by its own registry name, and the alias name used by whatever depends on it never appears as an entries key', () => {
+    const content =
+      'lockfileVersion: \'9.0\'\n' +
+      'packages:\n' +
+      '  host-pkg@1.0.0:\n' +
+      '    resolution: {integrity: sha512-host==}\n' +
+      '  lodash@4.17.21:\n' +
+      '    resolution: {integrity: sha512-real==}\n' +
+      'snapshots:\n' +
+      '  host-pkg@1.0.0:\n' +
+      '    dependencies:\n' +
+      '      myalias: lodash@4.17.21\n';
+    const result = parsePnpmLockfile(PATH, content);
+    expect([...result.entries.keys()].sort()).toEqual(['host-pkg', 'lodash']);
+    expect(only(result, 'lodash')?.registryName).toBeUndefined();
+  });
+});
+
 describe('parsePnpmLockfile standing install-script diagnostic', () => {
   test('the pnpm-no-install-script-flag diagnostic is always present', () => {
     const result = parsePnpmLockfile(PATH, FIXTURE_CONTENT);
