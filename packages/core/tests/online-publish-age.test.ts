@@ -300,6 +300,54 @@ describe('findPublishAgeFindings', () => {
     expect(ctx.diagnostics.some((d) => d.code === 'publish-age-private-origin-skipped')).toBe(true);
   });
 
+  // Issue #67: a scope pin decides by its OWN origin, not by merely
+  // existing. Before this fix, isNonPublicResolution treated ANY pinned
+  // scope as private, so a scope pinned to the public registry lost
+  // publish-age coverage even under a private project default -- a
+  // coverage loss, not a leak, but real: a well-behaved project pinning
+  // @types at the public registry for clarity got no publish-age check on
+  // it at all.
+  test('a scope pinned to the public registry is checked even when the project default registry is private', async () => {
+    const ctx = makeContext([
+      makeLockEntryChange({
+        name: '@types/node',
+        after: { version: '1.0.0' }, // no resolvedUrl: pnpm's ordinary shape
+      }),
+    ]);
+    ctx.npmrcRegistryPins.set('@types', 'https://registry.npmjs.org/');
+    ctx.npmrcDefaultRegistry = 'https://npm.acme.example/';
+    const deps = fakeDeps({ '@types/node': { '1.0.0': FRESH_DATE } });
+
+    const findings = await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    // Fetched (the pin says public), and fresh, so it flags.
+    expect(deps.calls).toEqual(['@types/node']);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].packageName).toBe('@types/node');
+    expect(ctx.diagnostics.some((d) => d.code === 'publish-age-private-origin-skipped')).toBe(false);
+  });
+
+  // The inverse: a pin still decides PRIVATE even under a public project
+  // default, which was already the pre-fix behaviour but is pinned here
+  // explicitly now that the origin comparison actually runs both ways.
+  test('a scope pinned to a private registry is skipped even when the project default registry is public', async () => {
+    const ctx = makeContext([
+      makeLockEntryChange({
+        name: '@acme/widget',
+        after: { version: '1.0.0' },
+      }),
+    ]);
+    ctx.npmrcRegistryPins.set('@acme', 'https://npm.acme.example/');
+    ctx.npmrcDefaultRegistry = 'https://registry.npmjs.org/';
+    const deps = fakeDeps({ '@acme/widget': { '1.0.0': FRESH_DATE } });
+
+    const findings = await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(findings).toEqual([]);
+    expect(deps.calls).toEqual([]);
+    expect(ctx.diagnostics.some((d) => d.code === 'publish-age-private-origin-skipped')).toBe(true);
+  });
+
   test('does nothing, and calls nothing, when the delta has no candidates', async () => {
     const ctx = makeContext([]);
     const deps = fakeDeps({});

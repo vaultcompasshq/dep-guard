@@ -37,7 +37,7 @@ import { originOf } from '../resolution.js';
 import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
-import { DEFAULT_REGISTRY } from './registry-client.js';
+import { isNonPublicName, PUBLIC_REGISTRY_ORIGIN } from './registry-scope.js';
 
 export interface PublishAgeDeps {
   // `versions` names exactly the resolved versions this call needs an
@@ -68,53 +68,44 @@ function dedupeKey(candidate: Candidate): string {
   return JSON.stringify([candidate.manifestPath, candidate.name, candidate.version]);
 }
 
-// The origin every resolved version this check asks about must come from,
-// or it is never sent to the registry at all. Computed once from
-// registry-client.ts's own DEFAULT_REGISTRY rather than hardcoded a second
-// time, so the two can never name a different "public registry" if one of
-// them ever changes.
-const PUBLIC_REGISTRY_ORIGIN = originOf(DEFAULT_REGISTRY);
-
-// True when a lockfile entry did not resolve from the public npm registry,
-// or when its scope is pinned to some other registry in .npmrc -- either
-// one is reason enough that this check must never put the name on the wire
-// to registry.npmjs.org. The two conditions are independent: a scope
-// pinned away from the public registry names a package the project has
-// already declared private, whatever host a mismatched or malformed
-// resolution happened to come from (confusion.ts's pin-mismatch rule is
-// what judges that mismatch itself; this check simply must not act on a
-// name that mismatch could apply to), and a resolvedUrl from a genuinely
-// different origin is a private install regardless of whether any scope
-// pin exists for it at all.
+// True when a lockfile entry must never be sent to the public registry:
+// either its name is declared private by the project's own .npmrc alone
+// (registry-scope.ts's isNonPublicName, shared with unknown-package and
+// registered-squat -- a scope pin, checked by the PIN'S OWN ORIGIN, or
+// (absent a pin for this scope) the project default registry), or its
+// resolvedUrl names some other origin outright.
+//
+// The scope-pin and no-resolvedUrl cases both defer entirely to
+// isNonPublicName -- a pin decides unconditionally by its own origin
+// (issue #67: treating any pin as private, regardless of what registry it
+// actually named, cost this check coverage of a scope a project pinned at
+// the PUBLIC registry on purpose), and take precedence over both the
+// default registry and a resolvedUrl either way: a name the project has
+// declared private by its own .npmrc must never reach the public registry
+// through this check regardless of what a possibly-mismatched resolution
+// says (confusion.ts's pin-mismatch rule is what judges that mismatch
+// itself; this check simply must not act on a name that mismatch could
+// apply to).
+//
+// pnpm does not record which registry served an ordinary resolution --
+// lockfiles/pnpm.ts only ever sets resolvedUrl from a resolution's own
+// `tarball` field, and an ordinary registry install has none -- so an
+// undefined resolvedUrl is the COMMON case for a pnpm lockfile, not a
+// defensive fallthrough, and it says nothing about origin on its own; the
+// project .npmrc's unscoped default registry (read by isNonPublicName) is
+// the only signal available to judge it. See the docs note on
+// isNonPublicResolution in README.md and docs/INVARIANTS.md for what a
+// repository relying on a USER-level ~/.npmrc or npm_config_registry
+// instead has to configure, since neither of those reaches this function
+// (or isNonPublicName) at all.
+//
+// Only once neither of those applies -- an unpinned (or public-pinned)
+// scope with a real resolvedUrl -- does the resolvedUrl's own origin decide.
 function isNonPublicResolution(ctx: CheckContext, name: string, resolvedUrl: string | undefined): boolean {
   const scope = scopeOf(name);
-  if (scope !== null && ctx.npmrcRegistryPins.has(scope)) {
-    return true;
-  }
-  if (resolvedUrl === undefined) {
-    // pnpm does not record which registry served an ordinary resolution --
-    // lockfiles/pnpm.ts only ever sets resolvedUrl from a resolution's own
-    // `tarball` field, and a ordinary registry install has none -- so an
-    // undefined resolvedUrl is the COMMON case for a pnpm lockfile, not a
-    // defensive fallthrough, and it says nothing about origin on its own.
-    // The project .npmrc's unscoped default registry is the one place
-    // pnpm's own resolution actually reads to decide where such a name
-    // came from, so it is the only signal available to judge this case:
-    // when the project set one and it is not the public registry, every
-    // resolution with no resolvedUrl came from that private registry, by
-    // the same reasoning as the npmrcRegistryPins scope check above. When
-    // none is configured, or it points at the public registry, an absent
-    // value is genuinely neither public nor private evidence, so this
-    // still returns false rather than guessing -- see the docs note on
-    // isNonPublicResolution in README.md and docs/INVARIANTS.md for what a
-    // repository relying on a USER-level ~/.npmrc or npm_config_registry
-    // instead has to configure, since neither of those reaches this
-    // function at all.
-    return (
-      ctx.npmrcDefaultRegistry !== undefined &&
-      ctx.npmrcDefaultRegistry !== null &&
-      originOf(ctx.npmrcDefaultRegistry) !== PUBLIC_REGISTRY_ORIGIN
-    );
+  const hasPin = scope !== null && ctx.npmrcRegistryPins.has(scope);
+  if (hasPin || resolvedUrl === undefined) {
+    return isNonPublicName(ctx, name);
   }
   return originOf(resolvedUrl) !== PUBLIC_REGISTRY_ORIGIN;
 }
