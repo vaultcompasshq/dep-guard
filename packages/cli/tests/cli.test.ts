@@ -743,6 +743,25 @@ describe('--online-budget-ms flag', () => {
     expect(run.stderr).toContain('--online-budget-ms');
   }, CLI_TIMEOUT_MS);
 
+  // Number(value) alone would accept each of these as a valid non-negative
+  // integer -- "" coerces to 0, "0x10" parses as hex (16), "1e3" as
+  // scientific notation (1000) -- none of which is what a person typing a
+  // millisecond count on a command line means (found in independent
+  // review). Only "1e3" is exercised here; the parser itself is a plain
+  // /^\d+$/ test that refuses all three the same way.
+  test('scientific notation is rejected, not silently parsed as a plain integer', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+
+    const run = await runCli(
+      ['scan', '--online', '--online-budget-ms', '1e3', '--format', 'json', '--corpus-dir', FIXTURE_CORPUS],
+      repo
+    );
+
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toContain('--online-budget-ms');
+  }, CLI_TIMEOUT_MS);
+
   test('is accepted on check as well', async () => {
     await write('package.json', manifestJson({}));
     await write('.dep-guard.json', JSON.stringify({ allow: ['react'] }));

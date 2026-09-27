@@ -1350,22 +1350,48 @@ fields:
 - `enabled`: were online checks on for this run at all.
 - `budgetMs`: the budget actually used (`resolveOnlineBudgetMs`'s result),
   zero when `enabled` is false.
-- `lookupsAttempted`: real registry or downloads requests actually issued,
+- `lookupsAttempted`: package NAMES for which a lookup was actually issued,
   counted at each of scan.ts's own cached-fetch call sites
   (`cachedFetchWeeklyDownloads`, `cachedFetchPackument`,
   `cachedFetchPackumentVersionTimes`, `liveFetchPackument`) rather than
   estimated from candidate counts -- a cache hit costs nothing and is never
-  counted, only the request that actually reaches `registry-client.ts` is.
-  A fresh counter is created per `enrichOnline` call (never a module-level
-  total) so two scans in one process, which the shared on-disk cache
-  singleton above already anticipates, cannot mix each other's counts.
-- `lookupsSkippedByDeadline`: read back out of every
-  `online-deadline-exceeded` diagnostic this run raised
-  (`deadline.ts`'s `sumDeadlineSkipped`, parsing the count each diagnostic's
-  own message already states) rather than kept as a second,
-  independently-incremented count -- deliberately, so this number can never
-  drift from what a human reading the same diagnostics would add up
-  themselves. This inherits the asymmetry step's own pre-filter asymmetry
+  counted, only a name that actually reaches `registry-client.ts` is. Names,
+  not wrapper calls and not raw HTTP requests, because those two units
+  disagree with each other and with `lookupsSkippedByDeadline` (below) the
+  moment more than one name is batched into a single call: registered-squat
+  and the typosquat asymmetry step each issue exactly ONE bulk
+  `fetchWeeklyDownloads` call carrying every one of their candidates (never
+  one call per name), and that one call can in turn cost
+  `registry-client.ts` several real HTTP requests internally (a 128-name
+  unscoped batch, one request per scoped name, and a possible sentinel
+  probe). An earlier version of this field counted 1 per call to
+  `cachedFetchWeeklyDownloads` regardless of `misses.length`, which
+  undercounted badly on exactly this batched path -- a 300-name pull
+  request with 20 scoped names reported roughly 1 where about 23 real
+  lookups had actually gone out (found in independent review). The fix
+  (`cachedFetchWeeklyDownloads`) increments by `misses.length`, the number
+  of names that were not already cached, rather than by 1 per call; the
+  other three cached fetches already take one name per call, so "1 per
+  call" and "1 per name" already agreed there and needed no change. Names
+  are the one unit `lookupsAttempted` and `lookupsSkippedByDeadline` can
+  share, which is what lets a consumer add them to answer "how many names
+  did the online checks want to look up in total" -- the reason the fields
+  are two counts of the same kind of thing rather than one being requests
+  and the other being candidates. A fresh counter is created per
+  `enrichOnline` call (never a module-level total) so two scans in one
+  process, which the shared on-disk cache singleton above already
+  anticipates, cannot mix each other's counts.
+- `lookupsSkippedByDeadline`: skipped LOOKUPS, read back out of every
+  `online-deadline-exceeded` diagnostic this run raised (`deadline.ts`'s
+  `sumDeadlineSkipped`, parsing the count each diagnostic's own message
+  already states) rather than kept as a second, independently-incremented
+  count -- deliberately, so this number can never drift from what a human
+  reading the same diagnostics would add up themselves. Not a count of
+  distinct packages the budget cost coverage for: each of the three
+  per-name-loop online steps tracks and reports its own skips
+  independently, so the same package name can be counted here more than
+  once if it was still queued in two different steps when the budget ran
+  out. This also inherits the asymmetry step's own pre-filter asymmetry
   noted above: its count is taken before that step's internal-name and
   private-origin filters run, so it can overstate skipped lookups but never
   understate them, exactly as the diagnostic it is read from already does.

@@ -231,30 +231,49 @@ by itself: it stays a diagnostic, the same as a registry error above,
 because a skipped lookup is exactly as much "nothing this check could say"
 as a network failure is.
 
-The budget defaults to **20000ms (twenty seconds)** for a plain run --
-the pre-commit hook shape, where a developer is waiting on the command to
-finish, and a repository adding twenty new names should not stall a commit
-for half a minute while every individual request stays comfortably inside
-its own timeout. It defaults to **300000ms (five minutes)** instead when
-either `--base` or `--trust-base` is given, because that is the
-pull-request/CI shape rather than a hook: a CI job has minutes to spend,
-and the expensive failure there is not a slow job but a large dependency
-change whose remaining lookups quietly keep their offline result once the
-hook-sized budget runs out. Either default can be overridden: the
-`onlineBudgetMs` key in `.dep-guard.json` sets it for every invocation
-(like `"online"` itself, only meaningful alongside it), and `--online-budget-ms
-<ms>` overrides both the key and the default for one run. An explicit
-config key or flag always wins over whichever default would otherwise
-apply.
+The budget defaults to **20000ms (twenty seconds)** for a plain run: no
+`--base` and no `--trust-base` on the command line, whatever else is
+running it. That is the pre-commit hook shape, where a developer is
+waiting on the command to finish, and a repository adding twenty new names
+should not stall a commit for half a minute while every individual request
+stays comfortably inside its own timeout. It defaults to **300000ms (five
+minutes)** only when the command line actually carries `--base` or
+`--trust-base` -- not "in CI" more broadly. The GitHub Action below (see
+"In the Action") only ever adds either flag on a `pull_request` event: on
+a `push` or `schedule` run it passes neither, per its own `ARGS` assembly,
+so those runs get 20000ms too, the same as a bare `dep-guard check` in any
+job that never passes `--trust-base`. Where `--base`/`--trust-base` land is
+the pull-request-triggered run specifically, because that is the shape
+with minutes to spend and a large dependency change as the expensive
+failure mode, once its remaining lookups quietly keep their offline result
+after the hook-sized budget runs out. Either
+default can be overridden: the `onlineBudgetMs` key in `.dep-guard.json`
+sets it for every invocation (like `"online"` itself, only meaningful
+alongside it), and `--online-budget-ms <ms>` overrides both the key and the
+default for one run. An explicit config key or flag always wins over
+whichever default would otherwise apply.
+
+`--online-budget-ms` is a workflow-file decision, the same as `--online`
+and `--base` themselves: whatever value a job's own `dep-guard scan`
+invocation carries is what runs. On a **same-repository** pull request that
+value is only as trustworthy as the workflow file is, since that event runs
+the pull request's own copy of it -- see "Protecting the workflow file
+itself" below for what closes that gap (branch protection, not
+`--trust-base`), and why a fork pull request does not have the same
+exposure.
 
 The run's JSON output always carries an `online` object under `run`,
 whether or not online checks ran, so a CI consumer (the conductor umbrella
 in particular) can read it unconditionally: `enabled`, the `budgetMs`
-actually used, `lookupsAttempted` (real registry/downloads requests
-issued), `lookupsSkippedByDeadline` (candidates skipped once the budget was
-spent, matching what the `online-deadline-exceeded` diagnostics already
-say), and `deadlineExceeded`. Disabled online checks report `enabled:
-false` and every number at zero, never an absent field.
+actually used, `lookupsAttempted` (package names for which a lookup was
+actually issued -- a downloads lookup may batch many names into one
+request, and this counts the names, not the requests), `lookupsSkippedByDeadline`
+(skipped lookups once the budget was spent, matching what the
+`online-deadline-exceeded` diagnostics already say -- the same name can be
+counted here more than once if two different online checks both had it
+queued when the budget ran out), and `deadlineExceeded`. Disabled online
+checks report `enabled: false` and every number at zero, never an absent
+field.
 
 ```json
 "online": {

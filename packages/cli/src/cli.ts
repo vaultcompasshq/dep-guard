@@ -86,8 +86,8 @@ const NO_ONLINE_FLAG_DESCRIPTION =
 const ONLINE_BUDGET_MS_FLAG_DESCRIPTION =
   'override the online checks wall-clock budget for one run, in milliseconds -- only matters ' +
   'alongside --online or "online": true in .dep-guard.json. Defaults to 20000 (twenty ' +
-  'seconds) with no --base and no --trust-base (the commit-hook shape), and 300000 (five ' +
-  'minutes) when either is present (the pull-request/CI shape)';
+  'seconds) unless --base or --trust-base is also given on this command line, in which case ' +
+  'it defaults to 300000 (five minutes) instead';
 
 // A bad --format or --fail-on value, or an unusable combination of flags
 // (--staged with --base). Kept distinct from DepGuardError -- which only
@@ -112,15 +112,22 @@ function parseFailOn(value: string | undefined): FailOn | undefined {
 // the flag was never given); undefined has to reach scan()/checkSingle()
 // unchanged so .dep-guard.json's onlineBudgetMs key (or, absent that, the
 // two run-shape defaults) gets to decide -- see core's resolveOnlineBudgetMs.
+// Digits only, and at least one of them: `Number(value)` alone would also
+// accept "" (coerces to 0), "0x10" (a hex literal, 16), and "1e3"
+// (scientific notation, 1000) as valid non-negative integers, none of which
+// is what a person typing a millisecond count on a command line means
+// (found in independent review). This regex is checked before any numeric
+// conversion runs, so none of those three ever reaches Number().
+const NON_NEGATIVE_INTEGER_LITERAL = /^\d+$/;
+
 function parseOnlineBudgetMs(value: string | undefined): number | undefined {
   if (value === undefined) {
     return undefined;
   }
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) {
+  if (!NON_NEGATIVE_INTEGER_LITERAL.test(value)) {
     throw new CliUsageError(`--online-budget-ms must be a non-negative integer (got "${value}")`);
   }
-  return parsed;
+  return Number(value);
 }
 
 // Validated against init.ts's own list rather than a second copy of the

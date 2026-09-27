@@ -312,8 +312,26 @@ const CREATED_TTL_MS: number | null = null; // a package's creation date never c
 // roughly matching the per-request budget SCAN_TIMEOUT_MS already sets.
 const SCAN_BACKOFF_CAP_MS = 8_000;
 
-// A single run's count of real registry/downloads requests actually
-// issued (scan.ts's JSON `online.lookupsAttempted` field, issue #75).
+// A single run's count of package NAMES actually looked up online (scan.ts's
+// JSON `online.lookupsAttempted` field, issue #75) -- not wrapper calls, and
+// not raw HTTP requests. Those two differ from "names" for exactly one of
+// the four cached fetches below: cachedFetchWeeklyDownloads is called ONCE
+// per online step with every candidate batched into a single array
+// (registered-squat.ts and asymmetry.ts each issue one bulk
+// fetchWeeklyDownloads call for every candidate they have, never one per
+// name), and that one call can in turn cost the registry client several
+// real HTTP requests internally (a 128-name unscoped batch, one request per
+// scoped name, and a possible sentinel probe -- registry-client.ts's own
+// fetchWeeklyDownloads). Counting "1 per call" undercounts a large batch
+// badly; counting "1 per underlying HTTP request" would require this file
+// to know registry-client.ts's private batching shape and would still not
+// match lookupsSkippedByDeadline, which is a count of skipped CANDIDATE
+// NAMES, not requests. Names are the one unit both fields can share, so a
+// consumer can add them to answer "how many names did the online checks
+// want to look up in total". The other three cached fetches below already
+// take one name per call, so "1 per call" and "1 per name" already agree
+// there; only the downloads batch needed to change.
+//
 // Threaded explicitly into each cached fetch below rather than kept as a
 // module-level counter: enrichOnline creates one fresh per call, so two
 // scans in one process (checkSingle and scan() can both run in a single
@@ -339,7 +357,11 @@ async function cachedFetchWeeklyDownloads(
     }
   }
   if (misses.length > 0) {
-    lookups.attempted += 1;
+    // One name per miss, regardless of how many HTTP requests
+    // fetchWeeklyDownloads itself turns this array into -- see this
+    // function's own doc comment above (LookupCounter) for why "names",
+    // not "calls" or "requests", is the field's unit.
+    lookups.attempted += misses.length;
     const fetched = await fetchWeeklyDownloads(misses, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
     for (const [name, count] of fetched.counts) {
       counts.set(name, count);
@@ -528,7 +550,22 @@ async function liveFetchPackument(name: string, lookups: LookupCounter) {
 export interface OnlineRunSummary {
   enabled: boolean;
   budgetMs: number;
+  // Package NAMES for which a real registry or downloads lookup was
+  // actually issued, summed across all four online steps -- see
+  // LookupCounter's own doc comment above for why this counts names, never
+  // wrapper calls or raw HTTP requests: a single batched downloads call can
+  // carry many names in one request, and this field has to stay in the same
+  // unit as lookupsSkippedByDeadline for the two to be addable.
   lookupsAttempted: number;
+  // Skipped LOOKUPS once the budget was spent, read back out of every
+  // online-deadline-exceeded diagnostic this run raised (deadline.ts's
+  // sumDeadlineSkipped) rather than kept as a second, independently
+  // incremented count. "Skipped lookups", not "candidates skipped": the
+  // same package name can be counted here more than once if two different
+  // online steps both had it queued and both ran out of budget before
+  // reaching it (each step tracks and reports its own skips independently),
+  // so this is not a count of distinct packages the budget cost coverage
+  // for.
   lookupsSkippedByDeadline: number;
   deadlineExceeded: boolean;
 }

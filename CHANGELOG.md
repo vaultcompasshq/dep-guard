@@ -17,18 +17,24 @@ GitHub release notes, which are generated from the commit history.
   change could exhaust it and leave the remaining lookups quietly at their
   offline result with only an `online-deadline-exceeded` diagnostic to show
   for it. The budget now defaults to twenty seconds with no `--base` and no
-  `--trust-base`, and to five minutes (`CI_ONLINE_BUDGET_MS`) when either is
-  present, since that is the pull-request/CI shape rather than a commit
-  hook. A new `onlineBudgetMs` key in `.dep-guard.json` and a matching
+  `--trust-base` on the command line, and to five minutes
+  (`CI_ONLINE_BUDGET_MS`) only when one of those two flags is actually
+  given -- not "in CI" more broadly: a push-triggered job or a bare
+  `dep-guard check` with neither flag still gets twenty seconds. A new
+  `onlineBudgetMs` key in `.dep-guard.json` and a matching
   `--online-budget-ms` CLI flag override either default for one run, in that
   order of precedence; both are meaningless without `online: true` or
   `--online`. `onlineBudgetMs` is a control input like every other
   `.dep-guard.json` key, so a pull request cannot raise or lower it for the
-  run judging it. An exhausted budget still never fails the run by itself
-  -- it stays a diagnostic, exactly as before. The JSON output gained a
-  `run.online` object (a sibling of `run.corpusBuiltAt`), always present,
-  reporting whether online checks ran, the budget actually used, how many
-  real registry/downloads requests were issued, how many candidates were
+  run judging it; `--online-budget-ms` itself is a workflow-file decision,
+  protected the same way every other flag baked into a job is (see
+  "Protecting the workflow file itself" in the README). An exhausted budget
+  still never fails the run by itself -- it stays a diagnostic, exactly as
+  before. The JSON output gained a `run.online` object (a sibling of
+  `run.corpusBuiltAt`), always present, reporting whether online checks
+  ran, the budget actually used, how many package names a lookup was
+  actually issued for (a downloads lookup can batch many names into one
+  request, so this counts names, not requests), how many lookups were
   skipped once the budget was spent, and whether the deadline was exceeded
   at all -- so the conductor umbrella (vaultcompasshq/conductor#72) and any
   other JSON consumer can tell a genuine clean run apart from one that quietly

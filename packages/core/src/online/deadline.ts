@@ -45,9 +45,12 @@ export interface OnlineDeadline {
 // twenty seconds. The budget is therefore roughly "one pathological name,
 // or a couple of dozen healthy ones" -- long enough that a normal delta
 // finishes every lookup it wanted, short enough that a degraded network
-// cannot turn a commit into a coffee break. It is not configurable today;
-// if it ever needs to be, it becomes a config key rather than a second
-// constant somewhere else.
+// cannot turn a commit into a coffee break. This is the DEFAULT for a
+// plain run (no --base, no --trust-base) as of issue #75: it is now
+// configurable, both by a "onlineBudgetMs" key in .dep-guard.json and by
+// the CLI's --online-budget-ms flag, and scan.ts's resolveOnlineBudgetMs is
+// what picks between this and CI_ONLINE_BUDGET_MS below when neither
+// override is given.
 export const DEFAULT_ONLINE_BUDGET_MS = 20_000;
 
 // Five minutes, used instead of DEFAULT_ONLINE_BUDGET_MS when the run is a
