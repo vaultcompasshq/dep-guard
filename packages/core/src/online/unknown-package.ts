@@ -69,12 +69,25 @@
 // anyway, because "the caller already filtered it" is exactly the kind of
 // second-hand claim docs/INVARIANTS.md's opening warns about, and the cost
 // of being wrong is a private name leaving the machine.
+//
+// internalScopes/internalPrefixes is a name-shaped declaration a user has
+// to remember to configure, and it is not the only source of truth about
+// which names are private (issue #70): a name whose scope is pinned to a
+// non-public registry in the project's own .npmrc, or that falls under a
+// private project default registry, is the same fact stated a different
+// way, and online/publish-age.ts already honoured it before this check
+// did. registry-scope.ts's isNonPublicName is the shared decision so all
+// three online checks agree; unlike the internal-name guard above, this
+// path IS reachable in production (existenceCheck has no .npmrc-shaped
+// filter of its own), so a skip here is a visible diagnostic
+// (`unknown-package-private-origin-skipped`) rather than a silent drop.
 
 import type { CheckContext } from '../checks/types.js';
 import { isInternalName } from '../checks/allow.js';
 import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
+import { isNonPublicName } from './registry-scope.js';
 
 // The facts this check needs about a 200 from the registry. Deliberately
 // NOT `{ createdAt }`: a creation date cannot distinguish a real package
@@ -194,11 +207,31 @@ export async function resolveUnknownPackages(
   diagnostics: Diagnostic[],
   deadline: OnlineDeadline
 ): Promise<Omit<Finding, 'fingerprint'>[]> {
-  const candidates = findings.filter(
-    (f) =>
-      f.ruleId === 'unknown-package' &&
-      !isInternalName(f.packageName, ctx.config.internalScopes, ctx.config.internalPrefixes)
-  );
+  const candidates: Omit<Finding, 'fingerprint'>[] = [];
+  for (const finding of findings) {
+    if (finding.ruleId !== 'unknown-package') {
+      continue;
+    }
+    if (isInternalName(finding.packageName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
+      continue;
+    }
+    if (isNonPublicName(ctx, finding.packageName)) {
+      // Visible, not silent: unlike the internalScopes/internalPrefixes
+      // filter above, a real manifest-declared scope pinned to a private
+      // registry reaches this branch in production, so the skip has to say
+      // so -- the same "a suppressed decision must be reported" rule
+      // publish-age's own private-origin skip follows.
+      diagnostics.push({
+        code: 'unknown-package-private-origin-skipped',
+        message:
+          `${CHECK_LABEL}: "${finding.packageName}" is declared private by the project's .npmrc ` +
+          '(its scope is pinned to another registry, or the default registry is private), so it ' +
+          'was not sent to the registry for resolution',
+      });
+      continue;
+    }
+    candidates.push(finding);
+  }
   if (candidates.length === 0) {
     return findings;
   }

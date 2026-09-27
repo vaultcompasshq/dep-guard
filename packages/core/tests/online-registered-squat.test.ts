@@ -376,6 +376,67 @@ describe('findRegisteredSquats', () => {
     expect(findings.map((f) => f.packageName)).toEqual(['public-fresh-thing']);
   });
 
+  // Issue #70: a scope pinned to a private registry in the project's own
+  // .npmrc is the same "this name is private" fact internalScopes states,
+  // reached a different way, and this check must not depend on the user
+  // having also configured internalScopes for it.
+  test('a name whose scope is pinned to a private registry in .npmrc is never sent to either API', async () => {
+    const ctx = makeContext([makeChange({ name: '@acme/pinned-thing' })]);
+    // A fresh config, not the shared BASE_CONFIG object earlier tests in
+    // this file mutate in place (internalScopes/internalPrefixes above):
+    // this test's whole point is that the pin alone is enough, with no
+    // internalScopes entry at all, and reading the polluted shared object
+    // would make that unfalsifiable.
+    ctx.config = { ...ctx.config, internalScopes: [], internalPrefixes: [] };
+    ctx.npmrcRegistryPins.set('@acme', 'https://npm.acme.example/');
+    const askedDownloads: string[][] = [];
+    const askedPackuments: string[] = [];
+    const deps = {
+      fetchWeeklyDownloads: async (names: string[]) => {
+        askedDownloads.push(names);
+        return { counts: new Map<string, number>(), noRecord: new Set(names) };
+      },
+      fetchPackument: async (name: string) => {
+        askedPackuments.push(name);
+        return { createdAt: NEW_DATE };
+      },
+    };
+
+    const findings = await findRegisteredSquats(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(findings).toEqual([]);
+    expect(askedDownloads).toEqual([]);
+    expect(askedPackuments).toEqual([]);
+    expect(ctx.diagnostics.some((d) => d.code === 'registered-squat-private-origin-skipped')).toBe(true);
+    expect(
+      ctx.diagnostics.find((d) => d.code === 'registered-squat-private-origin-skipped')?.message
+    ).toContain('@acme/pinned-thing');
+  });
+
+  // The falsifiable half: a public sibling with no pin at all still reaches
+  // both APIs.
+  test('a public name with no npmrc pin still reaches both APIs, alongside a pinned sibling that does not', async () => {
+    const ctx = makeContext([
+      makeChange({ name: '@acme/pinned-thing' }),
+      makeChange({ name: 'public-fresh-thing' }),
+    ]);
+    ctx.config = { ...ctx.config, internalScopes: [], internalPrefixes: [] };
+    ctx.npmrcRegistryPins.set('@acme', 'https://npm.acme.example/');
+    const askedDownloads: string[][] = [];
+    const deps = {
+      fetchWeeklyDownloads: async (names: string[]) => {
+        askedDownloads.push(names);
+        return { counts: new Map(names.map((n) => [n, 1])), noRecord: new Set<string>() };
+      },
+      fetchPackument: async () => ({ createdAt: NEW_DATE }),
+    };
+
+    const findings = await findRegisteredSquats(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(askedDownloads).toEqual([['public-fresh-thing']]);
+    expect(findings.map((f) => f.packageName)).toEqual(['public-fresh-thing']);
+  });
+
   test('a spent per-run deadline skips the whole check and records why', async () => {
     const ctx = makeContext([makeChange({ name: 'react-codeshift' })]);
     const diagnostics: Diagnostic[] = [];

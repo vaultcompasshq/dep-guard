@@ -23,6 +23,7 @@ import type { DownloadCountsResult } from './registry-client.js';
 import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
+import { isNonPublicName } from './registry-scope.js';
 
 export const REGISTERED_SQUAT_DOWNLOAD_FLOOR = 50;
 export const REGISTERED_SQUAT_MAX_AGE_DAYS = 30;
@@ -64,10 +65,33 @@ export async function findRegisteredSquats(
   // a public service just to score a heuristic. That is why the filter is
   // here, ahead of the fetch, rather than a severity adjustment applied to
   // the finding afterwards.
-  const candidates = newRegistryNames(ctx).filter(
-    ({ registryName }) =>
-      !isInternalName(registryName, ctx.config.internalScopes, ctx.config.internalPrefixes)
-  );
+  //
+  // internalScopes/internalPrefixes is not the only source of truth about
+  // which names are private, though (issue #70): a scope pinned to a
+  // non-public registry in the project's own .npmrc, or a private project
+  // default registry, is the same fact stated a different way, and
+  // online/publish-age.ts already honoured it before this check did.
+  // registry-scope.ts's isNonPublicName is the shared decision. Unlike the
+  // internalScopes filter above -- which candidates.ts's newRegistryNames
+  // never surfaces an internal name past in the first place -- this path is
+  // genuinely reachable, so a skip here is a visible diagnostic naming the
+  // package rather than a silent drop.
+  const candidates = newRegistryNames(ctx).filter(({ registryName }) => {
+    if (isInternalName(registryName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
+      return false;
+    }
+    if (isNonPublicName(ctx, registryName)) {
+      diagnostics.push({
+        code: 'registered-squat-private-origin-skipped',
+        message:
+          `registered-squat: "${registryName}" is declared private by the project's .npmrc ` +
+          '(its scope is pinned to another registry, or the default registry is private), so it ' +
+          'was not sent to the registry for a registered-squat check',
+      });
+      return false;
+    }
+    return true;
+  });
   if (candidates.length === 0) {
     return [];
   }
