@@ -54,18 +54,38 @@ export interface PublishAgeDeps {
 }
 
 interface Candidate {
+  // Identity: what this finding reports under, and what dedupes and
+  // allow-list keys are built from. Always entryChange.packageName -- the
+  // lockfile key or a manifest-declared alias target, never anything the
+  // lockfile entry itself merely claims (see delta.ts and
+  // lockfiles/types.ts's LockEntry.lookupName for why).
   name: string;
+  // What is actually sent to the registry. Equal to `name` for the
+  // overwhelming majority of entries; differs only when the entry carries a
+  // lookupName the resolved URL vouched for (a transitive npm: alias --
+  // issue #69). Never read by anything other than the fetchPackument call
+  // below.
+  lookupName: string;
   version: string;
   manifestPath: string;
 }
 
-// One candidate per (manifestPath, name, version) triple: the same
-// resolved version of the same package can legitimately appear more than
-// once in a single lockfile's diff (a nested duplicate resolution, say),
-// and asking the registry about it twice, or reporting it twice against
-// the same manifest, adds nothing a reader can act on twice.
+// One candidate per (manifestPath, name, lookupName, version) quadruple.
+// `lookupName` has to be part of this key, not just `name`: npm stores
+// several entries under one lockfile key at different nesting paths
+// (lockfiles/types.ts's entries-map comment -- a nested duplicate is
+// ordinary, and every one of them shares the outer key's installed name),
+// so two GENUINELY DIFFERENT entries can share (manifestPath, name,
+// version) while resolving to two different real packages. Deduping on
+// the three-part key alone silently dropped whichever one lost the `seen`
+// race -- and a nested decoy sharing a real entry's key, version, and
+// manifest path while vouching for an unrelated package's name (issue #69,
+// round 3) turned that silent drop into a bypass: the real entry's own
+// candidate never existed, so it was never asked about and never checked.
+// With `lookupName` in the key, the real entry and the decoy are two
+// candidates, each looked up under its own name.
 function dedupeKey(candidate: Candidate): string {
-  return JSON.stringify([candidate.manifestPath, candidate.name, candidate.version]);
+  return JSON.stringify([candidate.manifestPath, candidate.name, candidate.lookupName, candidate.version]);
 }
 
 // True when a lockfile entry must never be sent to the public registry.
@@ -155,7 +175,13 @@ function collectCandidates(ctx: CheckContext, diagnostics: Diagnostic[]): Candid
       });
       continue;
     }
-    const candidate: Candidate = { name, version, manifestPath: entryChange.manifestPath };
+    // lookupName is a lookup hint ONLY -- see the Candidate field comment
+    // above and lockfiles/types.ts's LockEntry.lookupName. Every skip
+    // decision above this line judges `name` (identity), never this value,
+    // on purpose: an entry whose declared name is internal or privately
+    // pinned must not be sent to the wire under some OTHER name either.
+    const lookupName = entryChange.after.lookupName ?? name;
+    const candidate: Candidate = { name, lookupName, version, manifestPath: entryChange.manifestPath };
     const key = dedupeKey(candidate);
     if (seen.has(key)) {
       continue;
@@ -221,16 +247,22 @@ export async function findPublishAgeFindings(
   const allowSet = new Set(ctx.config.minAgeAllow);
   const minAgeDays = ctx.config.minAgeDays;
 
-  // Grouped by name, not by (name, version): one packument carries every
-  // version's publish timestamp, so a package appearing at several
-  // versions across a monorepo's manifests -- or, after dedupeKey above,
-  // even just at several manifestPaths for the SAME version -- is still
-  // one fetch.
-  const byName = new Map<string, Candidate[]>();
+  // Grouped by LOOKUP TARGET (lookupName), not by identity and not by
+  // (name, version): one packument carries every version's publish
+  // timestamp, so a package appearing at several versions across a
+  // monorepo's manifests -- or, after dedupeKey above, even just at
+  // several manifestPaths for the SAME version -- is still one fetch. It
+  // must be lookupName, not `name` (identity), because two candidates can
+  // share one identity while resolving to two different real packages
+  // (issue #69, round 3 -- see the dedupeKey comment above for the exact
+  // shape). Grouping by lookupName makes "every candidate in this group
+  // shares one lookup target" true by construction, rather than an
+  // assumption `group[0]` used to stand in for the whole group.
+  const byLookupName = new Map<string, Candidate[]>();
   for (const candidate of candidates) {
-    const existing = byName.get(candidate.name);
+    const existing = byLookupName.get(candidate.lookupName);
     if (existing === undefined) {
-      byName.set(candidate.name, [candidate]);
+      byLookupName.set(candidate.lookupName, [candidate]);
     } else {
       existing.push(candidate);
     }
@@ -239,7 +271,7 @@ export async function findPublishAgeFindings(
   const findings: Omit<Finding, 'fingerprint'>[] = [];
   let skippedByDeadline = 0;
 
-  for (const [name, group] of byName) {
+  for (const [lookupName, group] of byLookupName) {
     if (deadline.expired()) {
       skippedByDeadline += group.length;
       continue;
@@ -248,14 +280,14 @@ export async function findPublishAgeFindings(
     let packument: { versionTimes: Record<string, string> } | null;
     try {
       packument = await deps.fetchPackument(
-        name,
+        lookupName,
         group.map((candidate) => candidate.version)
       );
     } catch (err) {
       diagnostics.push({
         code: 'online-check-unreachable',
         message:
-          `publish-age: could not reach the npm registry for "${name}" (${(err as Error).message}); ` +
+          `publish-age: could not reach the npm registry for "${lookupName}" (${(err as Error).message}); ` +
           `${group.length} dependency(ies) were not checked`,
       });
       continue;
@@ -276,7 +308,7 @@ export async function findPublishAgeFindings(
       // "nothing needed checking".
       diagnostics.push({
         code: 'publish-age-package-unknown',
-        message: `publish-age: the npm registry does not know package "${name}"; ${group.length} dependency(ies) resolved to it were not checked for publish age`,
+        message: `publish-age: the npm registry does not know package "${lookupName}"; ${group.length} dependency(ies) resolved to it were not checked for publish age`,
       });
       continue;
     }
@@ -311,7 +343,7 @@ export async function findPublishAgeFindings(
         // unknown-package case above.
         diagnostics.push({
           code: 'publish-age-version-unknown',
-          message: `publish-age: "${candidate.name}@${candidate.version}" is missing from the registry's publish-time record for "${candidate.name}"; publish age could not be checked for this version`,
+          message: `publish-age: "${candidate.name}@${candidate.version}" is missing from the registry's publish-time record for "${candidate.lookupName}"; publish age could not be checked for this version`,
         });
         continue;
       }
@@ -333,6 +365,15 @@ export async function findPublishAgeFindings(
           publishedAt,
           ageDays: Math.floor(days),
           minAgeDays,
+          // Present only when a lookup actually happened under a DIFFERENT
+          // name than this finding reports under (a transitive npm: alias,
+          // issue #69) -- so a reader knows which registry package the age
+          // came from without every ordinary, non-alias finding growing a
+          // redundant field that just repeats packageName. Outside the
+          // fingerprint (fingerprint.ts hashes only ruleId, packageName,
+          // manifestPath and details.signal), so this can never move a
+          // baseline.
+          ...(candidate.lookupName !== candidate.name ? { lookupName: candidate.lookupName } : {}),
         },
       });
     }

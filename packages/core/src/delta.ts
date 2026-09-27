@@ -26,8 +26,35 @@ export interface DepChange {
 //
 // `name` is the key the lockfile itself uses (the installed name for npm,
 // the registry name for pnpm); `packageName` is the registry name a
-// manifest declares for it when one does, so an aliased dependency is
-// reported under what actually installs rather than under the alias key.
+// manifest declares for it when one does, so a MANIFEST-DECLARED aliased
+// dependency is reported under what actually installs rather than under
+// the alias key. Deliberately never anything else.
+//
+// packageName is dep-guard's identity for this entry: every allow entry,
+// every pin, every tamper/confusion/install-script dedupe key, and the
+// fingerprint itself are keyed off it (fingerprint.ts). It therefore must
+// never be sourced from anything the lockfile author controls without a
+// manifest line vouching for it -- a `name` field an npm packages entry
+// carries is exactly that, on a real pull request the author of the
+// lockfile, and it is round-tripped verbatim by npm whatever it says (see
+// lockfiles/npm.ts's entryFromPackageValue, and the vouching rule on
+// LockEntry.lookupName in lockfiles/types.ts). An earlier version
+// of this fix (issue #69) read that field into packageName for a purely
+// transitive alias no manifest declares, and an independent review proved
+// the consequence directly against this engine: a nested
+// node_modules/host/node_modules/@corp/secret entry, @corp pinned private,
+// hasInstallScript true, produces dependency-confusion and install-script
+// findings; adding "name": "left-pad" to that same entry produced ZERO
+// findings, because pinMismatch's scope lookup and allowClears's allow-list
+// match both ran against "left-pad" instead of "@corp/secret" (see
+// checks/confusion.ts's lockfile-walk loop and checks/install-script.ts's
+// lockfile-walk loop, both of which read entryChange.packageName directly).
+// The same trick lands an entry on an already-baselined fingerprint.
+//
+// See lookupName below (on LockEntry, in lockfiles/types.ts) for how a
+// transitive alias's real target is recovered WITHOUT touching identity:
+// only online/publish-age.ts's registry query reads it, nothing that
+// decides what a finding IS.
 export interface LockEntryChange {
   name: string;
   packageName: string;
@@ -441,6 +468,10 @@ function diffLockEntries(
       const counterpart = pickCounterpart(entry, beforeEntries);
       entryChanges.push({
         name,
+        // Identity comes from a manifest declaration or the lockfile key,
+        // exactly as on main -- see the LockEntryChange doc comment above
+        // for why entry-carried data (LockEntry.lookupName) must never
+        // enter this line.
         packageName: declared?.registryName ?? name,
         kind: beforeEntries.length === 0 ? 'added' : 'changed',
         // An entry no manifest declares is anchored to the LOCKFILE, not

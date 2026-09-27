@@ -10,6 +10,50 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+- Fixed a minimum-publish-age miss on a purely transitive npm alias (one
+  only some other package's own dependency introduces, which no manifest
+  declares): `publish-age` asked the registry about the installed alias
+  name instead of the package actually resolved, a silent miss at best and
+  a wrong finding against an unrelated same-named package at worst.
+  `lockfiles/npm.ts` now recovers the real name from the packages entry's
+  own `name` field, but only when the entry's own resolved tarball URL
+  vouches for it (`resolution.ts`'s `registryTarballPackageName`); an
+  unvouched name is ignored and reported via a new
+  `npm-lockfile-unverifiable-name` diagnostic rather than trusted or
+  silently dropped. `publish-age` uses the recovered name for its registry
+  query only -- its finding still reports under the lockfile key, with the
+  looked-up name carried in `details` when the two differ.
+
+  An earlier version of this fix read the entry-recorded name into
+  `packageName` (identity) directly whenever no manifest declared the key.
+  Independent review proved that let a forged `name` field on an otherwise-
+  tampered nested entry silently clear its own dependency-confusion and
+  install-script findings, and land it on an already-baselined fingerprint,
+  because both checks key their allow/pin logic off `packageName`. Identity
+  is now sourced only from a manifest declaration or the lockfile key,
+  exactly as before this issue existed; the recovered name lives in a
+  separate `LockEntry.lookupName` field that only `publish-age`'s registry
+  query reads. pnpm needed no fix either way: its `packages` map is already
+  keyed by registry identity, not by an alias name some dependent used to
+  reach it. Yarn and bun lockfiles are unaffected for the same reason they
+  carry no other lockfile-backed finding: neither format's entries are
+  parsed at all.
+
+  A third review pass found the fetch grouping itself was still wrong:
+  `publish-age` grouped candidates by identity (the lockfile key) and asked
+  the registry about only the first candidate's lookup name for the whole
+  group, on the premise that every candidate sharing one key shares one
+  lookup target. npm stores several entries under one key at different
+  nesting paths, so a nested decoy sharing a real entry's key, version, and
+  manifest path -- while genuinely vouching for an unrelated package's name
+  -- collided with the real entry in the dedupe key (which did not account
+  for the lookup name either) and erased it before the grouping step ever
+  ran: the registry was asked only about the decoy's target, and the real,
+  fresh dependency produced no finding and no diagnostic at all. The dedupe
+  key now includes the lookup name, and the fetch groups by lookup name
+  rather than identity, so two entries that report under the same name but
+  resolve to different real packages are always looked up separately.
+  README and `docs/INVARIANTS.md` updated (fixes #69).
 - Made the online checks' wall-clock budget configurable and CI-aware
   (issue #75). The four online checks used to share a single hardcoded
   twenty-second budget, sized for a pre-commit hook; on a `--base` or

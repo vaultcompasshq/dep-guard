@@ -5,6 +5,10 @@ import type { ManifestDep, ParsedManifest } from '../src/manifest.js';
 import type { LockEntry, LockfileFormat, ParsedLockfile } from '../src/lockfiles/types.js';
 import { parseNpmLockfile } from '../src/lockfiles/npm.js';
 import type { Diagnostic } from '../src/types.js';
+import { confusionCheck } from '../src/checks/confusion.js';
+import { installScriptCheck } from '../src/checks/install-script.js';
+import type { CheckContext, ResolvedConfig } from '../src/checks/types.js';
+import type { Corpus } from '../src/corpus.js';
 
 const ROOT = 'package.json';
 
@@ -820,6 +824,209 @@ describe('computeDelta lockfile entry diffing', () => {
     });
     const delta = computeDelta(previous, current);
     expect(delta.lockEntryChanges[0]).toMatchObject({ name: 'ui', packageName: 'lodash' });
+  });
+
+  // Issue #69, round 2 (independent review finding): a PURELY transitive
+  // alias -- no manifest anywhere declares the lockfile key, so `declared`
+  // is undefined -- must still report packageName as the LOCKFILE KEY,
+  // byte for byte what main produces. LockEntry.lookupName (a field the
+  // entry itself can carry, see lockfiles/types.ts) is a lookup hint for
+  // online/publish-age.ts alone, and must never leak into identity: an
+  // earlier version of this fix read it into packageName here, and an
+  // independent review proved that let a forged entry-carried name silently
+  // clear its own dependency-confusion and install-script findings (see the
+  // "a forged lookupName" describe block below for the ported proof, and
+  // check-confusion.test.ts / check-install-script.test.ts for the same
+  // proof at the check level).
+  //
+  // Mutation that turns this red: reintroducing `?? entry.lookupName` (or
+  // any other read of `entry`) into the packageName line in delta.ts --
+  // packageName would then read 'lodash' instead of 'ui-alias', the key.
+  test('a purely transitive alias entry still reports the lockfile key as packageName, exactly as main does', () => {
+    const delta = entryDelta(
+      [],
+      [['ui-alias', [{ version: '4.17.21', integrity: 'sha512-a', lookupName: 'lodash' }]]]
+    );
+    expect(delta.lockEntryChanges[0]).toMatchObject({ name: 'ui-alias', packageName: 'ui-alias' });
+  });
+});
+
+// Issue #69, end to end: the real npm parser plus computeDelta together, on
+// a lockfile shape a manifest-only fixture cannot produce -- a dependency's
+// own transitive dependency on an npm: alias, which no package.json
+// anywhere declares. Modelled on tests/fixtures/package-lock-v3.json's
+// shape. This exercises the FULL fix, round 2: packageName (identity) stays
+// the key, and lookupName (a lookup hint only) carries the vouched real
+// name -- see online-publish-age.test.ts for lookupName actually being used
+// to query the registry.
+describe('computeDelta resolves a purely transitive npm alias end to end (issue #69)', () => {
+  const TRANSITIVE_ALIAS_LOCKFILE = JSON.stringify({
+    name: 'test-app',
+    version: '1.0.0',
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      '': {
+        name: 'test-app',
+        version: '1.0.0',
+        dependencies: { 'host-pkg': '^1.0.0' },
+      },
+      'node_modules/host-pkg': {
+        version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/host-pkg/-/host-pkg-1.0.0.tgz',
+        integrity: 'sha512-host',
+      },
+      // host-pkg's own transitive dependency on "npm:lodash@^4.17.0",
+      // installed under the alias name "ui-alias" -- no manifest anywhere
+      // declares "ui-alias". The resolved tarball path names "lodash",
+      // vouching for the "name" field below.
+      'node_modules/host-pkg/node_modules/ui-alias': {
+        name: 'lodash',
+        version: '4.17.21',
+        resolved: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
+        integrity: 'sha512-transitive-alias',
+      },
+    },
+  });
+
+  // Mutation that turns this red: any reintroduction of entry data into the
+  // packageName line -- packageName would then read 'lodash' instead of
+  // 'ui-alias', the key.
+  test('packageName is the lockfile key, byte for byte, whether or not the entry carries a vouched lookupName', () => {
+    const after = parseNpmLockfile('package-lock.json', TRANSITIVE_ALIAS_LOCKFILE);
+    const delta = computeDelta(
+      state([manifest(ROOT, [dep('host-pkg', '^1.0.0')])], { lockfile: null }),
+      state([manifest(ROOT, [dep('host-pkg', '^1.0.0')])], { lockfile: after })
+    );
+    const aliasChange = delta.lockEntryChanges.find((c) => c.name === 'ui-alias');
+    expect(aliasChange).toMatchObject({ name: 'ui-alias', packageName: 'ui-alias' });
+    expect(aliasChange?.after.lookupName).toBe('lodash');
+  });
+});
+
+// Issue #69, round 2: the independent review's own experiment, ported.
+// entry.lookupName must never be read by delta.ts's identity line under any
+// circumstance, including a forged one -- proven here at the parser+delta
+// boundary; check-confusion.test.ts and check-install-script.test.ts carry
+// the same proof through to the checks the review's exp.mjs actually ran.
+describe('a forged packages-entry "name" field never changes packageName (issue #69, review finding)', () => {
+  function lockfileWithSecretEntry(forgedName: string | undefined): string {
+    const entry: Record<string, unknown> = {
+      version: '9.9.9',
+      resolved: 'https://registry.npmjs.org/@corp/secret/-/secret-9.9.9.tgz',
+      integrity: 'sha512-b',
+      hasInstallScript: true,
+    };
+    if (forgedName !== undefined) {
+      entry.name = forgedName;
+    }
+    return JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        '': { name: 'app' },
+        'node_modules/host': {
+          version: '1.0.0',
+          resolved: 'https://npm.corp.example/host/-/host-1.0.0.tgz',
+          integrity: 'sha512-a',
+        },
+        'node_modules/host/node_modules/@corp/secret': entry,
+      },
+    });
+  }
+
+  // Mutation that turns this red: reading entry.lookupName (or any other
+  // entry-carried field) into packageName in delta.ts -- packageName would
+  // then read 'left-pad' instead of '@corp/secret', identical to the
+  // review's own finding against confusionCheck/installScriptCheck.
+  test('packageName is "@corp/secret" whether or not the entry forges "name": "left-pad"', () => {
+    const manifest0: ParsedManifest = { path: 'package.json', deps: [], pnpmOnlyBuilt: [] };
+    const unforged = parseNpmLockfile('package-lock.json', lockfileWithSecretEntry(undefined));
+    const forged = parseNpmLockfile('package-lock.json', lockfileWithSecretEntry('left-pad'));
+
+    const before: RepoState = {
+      manifests: [manifest0],
+      lockfile: null,
+      onlyBuilt: [],
+      npmrcRegistryPins: new Map(),
+      npmrcDefaultRegistry: null,
+      workspaceLocalNames: new Set(),
+    };
+    const unforgedDelta = computeDelta(before, { ...before, lockfile: unforged });
+    const forgedDelta = computeDelta(before, { ...before, lockfile: forged });
+
+    const unforgedNames = unforgedDelta.lockEntryChanges.map((c) => c.packageName).sort();
+    const forgedNames = forgedDelta.lockEntryChanges.map((c) => c.packageName).sort();
+    expect(unforgedNames).toContain('@corp/secret');
+    expect(forgedNames).toEqual(unforgedNames);
+  });
+
+  // The review's experiment, ported exactly (same lockfile shape, same
+  // @corp private pin, same allow: ['left-pad'], same hasInstallScript:
+  // true), run through the REAL checks rather than just reading
+  // packageName off the delta. This is the test the fix-round brief asked
+  // for by name.
+  //
+  // Mutation that turns this red: reading entry.lookupName (or any other
+  // entry-carried field) into packageName in delta.ts. With that mutation,
+  // the forged run's pinMismatch (checks/confusion.ts) and allowClears
+  // (checks/install-script.ts) both key off "left-pad" instead of
+  // "@corp/secret" -- pinMismatch finds no "@" scope on "left-pad" and
+  // stays silent, and allowClears finds "left-pad" in
+  // config.allow = ['left-pad'] and clears the install-script finding --
+  // so confusionFindings and installScriptFindings both come back EMPTY
+  // for the forged run while the unforged run reports both, and the
+  // toEqual comparisons below fail.
+  test('a forged "name" field changes NOTHING in confusion or install-script findings', () => {
+    const manifest0: ParsedManifest = {
+      path: 'package.json',
+      deps: [{ name: 'host', registryName: 'host', specifier: '1.0.0', depType: 'dependencies', protocol: 'registry' }],
+      pnpmOnlyBuilt: [],
+    };
+    const before: RepoState = {
+      manifests: [manifest0],
+      lockfile: null,
+      onlyBuilt: [],
+      npmrcRegistryPins: new Map([['@corp', 'https://npm.corp.example/']]),
+      npmrcDefaultRegistry: null,
+      workspaceLocalNames: new Set(),
+    };
+    const config: ResolvedConfig = {
+      failOn: 'medium',
+      allow: ['left-pad'],
+      internalScopes: [],
+      internalPrefixes: [],
+      extraAliases: {},
+      ignorePaths: [],
+      online: false,
+      minAgeDays: 7,
+      minAgeAllow: [],
+    };
+    const corpus: Corpus = { hasName: () => false, topRank: () => null, aliasTargets: () => [], topNames: [], builtAt: 't' };
+
+    function findingsFor(forgedName: string | undefined) {
+      const after = parseNpmLockfile('package-lock.json', lockfileWithSecretEntry(forgedName));
+      const delta = computeDelta(before, { ...before, lockfile: after });
+      const ctx: CheckContext = {
+        corpus,
+        config,
+        delta,
+        npmrcRegistryPins: before.npmrcRegistryPins,
+        diagnostics: [],
+        allowed: [],
+      };
+      return {
+        confusion: confusionCheck(ctx).map((f) => `${f.ruleId}:${f.packageName}`).sort(),
+        installScript: installScriptCheck(ctx).map((f) => `${f.ruleId}:${f.packageName}`).sort(),
+      };
+    }
+
+    const unforged = findingsFor(undefined);
+    const forged = findingsFor('left-pad');
+
+    expect(unforged.confusion).toEqual(['dependency-confusion:@corp/secret']);
+    expect(unforged.installScript).toEqual(['install-script:@corp/secret']);
+    expect(forged.confusion).toEqual(unforged.confusion);
+    expect(forged.installScript).toEqual(unforged.installScript);
   });
 });
 
