@@ -480,9 +480,11 @@ async function enrichOnline(
 
   // applyTyposquatAsymmetry issues one bulk request and has no per-name
   // loop, so it is gated here rather than internally: there is exactly one
-  // point at which it could stop, and that point is before it starts. Its
-  // candidates are counted the same way it counts them itself so the
-  // diagnostic names a real number.
+  // point at which it could stop, and that point is before it starts. The
+  // count here is the low typosquat findings before the check's own
+  // internal-name and private-origin filters run, so on an expired deadline
+  // it can overstate how many lookups were skipped, never understate; no
+  // name is emitted with it.
   const asymmetryCandidates = resolved.filter(
     (f) => f.ruleId === 'typosquat' && f.severity === 'low'
   ).length;
