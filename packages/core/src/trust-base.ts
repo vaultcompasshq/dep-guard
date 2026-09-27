@@ -295,6 +295,71 @@ export async function assertTrustBaseUsable(root: string, ref: string): Promise<
 }
 
 /**
+ * Refuse an explicit `--base` that resolves to the same commit or the same
+ * tree as HEAD, when `--trust-base` is also present (issue #64).
+ *
+ * `assertTrustBaseUsable` already refuses a trust base that IS the head
+ * commit or shares its tree, because a trust base drawn from the tree under
+ * judgment puts the whole boundary back where it started. `--base` has the
+ * companion failure: on an event that sets no GITHUB_BASE_REF (`push`,
+ * `merge_group`), an explicit `--base` of HEAD is not caught by anything
+ * pull-request mode does today, and it is quieter than a misconfigured
+ * trust base -- the run does not fail, it just computes an empty delta,
+ * because HEAD compared against itself has nothing changed. Every
+ * comparison-based signal goes quiet with no diagnostic saying why.
+ *
+ * Reuses the exact same commit/tree resolution `assertTrustBaseUsable`
+ * uses, for the same reason that function compares resolved commits and
+ * trees rather than ref spellings: two different names (a branch, a tag, a
+ * raw SHA) for one commit are one hole, and a merge ref can carry an
+ * identical tree under a different commit whenever the base has not moved.
+ *
+ * Deliberately narrow. This is not called when `--trust-base` is absent:
+ * comparing the dirty working tree against HEAD with a bare `--base HEAD`
+ * and no `--trust-base` is a legitimate local operation (the case issue
+ * #64 explicitly carves out), and refusing an unresolvable `--base` ref at
+ * all is loadStates' job, not this function's -- a ref that does not
+ * resolve here is left alone so that the existing, more specific
+ * unresolvable-ref failure is the one a user sees.
+ */
+export async function assertBaseNotHeadUnderTrustBase(root: string, baseRef: string): Promise<void> {
+  const base = await resolve(root, baseRef, 'commit');
+  if (base === null) {
+    // An unresolvable --base is loadStates' failure to raise, not this
+    // one's -- returning here lets that happen with its own, more specific
+    // message rather than a confusing one about HEAD.
+    return;
+  }
+  const head = await resolve(root, 'HEAD', 'commit');
+  if (head === null) {
+    // No head commit to compare against at all; loadStates will fail on
+    // this long before it matters which message explains it.
+    return;
+  }
+  if (base === head) {
+    throw new DepGuardError(
+      `refusing "--base ${baseRef}" together with --trust-base: it resolves to ${head}, the ` +
+        'same commit as HEAD, so the comparison base is the tree being judged and every ' +
+        'dependency would read as unchanged. Pass the branch this change is actually based ' +
+        'on. Nothing was checked.',
+      'base-is-head'
+    );
+  }
+
+  const baseTree = await resolve(root, baseRef, 'tree');
+  const headTree = await resolve(root, 'HEAD', 'tree');
+  if (baseTree !== null && headTree !== null && baseTree === headTree) {
+    throw new DepGuardError(
+      `refusing "--base ${baseRef}" together with --trust-base: it is a different commit from ` +
+        `HEAD but carries an identical tree (${headTree}), so the comparison base is the tree ` +
+        'being judged and every dependency would read as unchanged. Pass the branch this ' +
+        'change is actually based on. Nothing was checked.',
+      'base-same-tree'
+    );
+  }
+}
+
+/**
  * One file's contents at a ref, or null when the ref does not carry it.
  *
  * The `./` is load-bearing. It makes git resolve the path relative to the

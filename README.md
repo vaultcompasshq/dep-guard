@@ -433,7 +433,12 @@ config did, and what this change wanted instead.
 decides what the change is compared against; `--trust-base` decides by
 whose rules it is judged. They usually name the same ref in CI, because the
 base branch is both the state you diverged from and the state whose rules
-were approved, but either can be passed without the other.
+were approved, but either can be passed without the other. When
+`--trust-base` is present, an explicit `--base` that resolves to HEAD's own
+commit or tree is refused with exit 2 rather than silently comparing HEAD
+against itself and going quiet on every comparison-based signal; a bare
+`--base` with no `--trust-base` is unaffected, since comparing a dirty
+working tree against HEAD locally is legitimate.
 
 **Without a `--base`, every dependency reads as newly added**, because the
 scan has no earlier revision to compare against. That is not a special

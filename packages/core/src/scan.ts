@@ -23,7 +23,7 @@ import {
   resolveScanRoot,
 } from './git-source.js';
 import type { ScanMode } from './git-source.js';
-import { loadTrustedControls } from './trust-base.js';
+import { assertBaseNotHeadUnderTrustBase, loadTrustedControls } from './trust-base.js';
 import type { ControlShapeChange, TrustedControls } from './trust-base.js';
 import { DepGuardError } from './types.js';
 import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
@@ -644,6 +644,16 @@ export async function scan(opts: {
   // existed.
   const controls =
     opts.trustBase === undefined ? null : await loadTrustedControls(root, opts.trustBase);
+  // Issue #64's companion refusal to assertTrustBaseUsable's own: an
+  // explicit --base of HEAD is not itself a trust-base misconfiguration,
+  // so loadTrustedControls above would not have caught it, but it is
+  // exactly as empty a comparison once --trust-base is also present. Gated
+  // on controls !== null (opts.trustBase given) and mode.kind === 'base'
+  // (opts.base given): a local --base run with no --trust-base is
+  // untouched, per the issue.
+  if (controls !== null && opts.mode.kind === 'base') {
+    await assertBaseNotHeadUnderTrustBase(root, opts.mode.ref);
+  }
   const config = applyFailOnOverride(controls?.config ?? loadConfig(root), opts.failOn);
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const statePair = await loadStates(opts.repoRoot, opts.mode);
