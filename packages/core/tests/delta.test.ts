@@ -1,6 +1,6 @@
 import { computeDelta } from '../src/delta.js';
 import { COMPARISON_TAMPER_SIGNALS } from '../src/tamper-signals.js';
-import { parseNpmrcPins, type RepoState } from '../src/state.js';
+import { parseNpmrcDefaultRegistry, parseNpmrcPins, type RepoState } from '../src/state.js';
 import type { ManifestDep, ParsedManifest } from '../src/manifest.js';
 import type { LockEntry, LockfileFormat, ParsedLockfile } from '../src/lockfiles/types.js';
 import { parseNpmLockfile } from '../src/lockfiles/npm.js';
@@ -1336,5 +1336,36 @@ describe('parseNpmrcPins', () => {
     const pins = parseNpmrcPins('@__proto__:registry=https://npm.acme.example.com/');
     expect(pins.get('@__proto__')).toBe('https://npm.acme.example.com/');
     expect(pins.size).toBe(1);
+  });
+});
+
+// Issue #66: trust-base.ts's npmrcChanged used to consult only the scope
+// pins and the file's shape, so a pull request that edited nothing but the
+// unscoped `registry=` line was reported as an unchanged .npmrc. These
+// pin the parser half of that fix -- the four shapes the issue names.
+describe('parseNpmrcDefaultRegistry', () => {
+  test('absent content yields no default registry', () => {
+    expect(parseNpmrcDefaultRegistry(null)).toBeNull();
+  });
+
+  test('a file with no registry= line yields no default registry', () => {
+    expect(parseNpmrcDefaultRegistry('@acme:registry=https://npm.acme.example.com/\n')).toBeNull();
+  });
+
+  test('registry= with a trailing slash is read verbatim', () => {
+    expect(parseNpmrcDefaultRegistry('registry=https://npm.corp.example/')).toBe(
+      'https://npm.corp.example/'
+    );
+  });
+
+  test('registry= with no trailing slash is read verbatim', () => {
+    expect(parseNpmrcDefaultRegistry('registry=https://npm.corp.example')).toBe(
+      'https://npm.corp.example'
+    );
+  });
+
+  test('a commented-out registry= line is ignored', () => {
+    expect(parseNpmrcDefaultRegistry('# registry=https://npm.corp.example/')).toBeNull();
+    expect(parseNpmrcDefaultRegistry('; registry=https://npm.corp.example/')).toBeNull();
   });
 });

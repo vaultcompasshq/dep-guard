@@ -1,5 +1,49 @@
 import { applyTyposquatAsymmetry, ASYMMETRY_DOWNLOAD_FLOOR } from '../src/online/asymmetry.js';
+import type { CheckContext, ResolvedConfig } from '../src/checks/types.js';
+import type { Corpus } from '../src/corpus.js';
 import type { Diagnostic, Finding } from '../src/types.js';
+
+const STUB_CORPUS: Corpus = {
+  hasName: () => false,
+  topRank: () => null,
+  aliasTargets: () => [],
+  topNames: [],
+  builtAt: 'test',
+};
+
+const BASE_CONFIG: ResolvedConfig = {
+  failOn: 'medium',
+  allow: [],
+  internalScopes: [],
+  internalPrefixes: [],
+  extraAliases: {},
+  ignorePaths: [],
+  online: true,
+  minAgeDays: 7,
+  minAgeAllow: [],
+};
+
+// A fresh config object every call, never the shared BASE_CONFIG reference
+// itself -- a test that wrote onto it in place would leak into every test
+// that runs after it in this file.
+function makeContext(configOverrides: Partial<ResolvedConfig> = {}): CheckContext {
+  return {
+    corpus: STUB_CORPUS,
+    config: { ...BASE_CONFIG, ...configOverrides },
+    delta: {
+      changes: [],
+      lockEntryChanges: [],
+      onlyBuiltAdded: [],
+      lockfileFormat: 'npm',
+      hasComparisonBase: true,
+      workspaceLocalNames: new Set(),
+      diagnostics: [],
+    },
+    npmrcRegistryPins: new Map(),
+    diagnostics: [] as Diagnostic[],
+    allowed: [] as string[],
+  };
+}
 
 function typosquatFinding(overrides: Partial<Finding> = {}): Omit<Finding, 'fingerprint'> {
   return {
@@ -25,8 +69,11 @@ function typosquatFinding(overrides: Partial<Finding> = {}): Omit<Finding, 'fing
 // contract is simply that an unresolved name is left alone, regardless of
 // why it is unresolved.
 function fakeDeps(counts: Record<string, number>, noRecordNames: string[] = []) {
+  const asked: string[][] = [];
   return {
+    asked,
     fetchWeeklyDownloads: async (names: string[]) => {
+      asked.push(names);
       const countsMap = new Map<string, number>();
       const noRecord = new Set<string>();
       for (const name of names) {
@@ -45,7 +92,12 @@ describe('applyTyposquatAsymmetry', () => {
   test('escalates a low finding below the floor to high', async () => {
     const findings = [typosquatFinding({ packageName: 'react-codeshift' })];
     const diagnostics: Diagnostic[] = [];
-    await applyTyposquatAsymmetry(findings, fakeDeps({ 'react-codeshift': 4 }), diagnostics);
+    await applyTyposquatAsymmetry(
+      findings,
+      makeContext(),
+      fakeDeps({ 'react-codeshift': 4 }),
+      diagnostics
+    );
     expect(findings[0].severity).toBe('high');
     expect(findings[0].details).toMatchObject({ onlineWeeklyDownloads: 4 });
   });
@@ -55,6 +107,7 @@ describe('applyTyposquatAsymmetry', () => {
     const diagnostics: Diagnostic[] = [];
     await applyTyposquatAsymmetry(
       findings,
+      makeContext(),
       fakeDeps({ 'http-proxy-3': ASYMMETRY_DOWNLOAD_FLOOR }),
       diagnostics
     );
@@ -73,7 +126,12 @@ describe('applyTyposquatAsymmetry', () => {
     // on.
     const findings = [typosquatFinding({ packageName: 'no-data-pkg' })];
     const diagnostics: Diagnostic[] = [];
-    await applyTyposquatAsymmetry(findings, fakeDeps({}, ['no-data-pkg']), diagnostics);
+    await applyTyposquatAsymmetry(
+      findings,
+      makeContext(),
+      fakeDeps({}, ['no-data-pkg']),
+      diagnostics
+    );
     expect(findings[0].severity).toBe('high');
     expect(findings[0].details).toMatchObject({ onlineWeeklyDownloads: 0 });
   });
@@ -87,7 +145,7 @@ describe('applyTyposquatAsymmetry', () => {
     // instead of surfacing as online-check-unreachable.
     const findings = [typosquatFinding({ packageName: 'ambiguous-pkg' })];
     const diagnostics: Diagnostic[] = [];
-    await applyTyposquatAsymmetry(findings, fakeDeps({}), diagnostics);
+    await applyTyposquatAsymmetry(findings, makeContext(), fakeDeps({}), diagnostics);
     expect(findings[0].severity).toBe('low');
   });
 
@@ -100,7 +158,12 @@ describe('applyTyposquatAsymmetry', () => {
       }),
     ];
     const diagnostics: Diagnostic[] = [];
-    await applyTyposquatAsymmetry(findings, fakeDeps({ 'unused-imports': 0 }), diagnostics);
+    await applyTyposquatAsymmetry(
+      findings,
+      makeContext(),
+      fakeDeps({ 'unused-imports': 0 }),
+      diagnostics
+    );
     expect(findings[0].severity).toBe('critical');
   });
 
@@ -116,7 +179,7 @@ describe('applyTyposquatAsymmetry', () => {
       },
     ];
     const diagnostics: Diagnostic[] = [];
-    await applyTyposquatAsymmetry(findings, fakeDeps({ 'left-pad': 1 }), diagnostics);
+    await applyTyposquatAsymmetry(findings, makeContext(), fakeDeps({ 'left-pad': 1 }), diagnostics);
     expect(findings[0].severity).toBe('low');
   });
 
@@ -128,7 +191,7 @@ describe('applyTyposquatAsymmetry', () => {
         return { counts: new Map<string, number>(), noRecord: new Set<string>() };
       },
     };
-    await applyTyposquatAsymmetry([], deps, []);
+    await applyTyposquatAsymmetry([], makeContext(), deps, []);
     expect(called).toBe(false);
   });
 
@@ -140,10 +203,71 @@ describe('applyTyposquatAsymmetry', () => {
         throw new Error('socket hang up');
       },
     };
-    await applyTyposquatAsymmetry(findings, deps, diagnostics);
+    await applyTyposquatAsymmetry(findings, makeContext(), deps, diagnostics);
     expect(findings[0].severity).toBe('low');
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].code).toBe('online-check-unreachable');
     expect(diagnostics[0].message).toContain('socket hang up');
+  });
+
+  // From the independent review after issues 66/67/70: this check predates
+  // isNonPublicName (online/registry-scope.ts) and internalScopes/
+  // internalPrefixes filtering entirely, and sent every low typosquat
+  // finding's packageName to the downloads API regardless of either --
+  // the same leak shape unknown-package and registered-squat had before
+  // #70, just left standing in the one online check nobody had re-audited
+  // once the shared rule existed.
+  test('a name whose scope is pinned to a private registry in .npmrc is never sent to the downloads API', async () => {
+    const ctx = makeContext();
+    ctx.npmrcRegistryPins.set('@acme', 'https://npm.acme.example/');
+    const findings = [typosquatFinding({ packageName: '@acme/pinned-thing' })];
+    const diagnostics: Diagnostic[] = [];
+    const deps = fakeDeps({ '@acme/pinned-thing': 4 });
+
+    await applyTyposquatAsymmetry(findings, ctx, deps, diagnostics);
+
+    expect(deps.asked).toEqual([]);
+    expect(findings[0].severity).toBe('low');
+    expect(diagnostics.some((d) => d.code === 'typosquat-asymmetry-private-origin-skipped')).toBe(
+      true
+    );
+    expect(
+      diagnostics.find((d) => d.code === 'typosquat-asymmetry-private-origin-skipped')?.message
+    ).toContain('@acme/pinned-thing');
+  });
+
+  test('a name in a configured internal prefix is never sent to the downloads API', async () => {
+    const ctx = makeContext({ internalPrefixes: ['acme-'] });
+    const findings = [typosquatFinding({ packageName: 'acme-internal-thing' })];
+    const diagnostics: Diagnostic[] = [];
+    const deps = fakeDeps({ 'acme-internal-thing': 4 });
+
+    await applyTyposquatAsymmetry(findings, ctx, deps, diagnostics);
+
+    expect(deps.asked).toEqual([]);
+    expect(findings[0].severity).toBe('low');
+    // Silent by design, like every other check's internalScopes/
+    // internalPrefixes filter: an adopter's own declared list needs no
+    // diagnostic reminding them of it.
+    expect(
+      diagnostics.some((d) => d.code === 'typosquat-asymmetry-private-origin-skipped')
+    ).toBe(false);
+  });
+
+  test('a public name with no npmrc pin still reaches the downloads API, alongside a pinned sibling that does not', async () => {
+    const ctx = makeContext();
+    ctx.npmrcRegistryPins.set('@acme', 'https://npm.acme.example/');
+    const findings = [
+      typosquatFinding({ packageName: '@acme/pinned-thing' }),
+      typosquatFinding({ packageName: 'public-fresh-thing' }),
+    ];
+    const diagnostics: Diagnostic[] = [];
+    const deps = fakeDeps({ 'public-fresh-thing': 4 });
+
+    await applyTyposquatAsymmetry(findings, ctx, deps, diagnostics);
+
+    expect(deps.asked).toEqual([['public-fresh-thing']]);
+    expect(findings.find((f) => f.packageName === 'public-fresh-thing')?.severity).toBe('high');
+    expect(findings.find((f) => f.packageName === '@acme/pinned-thing')?.severity).toBe('low');
   });
 });

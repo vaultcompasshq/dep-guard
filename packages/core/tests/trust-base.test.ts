@@ -464,6 +464,57 @@ describe('pull-request mode: .npmrc scope pins are a control input', () => {
   });
 });
 
+// Issue #66's fix reads the head's default registry the same way it reads
+// the head's scope pins: through isRegularFileMode, never through a
+// symlink's target text. This is the same guard readControlFileAtRef's own
+// symlink note describes for the scope-pin map, applied to
+// parseNpmrcDefaultRegistry's own call, and it earns its own test rather
+// than riding on the scope-pin one because the two are read by two
+// separate calls in loadTrustedControls (trust-base.ts, both gated on
+// isRegularFileMode(headNpmrcFile.mode)).
+describe('pull-request mode: a symlinked head npmrc is not read for the default registry', () => {
+  const PRIVATE_DEFAULT = 'registry=https://npm.corp.example/\n';
+
+  test('a head npmrc turned into a symlink is not read for the default registry, even when its target STRING is itself a valid registry= line', async () => {
+    repo = await mkdtemp(path.join(tmpdir(), 'dep-guard-trust-'));
+    tempDirs.push(repo);
+    await git('init', '-q', '-b', 'main');
+    await git('config', 'user.email', 'test@example.invalid');
+    await git('config', 'user.name', 'dep guard test');
+    await git('config', 'commit.gpgsign', 'false');
+    await write('package.json', manifestJson({}));
+    await write('package-lock.json', lockJson({}));
+    await write('.dep-guard.json', JSON.stringify({ failOn: 'medium' }));
+    await write('.npmrc', PRIVATE_DEFAULT);
+    await commitAll('base state with a private default registry');
+    await git('checkout', '-q', '-b', 'feature');
+    await addUnknownDependency();
+    // git stores a symlink's blob content as the LINK TARGET STRING, not
+    // the referenced file's contents (confirmed against a scratch repo: `git
+    // show <ref>:.npmrc` on a symlink prints the target path verbatim). So
+    // the read this guard exists to block is not "the file the link points
+    // at", it is "the raw target text itself", and the only way to prove the
+    // guard matters is to make that raw text parse as a real registry= line
+    // if the guard were missing. The target is chosen to match the BASE's
+    // own default registry byte for byte (no trailing newline, since a
+    // symlink target carries none): if the guard were missing, parsing it
+    // would equal the base's value and "default registry changed" would
+    // never be proposed, even though the head's npmrc is no longer a
+    // regular file at all.
+    await rm(path.join(repo, '.npmrc'));
+    await symlink(PRIVATE_DEFAULT.trimEnd(), path.join(repo, '.npmrc'));
+    await commitAll('point the npmrc at a symlink target that is itself a registry= line');
+
+    const result = await scanPullRequest();
+
+    expect(result.trustBase?.npmrcShapeChange).toBe('symlink');
+    expect(result.trustBase?.npmrcChanged).toBe(true);
+    expect(
+      result.trustBase?.proposals.some((p) => p.includes('default registry changed'))
+    ).toBe(true);
+  });
+});
+
 describe('pull-request mode: what the config parenthetical distinguishes', () => {
   test('a pull request that only removes entries says so rather than going bare', async () => {
     await makeBase({ failOn: 'medium', allow: ['one', 'two'], ignorePaths: ['vendor'] });

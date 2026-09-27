@@ -119,7 +119,19 @@ alone.
 
 Four checks, all backed by npm's public downloads and registry metadata
 APIs, all degrading to the offline result with a diagnostic on any network
-failure rather than blocking:
+failure rather than blocking. All four share one rule for which names may
+be put on the wire to the public registry at all: a name in your configured
+`internalScopes` or `internalPrefixes` is never sent, and neither is a name
+declared private by your own project `.npmrc` -- a scope pin, or the
+unscoped default registry when no pin applies to that scope. A pin decides
+by its **own origin**, not by merely existing, and always outranks the
+default registry: a scope pinned to the public registry is checked even
+under a private project default, and a scope pinned away from the public
+registry is skipped even under a public project default. A `.npmrc`-derived
+skip (a scope pin, or the default registry) is recorded as a diagnostic
+naming the package; an `internalScopes`/`internalPrefixes` skip is silent
+by design, not diagnosed -- a name your own committed config already lists
+needs no reminder that it was excluded.
 
 - **Unknown package resolution.** The offline unknown-package rule answers
   from a corpus built on one dated registry walk, so every package
@@ -143,9 +155,7 @@ failure rather than blocking:
   the name is safe. Anything else -- a timeout, a server error, a spent
   budget -- leaves the finding exactly as the offline scan made it, still
   blocking, with the reason recorded in its `details`. A network failure
-  never means fewer or quieter findings. Names in your configured
-  `internalScopes` or `internalPrefixes` are never sent to the registry at
-  all.
+  never means fewer or quieter findings.
 - **Typosquat popularity asymmetry.** Escalates a non-alias-list typosquat
   match from `low` to `high` when the candidate's own weekly downloads sit
   below a measured floor of two thousand downloads in the last week --
@@ -183,22 +193,29 @@ failure rather than blocking:
   never sees. `minAgeAllow` (an array of exact `name@version` strings) is a
   reviewed exception for one specific release, never a standing exemption
   for the name, and a config entry may not itself be a semver range. This
-  check never sends a name to the registry that resolved from anywhere
-  other than the public npm registry, or whose scope is pinned to a
-  different registry in `.npmrc` -- a private dependency's name is not put
-  on the wire to a public service just to price this heuristic. pnpm does
-  not record which registry served an ordinary resolution at all, so a
-  pnpm lockfile entry with no recorded resolution URL is judged against the
-  project `.npmrc`'s own unscoped default registry instead: when that is
-  set to a private registry, such an entry is skipped the same way a
-  scope-pinned one is; when none is set (or it names the public registry),
-  the entry is checked as public, since nothing in the project's own
-  configuration says otherwise. A *user*-level `~/.npmrc` default registry,
-  or an `npm_config_registry` environment variable, is invisible to this
-  check and to the rest of the scan -- a repository relying on either of
-  those instead of a project `.npmrc` must list the private names under
-  `internalScopes` or `internalPrefixes`. The same gap applies to an npm
-  lockfile written with its own registry-resolved URLs omitted.
+  check applies the shared `.npmrc` rule above to the RESOLUTION as well as
+  the name, and the order matters: a scope pinned to a *private* registry
+  skips the entry unconditionally, whatever its resolvedUrl says (a
+  resolvedUrl that disagrees with a private pin is a pin *mismatch*, which
+  dependency confusion's own rule is what raises, not evidence this check
+  may proceed). Otherwise -- no pin, or a pin naming the public registry --
+  a resolvedUrl, when the lockfile entry has one, decides by its own origin
+  before anything else does; a public (or absent) pin never overrides a
+  resolvedUrl actually in hand. Only when the entry has no resolvedUrl at
+  all does the default registry decide, the same way a privately-pinned
+  scope is skipped. pnpm does not record which registry served an ordinary
+  resolution at all, so this is the ordinary shape of a pnpm lockfile entry:
+  when the project's default is private it is skipped; when none is set (or
+  it names the public registry), the entry is checked as public, since
+  nothing in the project's own configuration says otherwise -- a private
+  dependency's name is not put on the wire to a public service just to
+  price this heuristic.
+  A *user*-level `~/.npmrc` default registry, or an `npm_config_registry`
+  environment variable, is invisible to this check and to the rest of the
+  scan -- a repository relying on either of those instead of a project
+  `.npmrc` must list the private names under `internalScopes` or
+  `internalPrefixes`. The same gap applies to an npm lockfile written with
+  its own registry-resolved URLs omitted.
 
 A registry error in any of the four checks degrades to a diagnostic
 rather than a block, the design every check above already follows for its
@@ -474,9 +491,12 @@ Pull-request mode: control inputs from origin/main
   npmrc changed in this pull request (proposed: unpin @scope)
 ```
 
-Only the scope pins are compared in `.npmrc`, not the file text, so a
-rotated auth token or a changed default registry is not reported as an
-attempt to loosen the gate.
+The scope pins and the unscoped default registry (`registry=...`) are what
+is compared in `.npmrc`, not the file text, so a rotated auth token is not
+reported as an attempt to loosen the gate, but a changed default registry
+is: it is the one other line online checks read (see "Online checks"
+above), and a pull request editing only that line is reported as `npmrc
+changed in this pull request (proposed: default registry changed)`.
 
 A control input the head carries and the base does not reads `config added
 in this pull request`, and the run uses the defaults rather than the head's

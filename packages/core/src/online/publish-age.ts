@@ -37,7 +37,7 @@ import { originOf } from '../resolution.js';
 import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
-import { DEFAULT_REGISTRY } from './registry-client.js';
+import { isNonPublicName, PUBLIC_REGISTRY_ORIGIN } from './registry-scope.js';
 
 export interface PublishAgeDeps {
   // `versions` names exactly the resolved versions this call needs an
@@ -68,55 +68,49 @@ function dedupeKey(candidate: Candidate): string {
   return JSON.stringify([candidate.manifestPath, candidate.name, candidate.version]);
 }
 
-// The origin every resolved version this check asks about must come from,
-// or it is never sent to the registry at all. Computed once from
-// registry-client.ts's own DEFAULT_REGISTRY rather than hardcoded a second
-// time, so the two can never name a different "public registry" if one of
-// them ever changes.
-const PUBLIC_REGISTRY_ORIGIN = originOf(DEFAULT_REGISTRY);
-
-// True when a lockfile entry did not resolve from the public npm registry,
-// or when its scope is pinned to some other registry in .npmrc -- either
-// one is reason enough that this check must never put the name on the wire
-// to registry.npmjs.org. The two conditions are independent: a scope
-// pinned away from the public registry names a package the project has
-// already declared private, whatever host a mismatched or malformed
-// resolution happened to come from (confusion.ts's pin-mismatch rule is
-// what judges that mismatch itself; this check simply must not act on a
-// name that mismatch could apply to), and a resolvedUrl from a genuinely
-// different origin is a private install regardless of whether any scope
-// pin exists for it at all.
+// True when a lockfile entry must never be sent to the public registry.
+// Three grounds, checked in this exact order, because the order is what
+// keeps a public pin from overriding a more specific fact:
+//
+// 1. A PRIVATE scope pin decides unconditionally, regardless of what the
+//    resolvedUrl says (registry-scope.ts's isNonPublicName reads
+//    ctx.npmrcRegistryPins by the PIN'S OWN ORIGIN, shared with
+//    unknown-package and registered-squat). A name the project has
+//    declared private by its own .npmrc must never reach the public
+//    registry through this check regardless of what a possibly-mismatched
+//    resolution says (confusion.ts's pin-mismatch rule is what judges that
+//    mismatch itself; this check simply must not act on a name that
+//    mismatch could apply to).
+// 2. Otherwise -- no pin for this scope, or a pin that names the PUBLIC
+//    registry -- a resolvedUrl, when present, decides by its own origin.
+//    This is the regression an earlier version of this rule had (found in
+//    independent review): a public pin used to skip the resolvedUrl check
+//    entirely and defer straight to isNonPublicName, so a scope pinned to
+//    the public registry sent a name to the wire even when its resolvedUrl
+//    actually named a PRIVATE host -- the pin said nothing about where the
+//    entry in hand actually came from, and a present resolvedUrl is always
+//    the more specific fact.
+// 3. Only with NO resolvedUrl at all does the pin (already established
+//    absent or public here) or the project default registry decide, via
+//    isNonPublicName -- pnpm's ordinary case: lockfiles/pnpm.ts only ever
+//    sets resolvedUrl from a resolution's own `tarball` field, and an
+//    ordinary registry install has none, so an undefined resolvedUrl says
+//    nothing about origin on its own and the project .npmrc's unscoped
+//    default registry is the only signal left to judge it. See the docs
+//    note on isNonPublicResolution in README.md and docs/INVARIANTS.md for
+//    what a repository relying on a USER-level ~/.npmrc or
+//    npm_config_registry instead has to configure, since neither of those
+//    reaches this function (or isNonPublicName) at all.
 function isNonPublicResolution(ctx: CheckContext, name: string, resolvedUrl: string | undefined): boolean {
   const scope = scopeOf(name);
-  if (scope !== null && ctx.npmrcRegistryPins.has(scope)) {
+  const pin = scope !== null ? ctx.npmrcRegistryPins.get(scope) : undefined;
+  if (pin !== undefined && originOf(pin) !== PUBLIC_REGISTRY_ORIGIN) {
     return true;
   }
-  if (resolvedUrl === undefined) {
-    // pnpm does not record which registry served an ordinary resolution --
-    // lockfiles/pnpm.ts only ever sets resolvedUrl from a resolution's own
-    // `tarball` field, and a ordinary registry install has none -- so an
-    // undefined resolvedUrl is the COMMON case for a pnpm lockfile, not a
-    // defensive fallthrough, and it says nothing about origin on its own.
-    // The project .npmrc's unscoped default registry is the one place
-    // pnpm's own resolution actually reads to decide where such a name
-    // came from, so it is the only signal available to judge this case:
-    // when the project set one and it is not the public registry, every
-    // resolution with no resolvedUrl came from that private registry, by
-    // the same reasoning as the npmrcRegistryPins scope check above. When
-    // none is configured, or it points at the public registry, an absent
-    // value is genuinely neither public nor private evidence, so this
-    // still returns false rather than guessing -- see the docs note on
-    // isNonPublicResolution in README.md and docs/INVARIANTS.md for what a
-    // repository relying on a USER-level ~/.npmrc or npm_config_registry
-    // instead has to configure, since neither of those reaches this
-    // function at all.
-    return (
-      ctx.npmrcDefaultRegistry !== undefined &&
-      ctx.npmrcDefaultRegistry !== null &&
-      originOf(ctx.npmrcDefaultRegistry) !== PUBLIC_REGISTRY_ORIGIN
-    );
+  if (resolvedUrl !== undefined) {
+    return originOf(resolvedUrl) !== PUBLIC_REGISTRY_ORIGIN;
   }
-  return originOf(resolvedUrl) !== PUBLIC_REGISTRY_ORIGIN;
+  return isNonPublicName(ctx, name);
 }
 
 function collectCandidates(ctx: CheckContext, diagnostics: Diagnostic[]): Candidate[] {
