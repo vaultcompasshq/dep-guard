@@ -32,9 +32,12 @@
 
 import type { CheckContext } from '../checks/types.js';
 import { isInternalName } from '../checks/allow.js';
+import { scopeOf } from '../checks/confusion.js';
+import { originOf } from '../resolution.js';
 import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
+import { DEFAULT_REGISTRY } from './registry-client.js';
 
 export interface PublishAgeDeps {
   // `versions` names exactly the resolved versions this call needs an
@@ -65,7 +68,44 @@ function dedupeKey(candidate: Candidate): string {
   return JSON.stringify([candidate.manifestPath, candidate.name, candidate.version]);
 }
 
-function collectCandidates(ctx: CheckContext): Candidate[] {
+// The origin every resolved version this check asks about must come from,
+// or it is never sent to the registry at all. Computed once from
+// registry-client.ts's own DEFAULT_REGISTRY rather than hardcoded a second
+// time, so the two can never name a different "public registry" if one of
+// them ever changes.
+const PUBLIC_REGISTRY_ORIGIN = originOf(DEFAULT_REGISTRY);
+
+// True when a lockfile entry did not resolve from the public npm registry,
+// or when its scope is pinned to some other registry in .npmrc -- either
+// one is reason enough that this check must never put the name on the wire
+// to registry.npmjs.org. The two conditions are independent: a scope
+// pinned away from the public registry names a package the project has
+// already declared private, whatever host a mismatched or malformed
+// resolution happened to come from (confusion.ts's pin-mismatch rule is
+// what judges that mismatch itself; this check simply must not act on a
+// name that mismatch could apply to), and a resolvedUrl from a genuinely
+// different origin is a private install regardless of whether any scope
+// pin exists for it at all.
+function isNonPublicResolution(ctx: CheckContext, name: string, resolvedUrl: string | undefined): boolean {
+  const scope = scopeOf(name);
+  if (scope !== null && ctx.npmrcRegistryPins.has(scope)) {
+    return true;
+  }
+  if (resolvedUrl === undefined) {
+    // Nothing resolved for this entry to judge an origin from. Every real
+    // npm or pnpm registry entry that reaches this point already carries a
+    // resolvedUrl (a version with none is not a shape either lockfile
+    // parser writes for a registry install), so this is a defensive
+    // fallthrough, not the common path -- and it is deliberately NOT
+    // treated as evidence of a private origin: this function's whole
+    // reason to exist is to avoid a false "must be private" as much as a
+    // false "must be public", and an absent value is neither.
+    return false;
+  }
+  return originOf(resolvedUrl) !== PUBLIC_REGISTRY_ORIGIN;
+}
+
+function collectCandidates(ctx: CheckContext, diagnostics: Diagnostic[]): Candidate[] {
   const seen = new Set<string>();
   const candidates: Candidate[] = [];
   for (const entryChange of ctx.delta.lockEntryChanges) {
@@ -90,6 +130,21 @@ function collectCandidates(ctx: CheckContext): Candidate[] {
       // wire to a public registry just to price a heuristic -- the same
       // reasoning registered-squat.ts spells out at length for its own
       // candidate filter.
+      continue;
+    }
+    if (isNonPublicResolution(ctx, name, entryChange.after.resolvedUrl)) {
+      // Internal scopes/prefixes are a name-shaped declaration a user has
+      // to remember to configure; a private origin or an .npmrc scope pin
+      // is the SAME fact stated by the lockfile and the project's own
+      // registry configuration instead, and this check must not depend on
+      // the user having also listed the name under internalScopes. Visible
+      // rather than silent, the same reason the two "note" outcomes below
+      // are diagnostics now: a reader can tell "this was never asked
+      // about" from "nothing needed checking".
+      diagnostics.push({
+        code: 'publish-age-private-origin-skipped',
+        message: `publish-age: "${name}" did not resolve from the public npm registry (or its scope is pinned to another registry in .npmrc), so it was not sent to the registry for a publish-age check`,
+      });
       continue;
     }
     const candidate: Candidate = { name, version, manifestPath: entryChange.manifestPath };
@@ -150,7 +205,7 @@ export async function findPublishAgeFindings(
   deadline: OnlineDeadline,
   now: () => number = Date.now
 ): Promise<Omit<Finding, 'fingerprint'>[]> {
-  const candidates = collectCandidates(ctx);
+  const candidates = collectCandidates(ctx, diagnostics);
   if (candidates.length === 0) {
     return [];
   }
@@ -222,7 +277,15 @@ export async function findPublishAgeFindings(
       const key = `${candidate.name}@${candidate.version}`;
       if (allowSet.has(key)) {
         // A reviewed exception for one specific release, not a standing
-        // exemption for the name -- see ResolvedConfig.minAgeAllow.
+        // exemption for the name -- see ResolvedConfig.minAgeAllow. Visible
+        // rather than silent, the same reason the offline `allow` list's
+        // own clearances are recorded (checks/allow.ts's allowClears) -- a
+        // suppressed decision the user made is reported, not indistinguishable
+        // from a check that had nothing to say.
+        diagnostics.push({
+          code: 'publish-age-allowed',
+          message: `publish-age: "${key}" is in the configured minAgeAllow list and was not checked for publish age`,
+        });
         continue;
       }
 

@@ -68,6 +68,12 @@ const fetchPackumentMock: jest.MockedFunction<typeof fetchPackument> = jest.fn()
 jest.unstable_mockModule('../src/online/registry-client.js', () => ({
   fetchWeeklyDownloads: fetchWeeklyDownloadsMock,
   fetchPackument: fetchPackumentMock,
+  // online/publish-age.ts reads this constant directly (its
+  // private-registry-leak guard), so a mock that replaces the whole module
+  // has to carry it too, or importing publish-age.ts through scan.ts throws
+  // at import time rather than merely serving fake data. The literal has to
+  // match registry-client.ts's own DEFAULT_REGISTRY exactly.
+  DEFAULT_REGISTRY: 'https://registry.npmjs.org',
 }));
 
 let scan: typeof ScanFn;

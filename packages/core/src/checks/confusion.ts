@@ -28,7 +28,12 @@ import type { Check, CheckContext } from './types.js';
 // this file is the one that owns them, so that combination would produce
 // zero findings anywhere.
 
-function scopeOf(name: string): string | null {
+// Exported for online/publish-age.ts's private-registry-leak guard, which
+// needs the identical "does this name have a scope" answer confusion.ts's
+// own pin-mismatch rule uses -- a second copy of scope parsing is exactly
+// the kind of drift this codebase's checks/allow.ts module comment warns
+// every check away from.
+export function scopeOf(name: string): string | null {
   if (!name.startsWith('@')) {
     return null;
   }

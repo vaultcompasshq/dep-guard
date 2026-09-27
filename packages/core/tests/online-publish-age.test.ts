@@ -144,7 +144,7 @@ describe('findPublishAgeFindings', () => {
     expect(findings).toEqual([]);
   });
 
-  test('an allowlisted name@version is skipped with a note', async () => {
+  test('an allowlisted name@version is skipped with a visible diagnostic', async () => {
     const ctx = makeContext(
       [makeLockEntryChange({ name: 'reviewed-thing', after: { version: '1.0.0' } })],
       { minAgeAllow: ['reviewed-thing@1.0.0'] }
@@ -154,6 +154,13 @@ describe('findPublishAgeFindings', () => {
     const findings = await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
 
     expect(findings).toEqual([]);
+    // The skip is a reported decision, not silence: a reader can tell "the
+    // user reviewed and allowed this release" from "nothing needed
+    // checking", the same visibility the offline `allow` list's own
+    // clearances get.
+    expect(ctx.diagnostics).toHaveLength(1);
+    expect(ctx.diagnostics[0].code).toBe('publish-age-allowed');
+    expect(ctx.diagnostics[0].message).toContain('reviewed-thing@1.0.0');
   });
 
   test('an allowlist entry for a different version of the same name does not suppress it', async () => {
@@ -254,6 +261,44 @@ describe('findPublishAgeFindings', () => {
     expect(deps.calls).toEqual([]);
   });
 
+  test('an entry resolved from a private registry origin is never sent to the public registry', async () => {
+    const ctx = makeContext([
+      makeLockEntryChange({
+        name: 'private-thing',
+        after: { version: '1.0.0', resolvedUrl: 'https://npm.acme.example/private-thing/-/private-thing-1.0.0.tgz' },
+      }),
+    ]);
+    const deps = fakeDeps({ 'private-thing': { '1.0.0': FRESH_DATE } });
+
+    const findings = await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(findings).toEqual([]);
+    expect(deps.calls).toEqual([]);
+    expect(ctx.diagnostics).toHaveLength(1);
+    expect(ctx.diagnostics[0].code).toBe('publish-age-private-origin-skipped');
+    expect(ctx.diagnostics[0].message).toContain('private-thing');
+  });
+
+  test('an entry whose scope is pinned to another registry in .npmrc is never sent to the public registry', async () => {
+    // Resolved from the PUBLIC registry (a pin mismatch, confusion.ts's own
+    // rule 1 territory) but declared private by the project's own .npmrc,
+    // which is reason enough on its own not to ask the public registry
+    // about it.
+    const ctx = makeContext([
+      makeLockEntryChange({
+        name: '@acme/pinned-thing',
+        after: { version: '1.0.0', resolvedUrl: 'https://registry.npmjs.org/@acme/pinned-thing/-/pinned-thing-1.0.0.tgz' },
+      }),
+    ]);
+    ctx.npmrcRegistryPins.set('@acme', 'https://npm.acme.example/');
+    const deps = fakeDeps({ '@acme/pinned-thing': { '1.0.0': FRESH_DATE } });
+
+    const findings = await findPublishAgeFindings(ctx, deps, ctx.diagnostics, NO_DEADLINE, nowFn);
+
+    expect(findings).toEqual([]);
+    expect(deps.calls).toEqual([]);
+    expect(ctx.diagnostics.some((d) => d.code === 'publish-age-private-origin-skipped')).toBe(true);
+  });
 
   test('does nothing, and calls nothing, when the delta has no candidates', async () => {
     const ctx = makeContext([]);

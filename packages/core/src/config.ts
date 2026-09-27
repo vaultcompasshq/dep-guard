@@ -152,6 +152,24 @@ function readJsonFile(filePath: string, label: string): Record<string, unknown> 
   return parseJsonConfig(content, label);
 }
 
+// An exact release, never a range: digits only in each of the three core
+// fields (no leading zeros are refused here -- that stricter rule belongs
+// to whoever mints a version, not to whoever names one that already
+// exists), an optional dot-separated prerelease, and an optional
+// dot-separated build metadata tag, per semver's own grammar. No leading
+// operator (`^`, `~`, `>=`), no `x`/`*` wildcard segment, and no space --
+// which also refuses a hyphen RANGE ("1.0.0 - 2.0.0") for free, since a
+// range's two endpoints are joined by whitespace around the hyphen and this
+// pattern admits none. A bare hyphen inside a prerelease identifier
+// ("1.0.0-beta-2") is untouched by that and stays valid, as it must: it
+// still names one exact release.
+const EXACT_VERSION_PATTERN =
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+function isExactVersion(version: string): boolean {
+  return EXACT_VERSION_PATTERN.test(version.trim());
+}
+
 // Split the way delta.ts's versionRangeOf splits an alias target ("npm:" +
 // name + "@" + range): the LAST "@" is the separator, and it has to sit
 // past index 0 so a scoped name's own leading "@" ("@scope/pkg") is never
@@ -160,6 +178,10 @@ function readJsonFile(filePath: string, label: string): Record<string, unknown> 
 // comment on ResolvedConfig.minAgeAllow warns against (silencing every
 // future version of a name, not one reviewed release), so it is rejected
 // here rather than accepted and silently matching nothing at check time.
+// The version half also has to be an EXACT version, not a semver range:
+// "foo@^1.2.3" or "foo@1.x" would silence every future release matching
+// that range too, the identical much-bigger-door problem a bare name has,
+// just spelled with a version-shaped suffix instead of no suffix at all.
 function isValidNameAtVersionEntry(entry: string): boolean {
   const separator = entry.lastIndexOf('@');
   if (separator <= 0) {
@@ -167,7 +189,7 @@ function isValidNameAtVersionEntry(entry: string): boolean {
   }
   const name = entry.slice(0, separator);
   const version = entry.slice(separator + 1);
-  return name.trim().length > 0 && version.trim().length > 0;
+  return name.trim().length > 0 && isExactVersion(version);
 }
 
 function validateExtraAliases(value: unknown, label: string): Record<string, string[]> {
@@ -272,7 +294,7 @@ function validateSection(raw: Record<string, unknown>, label: string): Partial<R
     for (const entry of raw.minAgeAllow) {
       if (!isValidNameAtVersionEntry(entry)) {
         throw new DepGuardError(
-          `${label}: "minAgeAllow" entry "${entry}" must be an exact "name@version" string`,
+          `${label}: "minAgeAllow" entry "${entry}" must be an exact "name@version" string, with a concrete version rather than a semver range`,
           'config-invalid'
         );
       }

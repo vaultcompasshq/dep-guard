@@ -170,11 +170,19 @@ failure rather than blocking:
   version was added or changed in the diff; with no `--base`, every
   resolved dependency in the lockfile, exactly as every other check reads
   "added" with no earlier revision to compare against. A package the
-  registry does not know, or a version missing from its publish-time
-  record, is left unflagged rather than guessed at -- the unknown-package
-  check above is what says a name itself looks wrong. `minAgeAllow` (an
-  array of exact `name@version` strings) is a reviewed exception for one
-  specific release, never a standing exemption for the name.
+  registry does not know, or a version still missing from its publish-time
+  record after a live lookup, is left unflagged rather than guessed at --
+  the unknown-package check above is what says a name itself looks wrong --
+  but each case is recorded as a diagnostic rather than passed over in
+  silence, since this check's own candidates come from the lockfile, which
+  is mostly transitive entries no manifest ever names and unknown-package
+  never sees. `minAgeAllow` (an array of exact `name@version` strings) is a
+  reviewed exception for one specific release, never a standing exemption
+  for the name, and a config entry may not itself be a semver range. This
+  check never sends a name to the registry that resolved from anywhere
+  other than the public npm registry, or whose scope is pinned to a
+  different registry in `.npmrc` -- a private dependency's name is not put
+  on the wire to a public service just to price this heuristic.
 
 All four share one wall-clock budget of twenty seconds per run, not per
 request. Once it is spent the remaining lookups are skipped, the affected

@@ -239,6 +239,33 @@ describe('loadConfig', () => {
     expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
   });
 
+  test('a minAgeAllow entry with a caret range throws config-invalid', () => {
+    // An entry has to name one exact release, never a range -- "^1.2.3"
+    // would silence every future release matching that range too, the same
+    // much-bigger-door problem a bare name has.
+    const repoRoot = makeRepo({
+      '.dep-guard.json': JSON.stringify({ minAgeAllow: ['left-pad@^1.2.3'] }),
+    });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+    try {
+      loadConfig(repoRoot);
+    } catch (error) {
+      expect((error as DepGuardError).code).toBe('config-invalid');
+    }
+  });
+
+  test('a minAgeAllow entry with an "x" wildcard range throws config-invalid', () => {
+    const repoRoot = makeRepo({
+      '.dep-guard.json': JSON.stringify({ minAgeAllow: ['left-pad@1.x'] }),
+    });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+    try {
+      loadConfig(repoRoot);
+    } catch (error) {
+      expect((error as DepGuardError).code).toBe('config-invalid');
+    }
+  });
+
   test('extraAliases must be an object', () => {
     const repoRoot = makeRepo({
       '.dep-guard.json': JSON.stringify({ extraAliases: ['not', 'an', 'object'] }),
