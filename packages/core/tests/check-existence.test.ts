@@ -21,6 +21,8 @@ const BASE_CONFIG: ResolvedConfig = {
   extraAliases: {},
   ignorePaths: [],
   online: false,
+  minAgeDays: 7,
+  minAgeAllow: [],
 };
 
 // A name the fixture bloom filter was never fed. Deterministic: the filter

@@ -70,7 +70,7 @@ const OUTPUT_FORMATS: readonly OutputFormat[] = ['text', 'json', 'sarif'];
 // with no flags at all and asserts nothing online happened.
 const ONLINE_FLAG_DESCRIPTION =
   'enable registry-backed checks: unknown-package resolution, popularity asymmetry, ' +
-  'and registered-squat detection (network required)';
+  'registered-squat detection, and minimum publish age (network required)';
 const NO_ONLINE_FLAG_DESCRIPTION =
   'force the registry-backed checks off, overriding "online": true in .dep-guard.json';
 

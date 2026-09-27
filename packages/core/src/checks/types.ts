@@ -16,6 +16,18 @@ export interface ResolvedConfig {
   extraAliases: Record<string, string[]>;
   ignorePaths: string[];
   online: boolean; // turns on the registry-backed checks in packages/core/src/online/
+  // The publish-age check's floor, in days (online/publish-age.ts). A
+  // resolved version published less than this many days ago -- or with a
+  // future-dated publish timestamp, at any floor including zero -- is a
+  // finding. Lets a repository align dep-guard's "too new to trust"
+  // judgment with its own Dependabot minimum-release-age cooldown (#58).
+  minAgeDays: number;
+  // Exact `name@version` strings the publish-age check skips outright,
+  // with a note rather than silence. Deliberately name@version, not a bare
+  // name: allowing a name would keep silencing every future version of it
+  // too, which is a much bigger door than the one this list is for -- a
+  // reviewed exception for one specific fresh release.
+  minAgeAllow: string[];
 }
 
 // Everything a check may read, plus one thing it may write.

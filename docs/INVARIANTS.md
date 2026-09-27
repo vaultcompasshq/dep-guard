@@ -1257,9 +1257,14 @@ The deadline is re-asked before every name in a per-name loop, not once
 at the top of a step. A single slow lookup can spend the whole budget, so
 a loop that legitimately started inside the budget can be outside it
 three names later, and a step that only checked on entry would run the
-remaining nineteen requests it had already decided to make. The two
-places this matters are `resolveUnknownPackages` and
-`findRegisteredSquats`'s packument loop.
+remaining nineteen requests it had already decided to make. The three
+places this matters are `resolveUnknownPackages`, `findRegisteredSquats`'s
+packument loop, and `findPublishAgeFindings`'s per-name loop
+(`online/publish-age.ts`), which is grouped by NAME rather than by
+candidate for the same reason `resolveUnknownPackages` is: several
+resolved versions of one package (a monorepo declaring it at two versions
+across workspace manifests) answer from a single packument, so the
+deadline is spent once per distinct name, not once per lockfile entry.
 
 `applyTyposquatAsymmetry` is gated from OUTSIDE, in `enrichOnline`,
 rather than internally, and that asymmetry is deliberate rather than an
@@ -1268,20 +1273,110 @@ so it has exactly one point at which it could stop, and that point is
 before it starts. Adding a deadline parameter to it would be a second
 copy of a decision with only one branch.
 
-The order the three steps run in is a priority decision about how the
+The order the four steps run in is a priority decision about how the
 budget is spent, and it is written down because it looks arbitrary and is
 not. unknown-package resolution runs FIRST because it is the only step
 that can withdraw a false positive from the check that actually blocks,
 and the only one whose absence gets steadily worse as a release ages away
-from its corpus walk. The other two only ever add or escalate, so a
-budget spent before them costs a signal that would not have existed
-offline either; a budget spent before the first one leaves a user
-holding a blocking finding they have no way to clear.
+from its corpus walk. The other three (typosquat asymmetry, registered-squat,
+publish-age, in that order) only ever add or escalate, so a budget spent
+before them costs a signal that would not have existed offline either; a
+budget spent before the first one leaves a user holding a blocking finding
+they have no way to clear. publish-age runs LAST among the three
+add-or-escalate steps for no reason beyond the order they were written in
+-- nothing orders them against each other, only against unknown-package.
 
 The budget is a constant (`DEFAULT_ONLINE_BUDGET_MS`, twenty seconds) and
 not a config key today. If it ever becomes one, it becomes a config key
 -- it does not become a second constant somewhere else that has to be
 kept in step with this one.
+
+## Minimum publish age reads the lockfile diff, not the manifest diff (0.7.x, issue #58)
+
+`findPublishAgeFindings` (`online/publish-age.ts`) is the fourth
+`--online` step, and it is deliberately built on
+`ctx.delta.lockEntryChanges` rather than `candidates.ts`'s
+`newRegistryNames`, which is what the other three online steps (and the
+offline existence/typosquat checks) read. The two answer different
+questions. `newRegistryNames` answers "which manifest-declared names are
+new", which is right for a check that judges a NAME. This check judges a
+RESOLVED VERSION, and a manifest range can stay unchanged while `npm
+update` moves the lockfile to a version published five minutes ago -- the
+exact case a minimum-publish-age policy exists to catch, and one
+`newRegistryNames` cannot see at all, since the dependency's `kind` stays
+`'changed'` only when its specifier itself moved (`delta.ts`'s
+`specifierHeld` check).
+
+`delta.lockEntryChanges` already answers the right question on its own
+terms, with no special-casing needed in this check for base vs. audit
+mode: `diffLockEntries` (`delta.ts`) treats every lockfile entry as
+`'added'` whenever `beforeEntries` is empty, which is unconditionally true
+when there is no before lockfile at all (audit mode) and conditionally
+true per-name otherwise. So in base mode this array is exactly "every
+resolved version added or changed in the diff", and with no earlier
+revision it is exactly "every resolved dependency in the lockfile" --
+the same "no before, everything reads as added" rule every other row in
+the README's pull-request-mode table follows, arrived at for free rather
+than by branching on `hasComparisonBase` inside this check.
+
+This also means an npm workspace-local sibling is never a candidate
+without this check doing anything to exclude it: `lockfiles/npm.ts` never
+puts a `link: true` entry into `ParsedLockfile.entries` in the first
+place (it goes into `workspaceLocalNames` instead), so `lockEntryChanges`
+-- which is built by walking `entries` -- structurally cannot contain one.
+The check still checks `ctx.delta.workspaceLocalNames` defensively, the
+same belt-and-suspenders posture `candidates.ts`'s own comment describes
+for the name-based checks, but the invariant this section is naming does
+not depend on that defensive check firing.
+
+Internal names (`internalScopes`, `internalPrefixes`) ARE filtered before
+any request goes out, for the identical reason `registered-squat.ts`
+filters them: a private package name is not something this tool may put
+on the wire to a public registry just to price a heuristic, not merely
+that the answer would look suspicious.
+
+One packument fetch per distinct package NAME, not per candidate:
+`findPublishAgeFindings` groups its candidates by name before fetching
+(the same shape `resolveUnknownPackages` uses for the identical reason),
+so a package resolved at two different versions across a monorepo's
+workspace manifests still costs one request, and every version found in
+its `versionTimes` map is judged against that one answer.
+
+Three outcomes are notes, never findings, and the distinction is
+deliberate: the registry not knowing the name at all, the registry
+knowing the name but not this exact resolved version, and an entry in the
+configured `minAgeAllow` list. None of these removes information the
+scan otherwise had -- the unknown-package check is the one that already
+says a NAME looks wrong (an unresolvable name here would otherwise be a
+second, redundant statement of the same fact under a different rule id),
+and a version missing from the time map is data this check could not
+actually read, not evidence of anything. Only a genuine registry error
+(a thrown fetch) is loud: it raises `online-check-unreachable` and never
+silently drops the affected names, per the degrade rule above -- a
+network problem may cost this check a signal it would otherwise have
+added, but it may never manufacture a false sense that nothing needed
+checking.
+
+The age comparison is a single inequality, `ageInDays(...) < minAgeDays`,
+deliberately not two separate conditions for "too new" and "future
+dated". A future-dated publish produces a negative age, and a negative
+number is less than any non-negative `minAgeDays` (config.ts's own
+validation refuses a negative `minAgeDays`), so the future case is the
+general rule's own boundary rather than a second branch that could drift
+from it -- including at `minAgeDays: 0`, where only a future timestamp
+(age exactly zero does not qualify; the comparison is strict) can still
+fire.
+
+`minAgeAllow` entries are exact `name@version` strings, matched by exact
+string equality against `"${candidate.name}@${candidate.version}"` --
+never a bare name, and never a semver range. Config validation
+(`config.ts`'s `isValidNameAtVersionEntry`) refuses an entry with no
+version half, including a scoped name's own leading `@` mistaken for one
+(`@acme/widget` alone is refused; `@acme/widget@1.0.0` is not), for the
+same reason the field comment on `ResolvedConfig.minAgeAllow` gives: a
+bare name would silence every future version of it too, which is the
+much bigger door `allow` already is, not the one-release exception this
+list exists to be.
 
 ## The popularity list is a trust input, and it is sized for its own rule
 

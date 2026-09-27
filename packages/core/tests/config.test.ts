@@ -23,6 +23,8 @@ describe('loadConfig', () => {
       extraAliases: {},
       ignorePaths: [],
       online: false,
+      minAgeDays: 7,
+      minAgeAllow: [],
     });
   });
 
@@ -62,6 +64,8 @@ describe('loadConfig', () => {
       extraAliases: { foo: ['bar'] },
       ignorePaths: ['vendor/'],
       online: false,
+      minAgeDays: 7,
+      minAgeAllow: [],
     });
   });
 
@@ -154,6 +158,83 @@ describe('loadConfig', () => {
   test('ignorePaths must be a string array', () => {
     const repoRoot = makeRepo({
       '.dep-guard.json': JSON.stringify({ ignorePaths: [1, 2] }),
+    });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+  });
+
+  test('minAgeDays defaults to 7', () => {
+    const repoRoot = makeRepo();
+    expect(loadConfig(repoRoot).minAgeDays).toBe(7);
+  });
+
+  test('minAgeDays can be overridden in .dep-guard.json', () => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ minAgeDays: 14 }) });
+    expect(loadConfig(repoRoot).minAgeDays).toBe(14);
+  });
+
+  test('minAgeDays of 0 is accepted (only future-dated publishes are refused)', () => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ minAgeDays: 0 }) });
+    expect(loadConfig(repoRoot).minAgeDays).toBe(0);
+  });
+
+  test('a negative minAgeDays throws config-invalid', () => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ minAgeDays: -1 }) });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+    try {
+      loadConfig(repoRoot);
+    } catch (error) {
+      expect((error as DepGuardError).code).toBe('config-invalid');
+    }
+  });
+
+  test('a non-integer minAgeDays throws config-invalid', () => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ minAgeDays: 1.5 }) });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+  });
+
+  test('a non-numeric minAgeDays throws config-invalid', () => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ minAgeDays: '7' }) });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+  });
+
+  test('minAgeAllow defaults to an empty array', () => {
+    const repoRoot = makeRepo();
+    expect(loadConfig(repoRoot).minAgeAllow).toEqual([]);
+  });
+
+  test('minAgeAllow accepts exact name@version strings, scoped and unscoped', () => {
+    const repoRoot = makeRepo({
+      '.dep-guard.json': JSON.stringify({
+        minAgeAllow: ['left-pad@1.0.0', '@acme/widget@2.3.4'],
+      }),
+    });
+    expect(loadConfig(repoRoot).minAgeAllow).toEqual(['left-pad@1.0.0', '@acme/widget@2.3.4']);
+  });
+
+  test('a minAgeAllow entry with no version half throws config-invalid', () => {
+    const repoRoot = makeRepo({
+      '.dep-guard.json': JSON.stringify({ minAgeAllow: ['left-pad'] }),
+    });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+    try {
+      loadConfig(repoRoot);
+    } catch (error) {
+      expect((error as DepGuardError).code).toBe('config-invalid');
+    }
+  });
+
+  test('a scoped minAgeAllow entry with no version half throws config-invalid', () => {
+    // The scope's own leading "@" must not be mistaken for the name@version
+    // separator -- "@acme/widget" alone has no version half either.
+    const repoRoot = makeRepo({
+      '.dep-guard.json': JSON.stringify({ minAgeAllow: ['@acme/widget'] }),
+    });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+  });
+
+  test('a non-array minAgeAllow value throws config-invalid', () => {
+    const repoRoot = makeRepo({
+      '.dep-guard.json': JSON.stringify({ minAgeAllow: 'left-pad@1.0.0' }),
     });
     expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
   });
@@ -288,6 +369,8 @@ describe('loadConfig', () => {
       extraAliases: {},
       ignorePaths: [],
       online: false,
+      minAgeDays: 7,
+      minAgeAllow: [],
     });
   });
 });

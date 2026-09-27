@@ -23,6 +23,8 @@ const BASE_CONFIG: ResolvedConfig = {
   extraAliases: {},
   ignorePaths: [],
   online: false,
+  minAgeDays: 7,
+  minAgeAllow: [],
 };
 
 function makeChange(overrides: Partial<DepChange> & { name: string }): DepChange {

@@ -132,6 +132,12 @@ describe('scan(): online enrichment', () => {
       deprecated: false,
       unpublished: false,
       securityHolder: false,
+      // Deliberately empty: these tests are about registered-squat, not
+      // publish-age, and an empty map means publish-age's own online step
+      // (also driven by this same mocked fetchPackument) finds no
+      // timestamp for whatever version is under test and stays silent
+      // rather than inventing a signal these tests do not assert on.
+      versionTimes: {},
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -163,6 +169,12 @@ describe('scan(): online enrichment', () => {
       deprecated: false,
       unpublished: false,
       securityHolder: false,
+      // Deliberately empty: these tests are about registered-squat, not
+      // publish-age, and an empty map means publish-age's own online step
+      // (also driven by this same mocked fetchPackument) finds no
+      // timestamp for whatever version is under test and stays silent
+      // rather than inventing a signal these tests do not assert on.
+      versionTimes: {},
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -192,6 +204,12 @@ describe('scan(): online enrichment', () => {
       deprecated: false,
       unpublished: false,
       securityHolder: false,
+      // Deliberately empty: these tests are about registered-squat, not
+      // publish-age, and an empty map means publish-age's own online step
+      // (also driven by this same mocked fetchPackument) finds no
+      // timestamp for whatever version is under test and stays silent
+      // rather than inventing a signal these tests do not assert on.
+      versionTimes: {},
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -228,6 +246,12 @@ describe('scan(): online enrichment', () => {
       deprecated: false,
       unpublished: false,
       securityHolder: false,
+      // Deliberately empty: these tests are about registered-squat, not
+      // publish-age, and an empty map means publish-age's own online step
+      // (also driven by this same mocked fetchPackument) finds no
+      // timestamp for whatever version is under test and stays silent
+      // rather than inventing a signal these tests do not assert on.
+      versionTimes: {},
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -367,6 +391,12 @@ describe('scan(): online enrichment', () => {
       deprecated: false,
       unpublished: false,
       securityHolder: false,
+      // Deliberately empty: these tests are about registered-squat, not
+      // publish-age, and an empty map means publish-age's own online step
+      // (also driven by this same mocked fetchPackument) finds no
+      // timestamp for whatever version is under test and stays silent
+      // rather than inventing a signal these tests do not assert on.
+      versionTimes: {},
     });
     const secondResult = await scan({
       repoRoot: dir,
@@ -402,6 +432,7 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
       deprecated: false,
       unpublished: false,
       securityHolder: false,
+      versionTimes: {},
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -447,6 +478,7 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
       deprecated: false,
       unpublished: false,
       securityHolder: false,
+      versionTimes: {},
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -483,6 +515,7 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
       deprecated: false,
       unpublished: false,
       securityHolder: false,
+      versionTimes: {},
     });
     fetchWeeklyDownloadsMock.mockResolvedValue({
       counts: new Map([['raect', 999_999]]),
@@ -674,6 +707,7 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
       deprecated: false,
       unpublished: false,
       securityHolder: true,
+      versionTimes: {},
     });
     const dir = initRepo();
     commitManifest(dir, {});
@@ -706,6 +740,7 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
       deprecated: false,
       unpublished: false,
       securityHolder: false,
+      versionTimes: {},
     });
     const dir = initRepo();
     commitManifest(dir, {});

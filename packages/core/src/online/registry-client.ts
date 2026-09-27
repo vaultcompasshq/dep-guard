@@ -412,6 +412,15 @@ export interface Packument {
   // npm seized for security reasons is precisely a name a manifest should
   // not be pointing at.
   securityHolder: boolean;
+  // Every real version's publish timestamp, keyed by exact version string,
+  // for online/publish-age.ts's minimum-publish-age check. `raw.time` also
+  // carries `created`, `modified`, and (for a fully-unpublished name)
+  // `unpublished` keys that are not version numbers at all; those three are
+  // filtered out here, once, so a caller asking `versionTimes['modified']`
+  // by mistake gets undefined -- a lookup miss, exactly like asking about a
+  // version that was never published -- rather than a date that means
+  // something else entirely.
+  versionTimes: Record<string, string>;
 }
 
 interface RawPackument {
@@ -453,6 +462,32 @@ function readString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+// The three keys `time` carries that are not version numbers. `unpublished`
+// is an object marker (see the `unpublished` field above), not a date, and
+// `created`/`modified` are whole-package dates already exposed through
+// their own Packument fields -- versionTimes exists to answer "when was
+// THIS version published", so a package name that happened to publish a
+// version literally called "created" or "modified" (npm allows neither as
+// a semver, so this is theoretical, not observed) still could not shadow
+// this filter, since the exclusion runs before any per-key value is read.
+const NON_VERSION_TIME_KEYS: ReadonlySet<string> = new Set(['created', 'modified', 'unpublished']);
+
+function readVersionTimes(raw: RawPackument): Record<string, string> {
+  const times: Record<string, string> = {};
+  if (raw.time === undefined) {
+    return times;
+  }
+  for (const [key, value] of Object.entries(raw.time)) {
+    if (NON_VERSION_TIME_KEYS.has(key)) {
+      continue;
+    }
+    if (typeof value === 'string') {
+      times[key] = value;
+    }
+  }
+  return times;
+}
+
 function readPackument(payload: unknown): Packument {
   const raw = (payload ?? {}) as RawPackument;
   const latestVersion = raw['dist-tags']?.latest ?? null;
@@ -466,6 +501,7 @@ function readPackument(payload: unknown): Packument {
     // means the registry recorded an unpublish for this name.
     unpublished: raw.time !== undefined && raw.time.unpublished !== undefined,
     securityHolder: isSecurityHolder(raw, latestVersion),
+    versionTimes: readVersionTimes(raw),
   };
 }
 

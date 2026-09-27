@@ -29,6 +29,8 @@ function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     extraAliases: {},
     ignorePaths: [],
     online: true,
+    minAgeDays: 7,
+    minAgeAllow: [],
     ...overrides,
   };
 }

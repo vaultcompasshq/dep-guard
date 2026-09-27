@@ -28,6 +28,7 @@ import type { ControlShapeChange, TrustedControls } from './trust-base.js';
 import { DepGuardError } from './types.js';
 import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
 import { applyTyposquatAsymmetry } from './online/asymmetry.js';
+import { findPublishAgeFindings } from './online/publish-age.js';
 import { findRegisteredSquats } from './online/registered-squat.js';
 import { resolveUnknownPackages } from './online/unknown-package.js';
 import {
@@ -354,7 +355,38 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
   return packument;
 }
 
-// The three online steps, in the order the run's one wall-clock budget is
+// publish-age.ts's own cached fetch. Deliberately keyed and cached
+// DIFFERENTLY from cachedFetchPackument's `created:` entries just above,
+// even though both read the same underlying packument: `created:` is safe
+// to cache forever because a package's creation date never changes once
+// set, but a version-times MAP grows every time the package publishes
+// again, and the whole point of this check is to catch a version that was
+// published recently -- exactly the version most likely to be missing from
+// a map fetched before that publish happened. Caching it forever would make
+// the check permanently blind to a name's newest release on any machine
+// that happened to query it before that release went out. DOWNLOADS_TTL_MS
+// (a day) bounds that staleness window the same way it already bounds the
+// downloads cache's, and a miss (the name does not exist at all) is never
+// cached, for the same not-yet-registered reason cachedFetchPackument's own
+// miss is not cached above.
+async function cachedFetchPackumentVersionTimes(
+  name: string
+): Promise<{ versionTimes: Record<string, string> } | null> {
+  const store = sharedCache();
+  const hit = store.get(`version-times:${name}`);
+  if (hit !== undefined) {
+    return { versionTimes: hit as Record<string, string> };
+  }
+  const packument = await fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
+  if (packument === null) {
+    return null;
+  }
+  store.set(`version-times:${name}`, packument.versionTimes, DOWNLOADS_TTL_MS);
+  store.save();
+  return { versionTimes: packument.versionTimes };
+}
+
+// The four online steps, in the order the run's one wall-clock budget is
 // spent on them. The order is a priority decision, not an accident:
 //
 //  1. unknown-package resolution, because it is the only step that can
@@ -364,11 +396,12 @@ async function cachedFetchPackument(name: string): Promise<{ createdAt: string |
 //     is the one worth having.
 //  2. typosquat popularity asymmetry, which escalates an existing low.
 //  3. registered-squat, which adds a new medium.
+//  4. publish-age, which adds a new high.
 //
-// Steps 2 and 3 both only ever add or escalate, so a budget spent before
-// them costs a signal that would not have existed offline either. Step 1
-// is the one whose omission leaves a user with a blocking finding they
-// have no way to clear, which is why it goes first.
+// Steps 2 through 4 all only ever add or escalate, so a budget spent
+// before them costs a signal that would not have existed offline either.
+// Step 1 is the one whose omission leaves a user with a blocking finding
+// they have no way to clear, which is why it goes first.
 //
 // Never throws, per docs/INVARIANTS.md: each step owns its own error
 // handling and turns a failure into a diagnostic, because --online
@@ -447,7 +480,18 @@ async function enrichOnline(
     ctx.diagnostics,
     deadline
   );
-  return [...resolved, ...registeredSquats];
+
+  // 4. publish-age, added last for the same reason registered-squat is
+  // third: it only ever ADDS a new finding, so a budget spent before it
+  // costs a signal that would not have existed offline either, unlike
+  // step 1's removals.
+  const publishAgeFindings = await findPublishAgeFindings(
+    ctx,
+    { fetchPackument: cachedFetchPackumentVersionTimes },
+    ctx.diagnostics,
+    deadline
+  );
+  return [...resolved, ...registeredSquats, ...publishAgeFindings];
 }
 
 interface RunInfo {
