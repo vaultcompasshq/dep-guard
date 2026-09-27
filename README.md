@@ -401,8 +401,8 @@ input**. What it costs: eleven scanners are published, so a workflow pinning any
 of `0.1.0` through `0.7.0` passes the shape check on a pull request today and
 is refused by this rule. A pin below `0.6.0` is already broken on that event,
 since those scanners do not know `--trust-base`; the change there is that the
-job fails at the validate step with a message saying why. A pin of exactly
-`0.7.0` newly fails here too, on version alone: it knows `--trust-base` and
+job fails at the validate step with a message saying why. A pin of `0.6.0` or
+`0.7.0` fails on version alone: it knows `--trust-base` and
 would otherwise run cleanly. **Remove the `version` input, or raise it to
 `0.8.0` or newer.**
 

@@ -831,8 +831,8 @@ function tagScannerPart(part) {
 // 0.7.0), and the first case in the block below drives the unmodified step with
 // `version: 0.5.9` and watches it refuse. The future constant exists to exercise the comparison
 // at a boundary the published set cannot reach today, one where the refused
-// version is itself in the 0.8.x family and so the minor and patch legs of the
-// comparison do the work. It is not a weakened program: every line of the check
+// version is itself in the 0.8.x family and so the minor leg of the
+// comparison does the work. It is not a weakened program: every line of the check
 // is the shipped one. The replacement is asserted to have MATCHED, so deleting
 // or renaming the constant turns this red rather than silently testing the
 // unmodified script.

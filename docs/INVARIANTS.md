@@ -2306,8 +2306,8 @@ else.
   refused, with a message telling them to remove the input or raise it. A pin
   below 0.6.0 is already broken on that event, because no scanner below 0.6.0
   knows `--trust-base` and the run step always passes it; the rule changes
-  that failure from the scan to a named refusal at validate. A pin of exactly
-  0.7.0 newly fails here too, on version alone, since it knows `--trust-base`
+  that failure from the scan to a named refusal at validate. A pin of 0.6.0 or
+  0.7.0 fails on version alone, since each knows `--trust-base`
   and would otherwise run cleanly. Pins at or above 0.8.0 are unaffected.
 
 **Enforced by:** the `pinning the scanner backward on a pull request` cases in

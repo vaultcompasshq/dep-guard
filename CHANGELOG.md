@@ -12,6 +12,17 @@ GitHub release notes, which are generated from the commit history.
 
 ## [0.8.0] - 2026-09-26
 
+Minor on both published packages, per the stability policy: 0.x minors may
+change scanner behavior. `@vaultcompass/dep-guard` and
+`@vaultcompass/dep-guard-core` move from 0.7.0 to 0.8.0. The action's
+`version` input default and the `DG_TAG_SCANNER` constant move with them, so
+`vaultcompasshq/dep-guard@v0.8.0` installs `@vaultcompass/dep-guard@0.8.0`.
+The new publish-age check is on whenever `--online` is set, reports at
+severity high, and blocks at the default `failOn` of medium, so an adopter
+running `online: 'true'` can go red on any dependency under seven days old,
+and on a push run that covers the whole lockfile; raise `minAgeDays` or use
+`minAgeAllow` to tune it.
+
 - New `--online` check: minimum publish age. Only runs under `--online`
   (gated the same way as the other three registry-backed checks), and
   flags a resolved dependency version published less than `minAgeDays` (a
@@ -39,8 +50,8 @@ GitHub release notes, which are generated from the commit history.
   naming it; a pnpm entry with no recorded resolution URL (pnpm never
   records which registry served an ordinary resolution) is judged instead
   against the project `.npmrc`'s own unscoped default registry, and on a
-  pull request that default registry is read from the base ref alongside
-  the config, the baseline and the scope pins, so a pull request cannot
+  pull request that default registry is read from the trust-base ref
+  alongside the config, the baseline and the scope pins, so a pull request cannot
   add or change it to silence the check for a package it introduces.
   README, CHANGELOG, and `docs/INVARIANTS.md` updated (fixes #58).
 
