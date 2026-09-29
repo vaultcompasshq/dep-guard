@@ -717,6 +717,46 @@ export function computeDelta(before: RepoState | null, after: RepoState): Depend
 
   const lockEntries = diffLockEntries(before?.lockfile ?? null, after.lockfile, after.manifests);
 
+  // Every other npm or pnpm lockfile at the root is diffed the same way,
+  // against the before-side lockfile it corresponds to (same path first,
+  // then the same format). Which file an install honours is the package
+  // manager's choice, not something this scan can see, so a clean one must
+  // not stand in for a tampered one. Their entries join the same
+  // lockEntryChanges list the checks already walk, each tagged with its own
+  // path and format.
+  const primaryChanges = [...lockEntries.changes];
+  const beforeLockfiles = before === null ? [] : lockfilesOf(before);
+  for (const extra of after.extraLockfiles ?? []) {
+    const counterpart =
+      beforeLockfiles.find((candidate) => candidate.path === extra.path) ??
+      beforeLockfiles.find((candidate) => candidate.format === extra.format) ??
+      null;
+    if (before === null) {
+      deltaDiagnostics.push({
+        code: AUDIT_NO_TAMPER_COMPARISON,
+        message:
+          `${extra.path}: this scan has no earlier revision to compare against, so the ` +
+          `lockfile-tamper signals that work by comparison (${comparisonTamperSignalList()}) could ` +
+          'not be evaluated for any entry in this lockfile; only the specifier-based git-source and ' +
+          'url-source signals ran',
+      });
+    }
+    const extraDiff = diffLockEntries(counterpart, extra, after.manifests);
+    const uncomparable = extraDiff.changes.filter((entry) => entry.before === undefined).length;
+    if (before !== null && uncomparable > 0) {
+      deltaDiagnostics.push({
+        code: NEW_LOCK_ENTRIES,
+        message:
+          `${extra.path}: ${uncomparable} lockfile entr${uncomparable === 1 ? 'y is' : 'ies are'} ` +
+          'new in this change with no earlier resolution behind them, so the lockfile-tamper signals ' +
+          `that work by comparison (${comparisonTamperSignalList()}) could not be evaluated for ` +
+          `${uncomparable === 1 ? 'it' : 'them'}`,
+      });
+    }
+    lockEntries.changes.push(...extraDiff.changes);
+    lockEntries.diagnostics.push(...extraDiff.diagnostics);
+  }
+
   // An entry with no before side has nothing for the comparison-based
   // signals to read, exactly as in audit mode -- and in a delta mode that
   // gap used to be silent, so a fresh install was indistinguishable from a
@@ -729,7 +769,7 @@ export function computeDelta(before: RepoState | null, after: RepoState): Depend
   // diagnostics that name a specific thing the engine could not judge.
   // Judging a new entry on its own merits, rather than by comparison, is a
   // separate rule and is not in this scan's scope.
-  const uncomparableAdded = lockEntries.changes.filter((entry) => entry.before === undefined).length;
+  const uncomparableAdded = primaryChanges.filter((entry) => entry.before === undefined).length;
   if (before !== null && uncomparableAdded > 0 && after.lockfile !== null) {
     deltaDiagnostics.push({
       code: NEW_LOCK_ENTRIES,
@@ -752,6 +792,8 @@ export function computeDelta(before: RepoState | null, after: RepoState): Depend
     diagnostics: dedupeDiagnostics([
       ...(before?.lockfile?.diagnostics ?? []),
       ...(after.lockfile?.diagnostics ?? []),
+      ...(before?.extraLockfiles ?? []).flatMap((extra) => extra.diagnostics),
+      ...(after.extraLockfiles ?? []).flatMap((extra) => extra.diagnostics),
       ...deltaDiagnostics,
       ...lockEntries.diagnostics,
     ]),

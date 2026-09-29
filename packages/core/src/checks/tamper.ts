@@ -535,7 +535,10 @@ export const tamperCheck: Check = (ctx) => {
   // both, produces the same signal string for the same package at the same
   // manifest path, and is reported once.
   const seen = new Set<string>();
-  const report = (finding: Omit<Finding, 'fingerprint'>): void => {
+  const report = (
+    finding: Omit<Finding, 'fingerprint'>,
+    lockfilePath: string | undefined = delta.lockfilePath
+  ): void => {
     const signal = typeof finding.details?.signal === 'string' ? finding.details.signal : '';
     const key = JSON.stringify([finding.manifestPath, finding.packageName, signal]);
     if (seen.has(key)) {
@@ -545,9 +548,7 @@ export const tamperCheck: Check = (ctx) => {
     // Every finding this check raises is a fact about a lockfile, and
     // for a transitive entry the manifest path is only an anchor -- the
     // lockfile is the file a reader has to open.
-    findings.push(
-      delta.lockfilePath === undefined ? finding : { ...finding, lockfilePath: delta.lockfilePath }
-    );
+    findings.push(lockfilePath === undefined ? finding : { ...finding, lockfilePath });
   };
 
   // Diagnostics are deduplicated on the way in rather than on the way out:
@@ -1084,7 +1085,9 @@ export const tamperCheck: Check = (ctx) => {
         pnpmEntries: (entryChange.lockfileFormat ?? delta.lockfileFormat) === 'pnpm',
       });
       for (const finding of certain) {
-        report(finding);
+        // The entry knows which lockfile it came from; with several at one
+        // root that is not always the delta's primary one.
+        report(finding, entryChange.lockfilePath);
       }
     }
   }

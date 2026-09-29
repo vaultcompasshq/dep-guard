@@ -105,6 +105,7 @@ const DIR_UNREADABLE = 'workspace-dir-unreadable';
 const PATH_OUTSIDE_ROOT = 'path-outside-root';
 const SYMLINK_CYCLE = 'symlink-cycle';
 const DUPLICATE_DIR = 'workspace-duplicate-directory';
+const MULTIPLE_LOCKFILES = 'multiple-lockfiles';
 const AUDIT_ANCHOR_DIFFERS = 'audit-anchor-differs';
 
 // Resolving a path can fail because the links form a cycle, or because
@@ -726,9 +727,19 @@ function binaryLockfile(lockfilePath: string): ParsedLockfile {
   };
 }
 
-// Detection order, first present wins. npm and pnpm come first because
-// they are the two formats with real parsers behind them.
+// Detection order. The first one present is the scan's primary lockfile
+// (the one its run summary names); npm and pnpm come first because they are
+// the two formats with real parsers behind them. npm-shrinkwrap.json leads
+// because npm gives it precedence over package-lock.json when both exist.
+//
+// Order is NOT "first present wins" any more: every npm or pnpm lockfile
+// present at the root is parsed and checked (loadLockfiles below). Which
+// file an install honours depends on the package manager the developer
+// runs, and a clean file beside a tampered one -- a package-lock.json decoy
+// next to a pnpm-lock.yaml, or a package-lock.json beside a tampered
+// npm-shrinkwrap.json -- scanned clean when only one was read.
 const LOCKFILE_CANDIDATES: Array<[string, LockfileLoader]> = [
+  ['npm-shrinkwrap.json', parseNpmLockfile],
   ['package-lock.json', parseNpmLockfile],
   ['pnpm-lock.yaml', parsePnpmLockfile],
   ['yarn.lock', manifestOnlyLockfile('yarn')],
@@ -749,7 +760,18 @@ export const LOCKFILE_FILE_NAMES: readonly string[] = LOCKFILE_CANDIDATES.map(([
 // into a null would turn a one-line change into a whole-repository delta,
 // which is exactly the shape an attacker would want a corrupt lockfile to
 // produce.
-async function loadLockfile(source: FileSource): Promise<ParsedLockfile | null> {
+//
+// Returns the primary lockfile (first present in detection order) and every
+// other present lockfile that has a real parser behind it. yarn.lock and
+// bun lockfiles are not added as extras: they parse to nothing but a
+// manifest-only note, and a repository migrating off yarn would otherwise
+// carry that note for a file no check can read either way.
+async function loadLockfiles(
+  source: FileSource,
+  diagnostics: Diagnostic[]
+): Promise<{ lockfile: ParsedLockfile | null; extraLockfiles: ParsedLockfile[] }> {
+  let lockfile: ParsedLockfile | null = null;
+  const extraLockfiles: ParsedLockfile[] = [];
   for (const [name, load] of LOCKFILE_CANDIDATES) {
     // bun.lockb is binary and is read only to learn that it exists; the
     // lossily decoded content it returns is never parsed.
@@ -757,9 +779,25 @@ async function loadLockfile(source: FileSource): Promise<ParsedLockfile | null> 
     if (content === null) {
       continue;
     }
-    return load(name, content);
+    if (lockfile === null) {
+      lockfile = load(name, content);
+      continue;
+    }
+    const parsed = load(name, content);
+    if (parsed.format === 'npm' || parsed.format === 'pnpm') {
+      extraLockfiles.push(parsed);
+    }
   }
-  return null;
+  if (lockfile !== null && extraLockfiles.length > 0) {
+    diagnostics.push({
+      code: MULTIPLE_LOCKFILES,
+      message:
+        `${[lockfile, ...extraLockfiles].map((entry) => entry.path).join(', ')}: more than one ` +
+        'lockfile is present at the repository root; every one of them was checked, because which one ' +
+        'an install honours depends on the package manager in use',
+    });
+  }
+  return { lockfile, extraLockfiles };
 }
 
 const ROOT_MANIFEST = 'package.json';
@@ -835,7 +873,7 @@ async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise
     }
   }
 
-  const lockfile = await loadLockfile(source);
+  const { lockfile, extraLockfiles } = await loadLockfiles(source, diagnostics);
   // Read once and handed to both parsers below -- parseNpmrcPins and
   // parseNpmrcDefaultRegistry read the same file for two different keys,
   // and a source's read() is not assumed free of cost (a git source shells
@@ -845,6 +883,7 @@ async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise
   return {
     manifests,
     lockfile,
+    extraLockfiles,
     // pnpm honours the workspace-level allowlist and every manifest's own
     // pnpm block together, and computeDelta reads only this merged list,
     // so the merge has to happen here rather than in the install-script
@@ -855,7 +894,10 @@ async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise
     // A straight carry of what the lockfile parser already discovered
     // (npm's "link": true entries, one per workspace member); no
     // directory or manifest is re-walked to reconstruct it here.
-    workspaceLocalNames: lockfile?.workspaceLocalNames ?? new Set(),
+    workspaceLocalNames: new Set([
+      ...(lockfile?.workspaceLocalNames ?? []),
+      ...extraLockfiles.flatMap((extra) => [...extra.workspaceLocalNames]),
+    ]),
   };
 }
 

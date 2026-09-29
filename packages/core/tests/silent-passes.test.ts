@@ -315,3 +315,92 @@ describe('D2: a pnpm resolution that gains a tarball URL is compared against the
     expect(result.exitCode).toBe(1);
   });
 });
+
+describe('D3: every lockfile at the root is checked, npm-shrinkwrap.json included', () => {
+  test('a clean package-lock.json decoy beside a tampered pnpm-lock.yaml', async () => {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
+    await write('pnpm-lock.yaml', pnpmLock('integrity: sha512-cleanlodash'));
+    await commitAll('first');
+
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock('integrity: sha512-evilevilevil, tarball: https://evil.example.com/x.tgz')
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('host-changed'))).toBe(true);
+    expect(result.exitCode).toBe(1);
+    expect(result.run.diagnostics.map((d) => d.code)).toContain('multiple-lockfiles');
+    const finding = result.findings.find((f) => f.ruleId === 'lockfile-tamper');
+    expect(finding?.lockfilePath).toBe('pnpm-lock.yaml');
+  });
+
+  test('a tampered npm-shrinkwrap.json beside a clean package-lock.json', async () => {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    const clean = npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' });
+    await write('package-lock.json', clean);
+    await write('npm-shrinkwrap.json', clean);
+    await commitAll('first');
+
+    await write(
+      'npm-shrinkwrap.json',
+      npmLock({ 'node_modules/lodash': TAMPERED_LODASH }, { lodash: '^4.17.21' })
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('host-changed'))).toBe(true);
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('a tampered npm-shrinkwrap.json newly added beside the package-lock.json the base already had', async () => {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
+    await commitAll('first');
+
+    await write(
+      'npm-shrinkwrap.json',
+      npmLock({ 'node_modules/lodash': TAMPERED_LODASH }, { lodash: '^4.17.21' })
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('host-changed'))).toBe(true);
+    expect(result.exitCode).toBe(1);
+    expect(result.run.lockfileFormat).toBe('npm');
+  });
+
+  test('npm-shrinkwrap.json alone is read as the npm lockfile', async () => {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('npm-shrinkwrap.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
+    await commitAll('first');
+    await write(
+      'npm-shrinkwrap.json',
+      npmLock({ 'node_modules/lodash': TAMPERED_LODASH }, { lodash: '^4.17.21' })
+    );
+    const result = await scanStaged();
+
+    expect(result.run.lockfileFormat).toBe('npm');
+    expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('host-changed'))).toBe(true);
+  });
+
+  test('a repo whose only surviving file is an npm-shrinkwrap.json is could-not-run, not dependency-free', async () => {
+    await write(
+      'npm-shrinkwrap.json',
+      JSON.stringify({ name: 'root', version: '1.0.0', lockfileVersion: 3, requires: true, packages: {} })
+    );
+
+    await expect(
+      scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS })
+    ).rejects.toMatchObject({ code: 'manifests-unresolved' });
+  });
+
+  test('a single lockfile raises no multiple-lockfiles diagnostic', async () => {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
+    await commitAll('first');
+    await write('package.json', manifestJson({ lodash: '^4.17.20' }));
+    const result = await scanStaged();
+
+    expect(result.run.diagnostics.map((d) => d.code)).not.toContain('multiple-lockfiles');
+  });
+});
