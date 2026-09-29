@@ -10,6 +10,19 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Added
+
+- The run-level `online` summary carries two new counts beside
+  `lookupsAttempted`: `candidatesEvaluated` (package names the online steps
+  asked about) and `cacheHits` (names answered from the on-disk cache, so no
+  lookup was issued). Both are counted per online step in names, the same
+  unit as `lookupsAttempted`, and `candidatesEvaluated` is always
+  `lookupsAttempted` plus `cacheHits`. Before this, a run answered entirely
+  from a warm cache and a run with nothing to check both reported
+  `lookupsAttempted: 0`; the new counts tell them apart. The text output's
+  `online:` line prints both. Every existing field is unchanged, and a
+  disabled run reports both new fields as zero (issue #80).
+
 ## [0.9.0] - 2026-09-27
 
 Minor on both published packages, per the stability policy: 0.x minors may

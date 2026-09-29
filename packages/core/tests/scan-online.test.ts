@@ -78,6 +78,29 @@ function commitManifestWithLock(dir: string, deps: Record<string, string>): void
   execFileSync('git', ['commit', '-q', '-m', 'update'], { cwd: dir });
 }
 
+// A lockfile-only bump: every name keeps its manifest range and moves its
+// resolved version, the shape a grouped bot update takes. None of these
+// names is newly added, so only publish-age (which walks
+// ctx.delta.lockEntryChanges) has anything to look up.
+function commitLockBump(dir: string, names: string[], version: string): void {
+  const deps = Object.fromEntries(names.map((name) => [name, '^1.0.0']));
+  const packages: Record<string, unknown> = { '': { name: 'x', version: '1.0.0', dependencies: deps } };
+  for (const name of names) {
+    packages[`node_modules/${name}`] = {
+      version,
+      resolved: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`,
+      integrity: `sha512-notreal-${version}`,
+    };
+  }
+  writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '1.0.0', dependencies: deps }));
+  writeFileSync(
+    path.join(dir, 'package-lock.json'),
+    JSON.stringify({ name: 'x', version: '1.0.0', lockfileVersion: 3, requires: true, packages })
+  );
+  execFileSync('git', ['add', '.'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'update'], { cwd: dir });
+}
+
 const fetchWeeklyDownloadsMock: jest.MockedFunction<typeof fetchWeeklyDownloads> = jest.fn();
 const fetchPackumentMock: jest.MockedFunction<typeof fetchPackument> = jest.fn();
 
@@ -849,7 +872,9 @@ describe('scan(): run.online summary', () => {
     expect(result.run.online).toEqual({
       enabled: false,
       budgetMs: 0,
+      candidatesEvaluated: 0,
       lookupsAttempted: 0,
+      cacheHits: 0,
       lookupsSkippedByDeadline: 0,
       deadlineExceeded: false,
     });
@@ -1116,5 +1141,68 @@ describe('scan(): run.online summary', () => {
       }, 0);
     expect(skippedFromDiagnostics).toBeGreaterThan(0);
     expect(result.run.online.lookupsSkippedByDeadline).toBe(skippedFromDiagnostics);
+  });
+
+  // Issue #80: lookupsAttempted counts only fetches that missed the cache,
+  // so a run answered entirely from a warm cache and a run with nothing to
+  // check both read "lookups 0". candidatesEvaluated and cacheHits are
+  // counted in the same unit (names, per online step) so the two cases can
+  // be told apart.
+  describe('candidatesEvaluated and cacheHits', () => {
+    const bumped = ['bump-one', 'bump-two', 'bump-three', 'bump-four', 'bump-five'];
+
+    function bumpRepo(): string {
+      fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map(), noRecord: new Set() });
+      fetchPackumentMock.mockResolvedValue({
+        createdAt: '2020-01-01T00:00:00.000Z',
+        latestVersion: '1.1.0',
+        latestPublishedAt: '2021-01-01T00:00:00.000Z',
+        deprecated: false,
+        unpublished: false,
+        securityHolder: false,
+        versionTimes: { '1.0.0': '2020-01-01T00:00:00.000Z', '1.1.0': '2021-01-01T00:00:00.000Z' },
+      });
+      const dir = initRepo();
+      commitLockBump(dir, bumped, '1.0.0');
+      commitLockBump(dir, bumped, '1.1.0');
+      return dir;
+    }
+
+    test('cold cache: every candidate is a lookup and none is a cache hit', async () => {
+      const dir = bumpRepo();
+      const result = await scan({ repoRoot: dir, mode: { kind: 'base', ref: 'HEAD~1' }, corpusDir: FIXTURE_CORPUS, online: true });
+
+      expect(result.run.online).toMatchObject({ candidatesEvaluated: 5, lookupsAttempted: 5, cacheHits: 0 });
+    });
+
+    test('warm cache: the same candidates are evaluated with no lookups, all cache hits', async () => {
+      const dir = bumpRepo();
+      const opts = { repoRoot: dir, mode: { kind: 'base' as const, ref: 'HEAD~1' }, corpusDir: FIXTURE_CORPUS, online: true };
+      const cold = await scan(opts);
+      const warm = await scan(opts);
+
+      expect(warm.run.online).toMatchObject({ candidatesEvaluated: 5, lookupsAttempted: 0, cacheHits: 5 });
+      // The findings do not depend on where the answer came from.
+      expect(warm.findings).toEqual(cold.findings);
+    });
+
+    test('nothing to check: every count is zero', async () => {
+      const dir = initRepo();
+      commitManifest(dir, {});
+      writeFileSync(path.join(dir, 'README.md'), 'no dependency change\n');
+      execFileSync('git', ['add', '.'], { cwd: dir });
+      execFileSync('git', ['commit', '-q', '-m', 'docs'], { cwd: dir });
+      const result = await scan({ repoRoot: dir, mode: { kind: 'base', ref: 'HEAD~1' }, corpusDir: FIXTURE_CORPUS, online: true });
+
+      expect(fetchPackumentMock).not.toHaveBeenCalled();
+      expect(fetchWeeklyDownloadsMock).not.toHaveBeenCalled();
+      expect(result.run.online).toMatchObject({
+        enabled: true,
+        candidatesEvaluated: 0,
+        lookupsAttempted: 0,
+        cacheHits: 0,
+        lookupsSkippedByDeadline: 0,
+      });
+    });
   });
 });

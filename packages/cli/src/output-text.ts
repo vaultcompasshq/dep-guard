@@ -147,14 +147,16 @@ export function renderText(result: ScanResult): string {
 
   // One line under the summary, only when online checks actually ran
   // (issue #75): a disabled run has nothing to add here that the summary
-  // line above does not already imply, and printing four zeros on every
-  // ordinary offline run would be noise on the common case. All four
+  // line above does not already imply, and printing six zeros on every
+  // ordinary offline run would be noise on the common case. All six
   // numbers are already plain facts about this run, none of them
   // repository-controlled content, so nothing here needs sanitizeText.
   if (result.run.online.enabled) {
     lines.push(
       `online: budgetMs=${result.run.online.budgetMs}, ` +
+        `candidatesEvaluated=${result.run.online.candidatesEvaluated}, ` +
         `lookupsAttempted=${result.run.online.lookupsAttempted}, ` +
+        `cacheHits=${result.run.online.cacheHits}, ` +
         `lookupsSkippedByDeadline=${result.run.online.lookupsSkippedByDeadline}, ` +
         `deadlineExceeded=${result.run.online.deadlineExceeded}`
     );

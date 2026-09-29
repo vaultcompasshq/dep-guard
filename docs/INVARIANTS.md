@@ -1525,7 +1525,7 @@ or which override, produced the deadline that expired.
 `ScanResult.run.online` is a sibling of `run.corpusBuiltAt`
 (`scan.ts:buildResult`), always present so a JSON consumer -- the conductor
 umbrella (issue conductor#72) in particular -- can read it unconditionally
-rather than branching on whether `--online` was on for this run. Five
+rather than branching on whether `--online` was on for this run. Seven
 fields:
 
 - `enabled`: were online checks on for this run at all.
@@ -1565,6 +1565,16 @@ fields:
   `enrichOnline` call (never a module-level total) so two scans in one
   process, which the shared on-disk cache singleton above already
   anticipates, cannot mix each other's counts.
+- `cacheHits` (issue #80): package NAMES a step asked about that the on-disk
+  cache answered, so no lookup was issued. Counted at the same cached-fetch
+  call sites as `lookupsAttempted`, in the same unit and per check: every
+  name a cached fetch is asked about is counted in exactly one of the two.
+  `liveFetchPackument` is never cached and never adds to it.
+- `candidatesEvaluated` (issue #80): `lookupsAttempted` plus `cacheHits`,
+  derived rather than counted separately so the three cannot disagree. It
+  exists because `lookupsAttempted` alone reads 0 both for a run answered
+  entirely from a warm cache and for a run with nothing to check. Names
+  skipped by the deadline were never asked about and are not included.
 - `lookupsSkippedByDeadline`: skipped LOOKUPS, read back out of every
   `online-deadline-exceeded` diagnostic this run raised (`deadline.ts`'s
   `sumDeadlineSkipped`, parsing the count each diagnostic's own message

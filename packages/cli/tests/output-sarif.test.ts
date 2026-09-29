@@ -38,7 +38,9 @@ function scanResult(findings: Finding[], overrides: Partial<ScanResult['run']> =
       online: {
         enabled: false,
         budgetMs: 0,
+        candidatesEvaluated: 0,
         lookupsAttempted: 0,
+        cacheHits: 0,
         lookupsSkippedByDeadline: 0,
         deadlineExceeded: false,
       },
