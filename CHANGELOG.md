@@ -68,9 +68,12 @@ an independent audit:
   in the next) is a known gap, scheduled separately. The error now says why
   it stops (a format switch is how a tampered lockfile escapes inspection)
   and what a maintainer does for a genuine migration to yarn or bun: review
-  the new lockfile by hand and merge with the gate's result overridden by an
-  admin, or land it with the dep-guard gate set to advisory for that one
-  pull request. A
+  the new lockfile by hand and merge with an admin override of the failing
+  check, or first land a separate, reviewed pull request that relaxes the
+  gate on the base branch (conductor: `enforce: false` on the dependencies
+  gate; standalone action: `continue-on-error` on the workflow step), then
+  the migration, then restore the setting in a third pull request. An
+  advisory mode does not help: the error is exit 2, not a finding. A
   lockfile that exists only on the head side is compared against the base's
   primary lockfile, and the same signal in two lockfiles is reported for
   each.

@@ -935,7 +935,12 @@ describe('N5: the lockfile-downgrade message says what happened, why, and what t
     expect(message).toContain('yarn.lock');
     expect(message).toContain('a format switch is how a tampered lockfile escapes inspection');
     expect(message).toContain('review the new lockfile by hand');
-    expect(message).toContain('overridden by an admin');
-    expect(message).toContain('advisory for that one pull request');
+    expect(message).toContain('an admin override of the failing check');
+    expect(message).toContain('separate, reviewed pull request that relaxes the gate on the base branch');
+    expect(message).toContain('enforce: false');
+    expect(message).toContain('continue-on-error');
+    expect(message).toContain('restore the setting in a third pull request');
+    expect(message).toContain('cannot relax the gate for itself');
+    expect(message).toContain('exit 2');
   });
 });

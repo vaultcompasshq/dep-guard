@@ -588,8 +588,13 @@ function onlyBuiltDifference(before: RepoState | null, after: RepoState): string
 // inspection.
 const DOWNGRADE_REMEDY =
   'This is refused because a format switch is how a tampered lockfile escapes inspection. ' +
-  "For a genuine migration, review the new lockfile by hand and merge with this gate's result " +
-  'overridden by an admin, or land it with the dep-guard gate set to advisory for that one pull request.';
+  'For a genuine migration, either (a) review the new lockfile by hand and merge with an admin ' +
+  'override of the failing check, or (b) first land a separate, reviewed pull request that relaxes ' +
+  'the gate on the base branch (under conductor, enforce: false on the dependencies gate in ' +
+  '.guardrails.yaml; for the standalone action, continue-on-error on the workflow step), then land ' +
+  'the migration, then restore the setting in a third pull request. The migration pull request ' +
+  'cannot relax the gate for itself, and an advisory mode does not help: this is a could-not-run ' +
+  '(exit 2), not a finding.';
 
 function refuseLockfileDowngrade(before: RepoState | null, after: RepoState): void {
   if (before === null) {

@@ -911,9 +911,15 @@ quiet:
   with exit 2 rather than passing, because that change removes what the
   checks read while the package manager keeps installing. A genuine
   migration to yarn or bun trips this too, on purpose: a format switch is
-  how a tampered lockfile escapes inspection. Review the new lockfile by
-  hand and merge with the gate's result overridden by an admin, or land it
-  with the dep-guard gate set to advisory for that one pull request. A
+  how a tampered lockfile escapes inspection. Either review the new
+  lockfile by hand and merge with an admin override of the failing check,
+  or first land a separate, reviewed pull request that relaxes the gate on
+  the base branch (under conductor, `enforce: false` on the dependencies
+  gate in `.guardrails.yaml`; for the standalone action, `continue-on-error`
+  on the workflow step), then land the migration, then restore the setting
+  in a third pull request. The migration pull request cannot relax the gate
+  for itself, and an advisory mode does not help, because this is a
+  could-not-run (exit 2), not a finding. A
   lockfile deleted with nothing in its place is not covered by this, so
   deleting the lockfile in one pull request and adding `yarn.lock` in the
   next gets past it; that gap is known and scheduled. Every finding's identity

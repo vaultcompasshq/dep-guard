@@ -1303,9 +1303,12 @@ The codes, and what each one means:
   not this error, so deleting the lockfile in one pull request and adding
   `yarn.lock` in the next is a known, scheduled gap. The message names the
   reason (a format switch is how a tampered lockfile escapes inspection) and
-  the remedy for a genuine migration: review by hand and merge with the gate
-  overridden by an admin, or set the gate advisory for that one pull request
-  (test `N5: a format switch names the files, the reason, and the two ways
+  the remedy for a genuine migration: review by hand and merge with an admin
+  override of the failing check, or land a separate reviewed pull request
+  that relaxes the gate on the base branch first (conductor `enforce: false`
+  on the dependencies gate; standalone action `continue-on-error` on the
+  step), then the migration, then restore it. The pull request cannot relax
+  its own gate, and advisory mode does not help because this is exit 2 (test `N5: a format switch names the files, the reason, and the two ways
   to land a genuine migration`). See "A lockfile that says less is not a
   lockfile that says nothing".
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
