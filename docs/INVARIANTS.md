@@ -232,7 +232,9 @@ diagnostic (see "Pairing two lockfiles is a chain of guesses" below); an
 unverifiable name is exactly that kind of guess, and staying silent about
 it would be indistinguishable from a name this parser never doubted at all.
 
-pnpm never needed this mechanism and never sets `lookupName`: its
+pnpm never needed THIS mechanism (that is the whole claim; it did need
+special handling elsewhere -- see "A lockfile that says less is not a
+lockfile that says nothing" below) and never sets `lookupName`: its
 `packages` map is keyed by registry identity already (`lockfiles/pnpm.ts`'s
 `parsePackageKey` splits the packages-map key itself, `name@version`),
 because a pnpm alias mapping lives entirely in the DEPENDENT's own
@@ -882,6 +884,127 @@ for a real pinned git dependency, because folding the pin into the signal
 string is exactly the tempting refactor that would silently invalidate
 every such baseline.
 
+## A lockfile that says less is not a lockfile that says nothing
+
+An independent audit found four ways a tampered or dangerous dependency
+change scanned clean, and each was the same mistake: reading less than the
+package manager would honour, and treating the gap as a pass. The rules
+below are what closes them. The tests are in
+`packages/core/tests/silent-passes.test.ts`, named per rule.
+
+**The packages map decides what is parsed, never `lockfileVersion`.**
+`lockfiles/npm.ts`'s `parseNpmLockfile` reads a `packages` map whenever the
+key is present, whatever the version field holds -- a string `"3"`, the
+number 1, `null`, or no field at all. Each of those installs the map's
+entries under npm (checked with `npm ls --package-lock-only`, the resolved
+value it prints is the tampered one), so each used to be a way to tamper an
+entry and scan clean with only an `npm-lockfile-v1` diagnostic. That
+diagnostic is now raised only for a lockfile with NO `packages` key (a real
+v1 lockfile), so it is not "the only case where a missing map is a
+diagnostic" so much as the only case where a missing map is not an error:
+a `packages` key that is present and not an object, and a declared version
+of 2 or more with no map, both still throw `lockfile-parse`. And a base
+side that parsed a packages map against a head side that did not is a
+`lockfile-downgrade` error (`delta.ts`'s `refuseLockfileDowngrade`), exit 2,
+never a diagnostic, because that change removes what every check reads while
+npm keeps installing from the head file. Pinned by the tests named
+`a tampered node_modules/lodash is caught when lockfileVersion is the string
+"3"`, `... is the number 1`, `... is null`, `... is deleted`, and `a base
+with a packages map whose head loses it (v1 shape) is not a clean pass`; the
+real-v1 control is `a real v1 lockfile on both sides keeps only the v1
+diagnostic`.
+
+**A pnpm entry with no tarball URL has an implied one.** pnpm records a
+registry resolution as `{integrity}` alone and writes `tarball` only when
+the URL is not the registry's standard one. So "no URL" is not "nowhere to
+compare from": `checks/tamper.ts`'s `impliedRegistryEntry` gives such an
+entry the tarball its registry serves for name@version (the scope pin, else
+the project default registry, else the public one -- both control inputs
+read from the base on a pull request, like every other .npmrc fact), and
+`compare` runs on the result. Before this, `{integrity: A}` becoming
+`{integrity: B, tarball: <anywhere>}` at one version returned early on
+"one side has no URL" and scanned clean. Only an entry with an integrity
+hash and no URL is given one; a git or directory entry has neither and is
+not invented a registry origin. Separately, and for npm as well, a rewritten
+hash at a held version where exactly one side names a location is
+`integrity-changed` outright (a new `else if` in `compare`), because there is
+no location to hold constant. Pinned by `integrity rewritten and a tarball
+URL on another host added at the same version`, `integrity rewritten and
+repointed to another package tarball on the same registry`, `a tarball URL
+on another host added with the integrity unchanged`, `the project default
+registry is what the implied URL is derived from`, `an npm entry that drops
+"resolved" while rewriting integrity at the same version is
+integrity-changed`, and the controls `a tarball URL equal to the implied
+registry tarball is not a finding`, `control: an integrity-only rewrite
+still gives integrity-changed` and `control: removing the integrity hash
+still gives integrity-removed`. What is NOT covered: a registry configured
+somewhere the scan cannot see (a user-level `~/.npmrc`, an environment
+variable). pnpm's behaviour on the tampered `tarball` was checked by running
+`pnpm install --frozen-lockfile` against such a lockfile, which requested the
+tarball URL from the foreign host.
+
+**Every npm and pnpm lockfile at the root is checked, and shrinkwrap counts.**
+`git-source.ts`'s detection used to be first-present-wins over
+`package-lock.json`, `pnpm-lock.yaml`, and the unparsed formats, and never
+looked at `npm-shrinkwrap.json`, which npm prefers over `package-lock.json`
+(checked: with both present, `npm ls --package-lock-only` prints the
+shrinkwrap's resolved value). A clean file beside a tampered one therefore
+scanned clean. `loadLockfiles` now reads `npm-shrinkwrap.json` first, then
+`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb`;
+the first present is the primary lockfile (the one the run summary names)
+and every other npm or pnpm one rides in `RepoState.extraLockfiles`, which
+`computeDelta` diffs against the before-side file with the same path (else
+the same format) and appends to `lockEntryChanges`, each change tagged with
+its own `lockfilePath` and `lockfileFormat`. A `multiple-lockfiles`
+diagnostic names them. `LOCKFILE_FILE_NAMES` is derived from the same list, so
+the empty-scan probe in `scan.ts` recognises a shrinkwrap. Deliberately not
+done: choosing one lockfile from the `packageManager` field, because a
+developer machine and CI may not agree and checking all of them needs no
+such guess. yarn and bun beside npm or pnpm are not added as extras; they
+parse to nothing but a manifest-only note. Pinned by `a clean package-lock.json
+decoy beside a tampered pnpm-lock.yaml`, `a tampered npm-shrinkwrap.json
+beside a clean package-lock.json`, `a tampered npm-shrinkwrap.json newly
+added beside the package-lock.json the base already had`, `npm-shrinkwrap.json
+alone is read as the npm lockfile`, `a repo whose only surviving file is an
+npm-shrinkwrap.json is could-not-run, not dependency-free` and `a single
+lockfile raises no multiple-lockfiles diagnostic`.
+
+**Every git spelling npm accepts is git, and an added lockfile entry is
+judged on its own source.** `manifest.ts`'s `classifySpecifier` read only
+`git+`, `github:` and `git:` as git; `attacker/lodash` (bare shorthand, npm's
+github shorthand), `gitlab:`, `bitbucket:`, `gist:`, `sourcehut:`, `ssh://`
+and scp-style `git@github.com:o/r` all classified as registry, so the
+git-source signal never ran. The rules are npm-package-arg's and
+hosted-git-info's, and the expected values in the tests are npm's own
+answers from its bundled `npm-package-arg`, not this scanner's opinion --
+including the cases npm does NOT read as git (a local path, `o/r/`, `a/b/c`,
+and scp-style on a host npm does not know, which it reads as a directory).
+Second, `checks/tamper.ts`'s lockfile walk used to skip an ADDED entry
+outright ("nothing to compare it against"), so a transitive dependency
+newly resolved from a git or non-registry URL raised nothing.
+`lockEntrySource` now classifies the resolved URL of an added entry alone:
+git scheme or a forge source archive is git; any other scheme, or an
+http(s) URL that is neither on a host the project fetches registry tarballs
+from (the public registries and every `.npmrc` pin or default registry) nor
+shaped like a registry tarball path, is a url source. The host allowance is
+a judgment: a registry serving tarballs from a path with no `/-/` segment
+would otherwise read as a url source on every dependency it serves. A
+dependency the specifier walk already reported is not reported again under a
+second spelling of the signal (`sourceReported`). `lockfiles/pnpm.ts` now
+records a pnpm `{type: git, repo, commit}` resolution as
+`git+<repo>#<commit>`; before, it recorded nothing and a pnpm git entry
+could not be told from a bare one. Pinned by the `D4` tests: `"attacker/lodash"
+is git` and one test per form in that describe block, `a manifest that swaps
+a registry range for "attacker/lodash" scans as a blocking git source`,
+`npm: a new transitive entry resolved from a git URL`, `npm: a new transitive
+entry resolved from a non-registry tarball URL`, `npm: a declared git
+dependency is reported once, by its specifier, not again by its lock entry`,
+`pnpm: a new entry whose resolution is a non-registry tarball`, `pnpm: a new
+entry whose resolution is a git commit`, and the controls `npm: a new entry
+from an ordinary registry tarball raises nothing`, `npm: a new entry from the
+project registry host with no /-/ tarball path raises nothing` and `pnpm: a
+new entry with an integrity-only registry resolution raises nothing`.
+
 ## Path spellings have one source
 
 Every path in a finding, a diagnostic, or a config match is anchored to the
@@ -1034,7 +1157,7 @@ Current diagnostic codes: `audit-anchor-differs`,
 `ignore-path-dropped`,
 `ignore-path-unmatched`, `lockfile-binary-skipped`,
 `lockfile-format-manifest-only`, `lockfile-missing`,
-`manifest-alias-empty`, `npm-lockfile-invalid-entry`,
+`manifest-alias-empty`, `multiple-lockfiles`, `npm-lockfile-invalid-entry`,
 `npm-lockfile-unverifiable-name`, `npm-lockfile-v1`,
 `npmrc-pin-unparseable`, `online-check-unreachable`,
 `online-deadline-exceeded`,
@@ -1136,6 +1259,10 @@ The codes, and what each one means:
   throw and not a diagnostic on purpose: falling
   back would leave the entries map empty and every lockfile-backed check
   silently satisfied.
+- `lockfile-downgrade` -- the base side of a scan had an npm lockfile with a
+  `packages` map and the head side's has none (a v1 shape, or a version
+  field rewritten away from it). See "A lockfile that says less is not a
+  lockfile that says nothing".
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
   corpus is absent, damaged, or -- for `corpus-corrupt` specifically --
   valid but written in a shape this build refuses to trust: a
