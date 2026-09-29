@@ -338,11 +338,11 @@ const SCAN_BACKOFF_CAP_MS = 8_000;
 // CLI invocation, per the `cache` singleton's own comment above) never mix
 // each other's counts the way a module-level mutable total would.
 //
-// cacheHits (issue #80) is the other half of the same count: names a step
-// asked about that the cache answered, so no lookup was issued. Every name a
-// cached fetch is asked about lands in exactly one of the two, which is what
-// lets the summary report candidatesEvaluated as their sum and tell a run
-// answered from a warm cache apart from a run with nothing to check.
+// cacheHits (issue #80) counts the other outcome of the same name lookups:
+// the ones the on-disk cache answered, so nothing was sent to the registry.
+// A cached fetch counts each name it is asked about in exactly one of the
+// two. lookupsAttempted 0 with cacheHits above 0 is a warm cache; 0 and 0 is
+// a run with nothing to look up.
 interface LookupCounter {
   attempted: number;
   cacheHits: number;
@@ -560,25 +560,19 @@ async function liveFetchPackument(name: string, lookups: LookupCounter) {
 export interface OnlineRunSummary {
   enabled: boolean;
   budgetMs: number;
-  // Package NAMES the online steps asked about, counted per step in the
-  // same unit as lookupsAttempted (issue #80). Always lookupsAttempted plus
-  // cacheHits: every name a step asks about is either looked up or answered
-  // from the cache. A run answered entirely from a warm cache and a run with
-  // nothing to check both report lookupsAttempted 0; this is what tells them
-  // apart. Names skipped by the deadline were never asked about and are not
-  // included here (see lookupsSkippedByDeadline).
-  candidatesEvaluated: number;
   // Package NAMES for which a real registry or downloads lookup was
   // actually issued, summed across all four online steps -- see
   // LookupCounter's own doc comment above for why this counts names, never
   // wrapper calls or raw HTTP requests: a single batched downloads call can
   // carry many names in one request, and this field has to stay in the same
-  // unit as lookupsSkippedByDeadline for the two to be addable. Counted per
-  // check, never per distinct name: a name that unknown-package,
-  // registered-squat and publish-age each look up counts once for each.
+  // unit as lookupsSkippedByDeadline for the two to be addable. Counted once
+  // per lookup, never per distinct name: one step can count a name twice
+  // (registered-squat looks up its downloads and then its creation date),
+  // and every other step that looks it up counts it again.
   lookupsAttempted: number;
-  // Package NAMES answered from the on-disk cache, so no lookup was issued
-  // for them. Same unit and same per-step counting as lookupsAttempted.
+  // Name lookups answered from the on-disk cache, so nothing was sent to
+  // the registry (issue #80). Same unit and same once-per-lookup counting
+  // as lookupsAttempted.
   cacheHits: number;
   // Skipped LOOKUPS once the budget was spent, read back out of every
   // online-deadline-exceeded diagnostic this run raised (deadline.ts's
@@ -596,7 +590,6 @@ export interface OnlineRunSummary {
 const ONLINE_DISABLED_SUMMARY: OnlineRunSummary = {
   enabled: false,
   budgetMs: 0,
-  candidatesEvaluated: 0,
   lookupsAttempted: 0,
   cacheHits: 0,
   lookupsSkippedByDeadline: 0,
@@ -677,7 +670,6 @@ async function enrichOnline(
     summary: {
       enabled: true,
       budgetMs,
-      candidatesEvaluated: lookups.attempted + lookups.cacheHits,
       lookupsAttempted: lookups.attempted,
       cacheHits: lookups.cacheHits,
       // Read back out of ctx.diagnostics rather than kept as a second,

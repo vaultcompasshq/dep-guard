@@ -265,29 +265,28 @@ exposure.
 The run's JSON output always carries an `online` object under `run`,
 whether or not online checks ran, so a CI consumer (the conductor umbrella
 in particular) can read it unconditionally: `enabled`, the `budgetMs`
-actually used, `candidatesEvaluated` (names the online checks asked about,
-always `lookupsAttempted` plus `cacheHits`), `lookupsAttempted` (name
-lookups actually issued, counted per
-check, so one name that three checks each looked up counts three times; a
-downloads lookup may batch many names into one request, and this counts
-the names, not the requests), `cacheHits` (names answered from the on-disk
-online cache, so no lookup was issued; same unit and counting as
-`lookupsAttempted`), `lookupsSkippedByDeadline`
+actually used, `lookupsAttempted` and `cacheHits`, `lookupsSkippedByDeadline`
 (skipped lookups once the budget was spent, matching what the
 `online-deadline-exceeded` diagnostics already say -- the same name can be
 counted here more than once if two different online checks both had it
 queued when the budget ran out), and `deadlineExceeded`. Disabled online
 checks report `enabled: false` and every number at zero, never an absent
-field. `lookupsAttempted` alone cannot tell a run answered from a warm
-cache from a run that had nothing to check, since both report zero;
-`candidatesEvaluated` and `cacheHits` can. The text output prints the same
-counts on its `online:` line.
+field.
+
+`lookupsAttempted` and `cacheHits` count the name lookups the online steps
+made: `lookupsAttempted` counts those sent to the registry, `cacheHits`
+those answered from the on-disk cache. A name is counted once per lookup,
+so one step can count a name twice (registered-squat looks up downloads and
+then the creation date) and several steps each count it again. A downloads
+lookup may batch many names into one request; these count the names, not
+the requests. `lookupsAttempted: 0` with `cacheHits: 5` is a warm cache;
+`0` and `0` is a run with nothing to look up. The text output prints both
+on its `online:` line.
 
 ```json
 "online": {
   "enabled": true,
   "budgetMs": 300000,
-  "candidatesEvaluated": 50,
   "lookupsAttempted": 42,
   "cacheHits": 8,
   "lookupsSkippedByDeadline": 0,

@@ -23,12 +23,11 @@ function scanResult(online: ScanResult['run']['online']): ScanResult {
 }
 
 describe('renderText: online summary line', () => {
-  test('prints candidates evaluated and cache hits beside lookups (issue #80)', () => {
+  test('prints cache hits beside lookups (issue #80)', () => {
     const text = renderText(
       scanResult({
         enabled: true,
         budgetMs: 300000,
-        candidatesEvaluated: 5,
         lookupsAttempted: 0,
         cacheHits: 5,
         lookupsSkippedByDeadline: 0,
@@ -37,7 +36,7 @@ describe('renderText: online summary line', () => {
     );
 
     expect(text).toContain(
-      'online: budgetMs=300000, candidatesEvaluated=5, lookupsAttempted=0, cacheHits=5, ' +
+      'online: budgetMs=300000, lookupsAttempted=0, cacheHits=5, ' +
         'lookupsSkippedByDeadline=0, deadlineExceeded=false'
     );
   });
@@ -47,7 +46,6 @@ describe('renderText: online summary line', () => {
       scanResult({
         enabled: false,
         budgetMs: 0,
-        candidatesEvaluated: 0,
         lookupsAttempted: 0,
         cacheHits: 0,
         lookupsSkippedByDeadline: 0,
