@@ -3,7 +3,8 @@ import type { DepType, ManifestDep, Protocol } from './manifest.js';
 import { originOf } from './resolution.js';
 import type { RepoState } from './state.js';
 import { comparisonTamperSignalList } from './tamper-signals.js';
-import type { Diagnostic } from './types.js';
+import { DepGuardError, type Diagnostic } from './types.js';
+import { NPM_LOCKFILE_V1_CODE } from './lockfiles/npm.js';
 
 export interface DepChange {
   name: string;
@@ -557,6 +558,49 @@ function onlyBuiltDifference(before: RepoState | null, after: RepoState): string
   return added;
 }
 
+// The npm lockfile parser reads a "packages" map whenever one exists, and
+// reports a v1 diagnostic only for a lockfile that has none. A base side
+// that HAD a packages map and a head side that does not is therefore not a
+// legacy repository: it is a change that removes the only structure the
+// tamper checks read while npm keeps installing from the head file (the
+// head's nested "dependencies" tree, or a version field rewritten so the
+// packages map no longer parses as one). Treating that as a diagnostic is
+// the silent pass this refuses, so it stops the scan (exit 2) instead.
+function refuseLockfileDowngrade(before: RepoState | null, after: RepoState): void {
+  if (before === null) {
+    return;
+  }
+  const beforeNpm = lockfilesOf(before).filter(
+    (lockfile) => lockfile.format === 'npm' && !hasV1Diagnostic(lockfile)
+  );
+  if (beforeNpm.length === 0) {
+    return;
+  }
+  for (const lockfile of lockfilesOf(after)) {
+    if (lockfile.format !== 'npm' || !hasV1Diagnostic(lockfile)) {
+      continue;
+    }
+    // Same path first, then any parsed npm lockfile on the base side: a
+    // package-lock.json replaced by an npm-shrinkwrap.json is the same
+    // downgrade under a different name.
+    const counterpart = beforeNpm.find((candidate) => candidate.path === lockfile.path) ?? beforeNpm[0];
+    throw new DepGuardError(
+      `${lockfile.path}: the base side of this scan has a "packages" map (${counterpart.path}) and this ` +
+        'side has none, so the lockfile-backed checks would silently stop reading it while npm ' +
+        'still installs from it; refusing to report a clean pass',
+      'lockfile-downgrade'
+    );
+  }
+}
+
+function hasV1Diagnostic(lockfile: ParsedLockfile): boolean {
+  return lockfile.diagnostics.some((diagnostic) => diagnostic.code === NPM_LOCKFILE_V1_CODE);
+}
+
+function lockfilesOf(state: RepoState): ParsedLockfile[] {
+  return [...(state.lockfile === null ? [] : [state.lockfile]), ...(state.extraLockfiles ?? [])];
+}
+
 // Diffs two parsed sides into the set of added and changed dependencies.
 // A before of null is audit mode: nothing to compare against, so every
 // non-exempt dependency reads as added. Removals are deliberately absent
@@ -574,6 +618,7 @@ function onlyBuiltDifference(before: RepoState | null, after: RepoState): string
 // transitive entry, and a tampered entry hidden behind a same-version
 // decoy, both scan clean.
 export function computeDelta(before: RepoState | null, after: RepoState): DependencyDelta {
+  refuseLockfileDowngrade(before, after);
   const beforeDeps = indexDeps(before);
   const deltaDiagnostics: Diagnostic[] = [];
   const changes: DepChange[] = [];

@@ -8,6 +8,15 @@ import type { ParsedManifest } from './manifest.js';
 export interface RepoState {
   manifests: ParsedManifest[];
   lockfile: ParsedLockfile | null;
+  // Every OTHER npm or pnpm lockfile present at the same root, in
+  // precedence order after `lockfile`. A repository can hold several
+  // (package-lock.json beside pnpm-lock.yaml, or an npm-shrinkwrap.json
+  // beside a package-lock.json) and which one an install honours depends on
+  // the package manager and the developer's machine, not on anything the
+  // scanner can see, so a clean file must never stand in for a tampered
+  // one: computeDelta diffs each of these too. Absent on a state built by
+  // hand with one lockfile.
+  extraLockfiles?: ParsedLockfile[];
   onlyBuilt: string[];
   npmrcRegistryPins: Map<string, string>;
   // The project .npmrc's unscoped default registry ("registry=..."), or
