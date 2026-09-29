@@ -565,16 +565,40 @@ function onlyBuiltDifference(before: RepoState | null, after: RepoState): string
 }
 
 // The npm lockfile parser reads a "packages" map whenever one exists, and
-// reports a v1 diagnostic only for a lockfile that has none. A base side
-// that HAD a packages map and a head side that does not is therefore not a
-// legacy repository: it is a change that removes the only structure the
-// tamper checks read while npm keeps installing from the head file (the
-// head's nested "dependencies" tree, or a version field rewritten so the
-// packages map no longer parses as one). Treating that as a diagnostic is
-// the silent pass this refuses, so it stops the scan (exit 2) instead.
+// reports a v1 diagnostic only for a lockfile that has none (a real v1
+// lockfile, whose nested "dependencies" tree this tool does not read). A
+// base side that HAD a packages map and a head side that does not is
+// therefore not a legacy repository: it is a change that removes the only
+// structure the tamper checks read while the package manager keeps
+// installing from the head file. Treating that as a diagnostic is the
+// silent pass this refuses, so it stops the scan (exit 2) instead.
+//
+// Two shapes are refused. Per file: an npm lockfile that had a packages map
+// on the base side and has none now. Per repository: the base had a parsed
+// lockfile (npm with a packages map, or pnpm, with entries) and the head has
+// lockfiles but not one of them is parsed -- only v1 npm files, manifest-only
+// formats (yarn, bun) or a binary one -- so swapping the tampered lockfile
+// for a format this tool cannot read is not a way out. A head with NO
+// lockfile at all is deliberately not this rule's case: that is the
+// lockfile-missing path, handled separately.
 function refuseLockfileDowngrade(before: RepoState | null, after: RepoState): void {
   if (before === null) {
     return;
+  }
+  const isParsed = (lockfile: ParsedLockfile): boolean =>
+    (lockfile.format === 'npm' && !hasV1Diagnostic(lockfile)) || lockfile.format === 'pnpm';
+  const beforeParsed = lockfilesOf(before).filter(
+    (lockfile) => isParsed(lockfile) && (lockfile.format === 'npm' || lockfile.entries.size > 0)
+  );
+  const afterAll = lockfilesOf(after);
+  if (beforeParsed.length > 0 && afterAll.length > 0 && !afterAll.some(isParsed)) {
+    throw new DepGuardError(
+      `${afterAll.map((lockfile) => lockfile.path).join(', ')}: the base side of this scan had a ` +
+        `lockfile this tool reads (${beforeParsed[0].path}) and this side has only lockfiles it cannot ` +
+        'read (a v1 npm lockfile, or a yarn, bun or binary one), so the lockfile-backed checks would ' +
+        'silently stop while the package manager keeps installing; refusing to report a clean pass',
+      'lockfile-downgrade'
+    );
   }
   const beforeNpm = lockfilesOf(before).filter(
     (lockfile) => lockfile.format === 'npm' && !hasV1Diagnostic(lockfile)
@@ -730,6 +754,12 @@ export function computeDelta(before: RepoState | null, after: RepoState): Depend
     const counterpart =
       beforeLockfiles.find((candidate) => candidate.path === extra.path) ??
       beforeLockfiles.find((candidate) => candidate.format === extra.format) ??
+      // A lockfile that exists only on the head side (a new pnpm-lock.yaml
+      // beside an existing package-lock.json) has no same-path or
+      // same-format counterpart, and comparing it to nothing would wave it
+      // through as all-added. The base's primary lockfile, whatever its
+      // format, is the closest thing the base had to say about these names.
+      before?.lockfile ??
       null;
     if (before === null) {
       deltaDiagnostics.push({

@@ -283,27 +283,22 @@ describe('parsePnpmLockfile multi-version entries', () => {
 });
 
 describe('parsePnpmLockfile invalid name grammar after version split', () => {
-  test('a git+ssh key whose embedded "@" mis-splits the name is skipped with a diagnostic naming the key', () => {
+  test('a git+ssh key whose URL carries its own "@" is keyed by the real name, not skipped', () => {
     // Splitting on the last "@" in "mypkg@git+ssh://git@gitlab.com/o/r.git#abc"
-    // lands on the "@" inside the embedded ssh URL, not the real
-    // name/version separator, yielding the garbage name
-    // "mypkg@git+ssh://git" -- validating the extracted name against npm's
-    // name grammar catches this instead of silently mis-keying the entry.
+    // lands on the "@" inside the embedded ssh URL and yields the garbage
+    // name "mypkg@git+ssh://git". The parser now reads a URL-shaped version
+    // as everything after the first "@" that precedes "scheme://", so the
+    // entry is kept under "mypkg" instead of being skipped with a
+    // diagnostic (a skipped git dependency was an unread one).
     const content =
       "lockfileVersion: '9.0'\npackages:\n  'mypkg@git+ssh://git@gitlab.com/o/r.git#abc':\n    resolution: {integrity: sha512-abc==}\n  fine@1.0.0:\n    resolution: {integrity: sha512-abc==}\n";
     const result = parsePnpmLockfile(PATH, content);
-    expect(result.entries.has('mypkg')).toBe(false);
+    expect(result.entries.has('mypkg')).toBe(true);
     expect(
       [...result.entries.keys()].some((name) => name.includes('git') || name.includes('://'))
     ).toBe(false);
     expect(only(result, 'fine')).toMatchObject({ version: '1.0.0' });
-    const invalidDiagnostics = result.diagnostics.filter(
-      (d) => d.code === 'pnpm-lockfile-invalid-entry'
-    );
-    expect(invalidDiagnostics).toHaveLength(1);
-    expect(invalidDiagnostics[0].message).toContain(
-      'mypkg@git+ssh://git@gitlab.com/o/r.git#abc'
-    );
+    expect(result.diagnostics.filter((d) => d.code === 'pnpm-lockfile-invalid-entry')).toHaveLength(0);
   });
 
   test('ordinary scoped and unscoped names pass the grammar check and are kept', () => {
@@ -344,9 +339,9 @@ describe('parsePnpmLockfile allows npm legacy leading underscore/dot names', () 
     ).toEqual(['.foo']);
   });
 
-  test('the git+ssh URL key with a mis-split name is still rejected', () => {
+  test('a key that still does not split into a valid name is rejected with a diagnostic', () => {
     const content =
-      "lockfileVersion: '9.0'\npackages:\n  'mypkg@git+ssh://git@gitlab.com/o/r.git#abc':\n    resolution: {integrity: sha512-abc==}\n";
+      "lockfileVersion: '9.0'\npackages:\n  'not a name@1.0.0':\n    resolution: {integrity: sha512-abc==}\n";
     const result = parsePnpmLockfile(PATH, content);
     expect(result.entries.size).toBe(0);
     expect(result.diagnostics.some((d) => d.code === 'pnpm-lockfile-invalid-entry')).toBe(true);

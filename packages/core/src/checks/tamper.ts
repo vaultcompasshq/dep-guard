@@ -351,22 +351,83 @@ function registryHostsOf(
 
 const COMMIT_ID_SEGMENT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
-// What a lockfile entry says about where its bytes came from, judged from
+// GitHub Packages serves an npm tarball from
+// /download/@scope/name/<version>/<sha>, with no "/-/" segment.
+const GITHUB_PACKAGES_PATH = /^\/download\/(?:@[^/]+\/)?[^/]+\/[^/]+\/[0-9a-f]+$/;
+
+// A canonical "host repo" identity for a git source, so a specifier
+// ("github:o/r#sha", "o/r", "git+ssh://git@github.com/o/r.git",
+// "git@github.com:o/r.git") and a lockfile resolution
+// ("git+ssh://git@github.com/o/r.git#sha", a codeload archive of o/r) that
+// name the SAME repository compare equal, and nothing else does.
+const HOSTED_SCHEME_HOSTS: Record<string, string> = {
+  'github:': 'github.com',
+  'gitlab:': 'gitlab.com',
+  'bitbucket:': 'bitbucket.org',
+  'gist:': 'gist.github.com',
+  'sourcehut:': 'git.sr.ht',
+};
+
+function canonicalRepo(host: string, repoPath: string): string {
+  const cleaned = repoPath.split('#')[0].replace(/^\/+/, '').replace(/\.git$/i, '').toLowerCase();
+  const segments = cleaned.split('/');
+  const repo = host.toLowerCase() === 'codeload.github.com' ? segments.slice(0, 2).join('/') : cleaned;
+  return `${host.toLowerCase() === 'codeload.github.com' ? 'github.com' : host.toLowerCase()} ${repo}`;
+}
+
+// The identity of the source a manifest specifier declares, or null when it
+// cannot be established (in which case nothing is treated as already
+// reported for it).
+function declaredSourceIdentity(protocol: 'git' | 'url', specifier: string): string | null {
+  if (protocol === 'url') {
+    try {
+      const url = new URL(specifier);
+      return `url ${url.host.toLowerCase()} ${url.pathname}`;
+    } catch {
+      return null;
+    }
+  }
+  const lower = specifier.toLowerCase();
+  for (const [scheme, host] of Object.entries(HOSTED_SCHEME_HOSTS)) {
+    if (lower.startsWith(scheme)) {
+      return `git ${canonicalRepo(host, specifier.slice(scheme.length))}`;
+    }
+  }
+  const bare = specifier.replace(/^git\+/i, '');
+  if (bare.includes('://')) {
+    try {
+      const url = new URL(bare);
+      return url.host === '' ? null : `git ${canonicalRepo(url.host, url.pathname)}`;
+    } catch {
+      return null;
+    }
+  }
+  const scp = /^[^@\s/:]+@([^:\s/]+):(.+)$/.exec(specifier);
+  if (scp !== null) {
+    return `git ${canonicalRepo(scp[1], scp[2])}`;
+  }
+  return `git ${canonicalRepo('github.com', specifier)}`;
+}
+
+// What a lockfile entry says about where its bytes come from, judged from
 // the resolved URL alone, for an entry with nothing earlier to compare
 // against. git: a git scheme, or a forge's source archive (the shape pnpm
-// writes for a github dependency). url: any other non-registry source -- a
-// scheme that is not http(s) or a local file, or an http(s) URL that is
-// neither on a host the project fetches registry tarballs from nor shaped
-// like a registry tarball path ("/<name>/-/<file>.tgz"). The host test is
-// what keeps a registry that serves tarballs from a path with no "/-/"
-// segment (GitHub Packages, for one) from reading as a url source on every
-// dependency it serves, so a project on such a registry has to name it in
-// .npmrc, which is where npm needs it anyway. A local file resolution is
-// not a network source and is left alone.
+// writes for a github dependency). url: any other source that is not a
+// registry the project vouches for.
+//
+// An http(s) URL is judged by HOST first. A host outside the registry set
+// (the two public registries plus every host the project .npmrc names) is a
+// url source whatever its path looks like: the path is the one part of the
+// URL an attacker chooses freely, so a registry-shaped path
+// ("/name/-/file.tgz") on an unknown host proves nothing. The path shape is
+// used only to grade severity (`shaped`), never to clear an entry. A
+// registry that serves tarballs from any path at all (GitHub Packages, for
+// one) is recognised by being named in .npmrc, which is where npm needs it
+// anyway. A local file resolution is not a network source and is left alone.
 function lockEntrySource(
   entry: LockEntry,
   registryHosts: ReadonlySet<string>
-): { protocol: 'git' | 'url'; host: string | null; pinned: boolean } | null {
+): { protocol: 'git' | 'url'; host: string | null; pinned: boolean; shaped: boolean; identity: string | null } | null {
   if (entry.resolvedUrl === undefined) {
     return null;
   }
@@ -376,24 +437,42 @@ function lockEntrySource(
   }
   const host = resolution.host === '' ? null : resolution.host;
   const kind = resolutionKindOf(resolution);
+  let parsed: URL | null = null;
+  try {
+    parsed = new URL(entry.resolvedUrl);
+  } catch {
+    parsed = null;
+  }
   if (kind === 'git') {
-    let pathPinned = false;
-    try {
-      pathPinned = COMMIT_ID_SEGMENT.test(new URL(entry.resolvedUrl).pathname.split('/').pop() ?? '');
-    } catch {
-      pathPinned = false;
-    }
-    return { protocol: 'git', host, pinned: pathPinned || isCommitPinnedGitSpecifier(entry.resolvedUrl) };
+    const pathPinned = COMMIT_ID_SEGMENT.test(parsed?.pathname.split('/').pop() ?? '');
+    return {
+      protocol: 'git',
+      host,
+      pinned: pathPinned || isCommitPinnedGitSpecifier(entry.resolvedUrl),
+      shaped: false,
+      identity: parsed === null || host === null ? null : `git ${canonicalRepo(host, parsed.pathname)}`,
+    };
   }
   if (kind === 'url') {
-    return { protocol: 'url', host, pinned: false };
+    return {
+      protocol: 'url',
+      host,
+      pinned: false,
+      shaped: false,
+      identity: parsed === null ? null : `url ${parsed.host.toLowerCase()} ${parsed.pathname}`,
+    };
   }
-  if (
-    kind === 'registry' &&
-    registryTarballPackageName(entry.resolvedUrl) === null &&
-    !registryHosts.has(resolution.host)
-  ) {
-    return { protocol: 'url', host, pinned: false };
+  if (kind === 'registry' && !registryHosts.has(resolution.host)) {
+    const shaped =
+      registryTarballPackageName(entry.resolvedUrl) !== null ||
+      (parsed !== null && GITHUB_PACKAGES_PATH.test(parsed.pathname));
+    return {
+      protocol: 'url',
+      host,
+      pinned: false,
+      shaped,
+      identity: parsed === null ? null : `url ${parsed.host.toLowerCase()} ${parsed.pathname}`,
+    };
   }
   return null;
 }
@@ -601,17 +680,23 @@ export const tamperCheck: Check = (ctx) => {
   // both, produces the same signal string for the same package at the same
   // manifest path, and is reported once.
   const seen = new Set<string>();
-  // (manifestPath, package) pairs whose git or url source the specifier walk
-  // already reported, so the lockfile walk does not report the same
-  // dependency a second time under a differently spelled signal.
-  const sourceReported = new Set<string>();
+  // The sources the specifier walk already reported, per (manifestPath,
+  // package), as canonical source identities. The lockfile walk skips an
+  // added entry only when its own source IS one of these -- the same repo or
+  // the same url -- so a declared git dependency is not reported a second
+  // time under a differently spelled signal, while a different source
+  // resolved under the same name (a nested copy from another host) is still
+  // reported on its own.
+  const sourceReported = new Map<string, Set<string>>();
   const registryHosts = registryHostsOf(ctx.npmrcRegistryPins, ctx.npmrcDefaultRegistry);
   const report = (
     finding: Omit<Finding, 'fingerprint'>,
     lockfilePath: string | undefined = delta.lockfilePath
   ): void => {
     const signal = typeof finding.details?.signal === 'string' ? finding.details.signal : '';
-    const key = JSON.stringify([finding.manifestPath, finding.packageName, signal]);
+    // The lockfile is part of the key: the same signal for the same package
+    // in two lockfiles is two facts, and each file has to be named.
+    const key = JSON.stringify([finding.manifestPath, finding.packageName, signal, lockfilePath ?? '']);
     if (seen.has(key)) {
       return;
     }
@@ -1130,7 +1215,13 @@ export const tamperCheck: Check = (ctx) => {
           ...(change.protocol === 'git' ? { commitPinned: pinned } : {}),
         },
       });
-      sourceReported.add(JSON.stringify([change.manifestPath, change.registryName]));
+      const declared = declaredSourceIdentity(change.protocol, change.specifier);
+      if (declared !== null) {
+        const declKey = JSON.stringify([change.manifestPath, change.registryName]);
+        const known = sourceReported.get(declKey) ?? new Set<string>();
+        known.add(declared);
+        sourceReported.set(declKey, known);
+      }
     }
 
     const subject = comparableLockfile ? subjectOfChange(change, delta.lockfileFormat === 'pnpm') : null;
@@ -1154,10 +1245,32 @@ export const tamperCheck: Check = (ctx) => {
         // transitive dependency nobody declared, was reported by nothing.
         const source = lockEntrySource(entryChange.after, registryHosts);
         const declaredKey = JSON.stringify([entryChange.manifestPath, entryChange.packageName]);
-        if (source !== null && !sourceReported.has(declaredKey)) {
+        // Skipped only when the declaration's own reported source is THIS
+        // source. Matching on the package name alone would let one declared
+        // git dependency silence every other source resolved under that
+        // name, such as a nested copy fetched from an attacker's host.
+        const alreadyReported =
+          source?.identity !== null &&
+          source?.identity !== undefined &&
+          (sourceReported.get(declaredKey)?.has(source.identity) ?? false);
+        if (source !== null && !alreadyReported) {
           const pinned = source.pinned;
           const named = source.host === null ? `a ${source.protocol} source` : `a ${source.protocol} source ("${source.host}")`;
-          const shape = sourceSwapReport(source.protocol, named, entryChange.packageName, pinned, delta.hasComparisonBase);
+          const shape =
+            source.protocol === 'git'
+              ? sourceSwapReport('git', named, entryChange.packageName, pinned, delta.hasComparisonBase)
+              : {
+                  // A registry-shaped path on a host the project does not
+                  // vouch for is graded down, because a private registry
+                  // looks exactly like this; anything else is not.
+                  severity: (source.shaped ? 'high' : 'critical') as Finding['severity'],
+                  message:
+                    `"${entryChange.packageName}" resolves from ${named}, a host that is not a registry ` +
+                    'this project names, and nothing on this scan vouches for the bytes it serves. If ' +
+                    'it is a private registry you use, declare its host in the project .npmrc (a ' +
+                    '"registry=" line for the default registry, or an "@scope:registry=" line for a ' +
+                    'scoped package) and it will be recognised.',
+                };
           report(
             {
               ruleId: 'lockfile-tamper',

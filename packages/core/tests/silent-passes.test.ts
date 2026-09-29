@@ -673,3 +673,246 @@ describe('D4: a newly added lockfile entry from a git or non-registry source is 
     expect(tamperSignals(result, 'left-pad')).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fix round: review findings B1, B2 and N1 to N6.
+// ---------------------------------------------------------------------------
+
+const SHA40 = '0123456789abcdef0123456789abcdef01234567';
+
+describe('B1: a declared git source does not hide a different source under the same name', () => {
+  const lockWithNestedEvil = (): string =>
+    npmLock(
+      {
+        'node_modules/foo': {
+          version: '1.0.0',
+          resolved: `git+ssh://git@github.com/o/r.git#${SHA40}`,
+        },
+        'node_modules/bar': {
+          version: '1.0.0',
+          resolved: 'https://registry.npmjs.org/bar/-/bar-1.0.0.tgz',
+          integrity: 'sha512-bar',
+        },
+        'node_modules/bar/node_modules/foo': {
+          version: '2.0.0',
+          resolved: 'https://evil.example.com/foo-2.0.0.tgz',
+          integrity: 'sha512-evilfoo',
+        },
+      },
+      { foo: `github:o/r#${SHA40}`, bar: '^1.0.0' }
+    );
+  const manifestWithFoo = (): string => manifestJson({ foo: `github:o/r#${SHA40}`, bar: '^1.0.0' });
+
+  test('delta mode reports the nested evil url source as well as the declared git source', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('first');
+    await write('package.json', manifestWithFoo());
+    await write('package-lock.json', lockWithNestedEvil());
+    const result = await scanStaged();
+
+    const signals = tamperSignals(result, 'foo');
+    expect(signals).toContain('url-source:evil.example.com');
+    expect(signals).toContain('git-source');
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('audit mode reports the nested evil url source at critical', async () => {
+    await write('package.json', manifestWithFoo());
+    await write('package-lock.json', lockWithNestedEvil());
+    const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    const evil = result.findings.find(
+      (f) => f.ruleId === 'lockfile-tamper' && f.details?.signal === 'url-source:evil.example.com'
+    );
+    expect(evil?.severity).toBe('critical');
+  });
+});
+
+describe('B2: an added entry is judged by host first, path shape only sets severity', () => {
+  const EVIL_SHAPED = 'https://evil.example.com/baz/-/baz-1.0.0.tgz';
+
+  async function baseThenAdd(npmrc: string | null, resolved: string): Promise<void> {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
+    await commitAll('first');
+    if (npmrc !== null) {
+      await write('.npmrc', npmrc);
+    }
+    await write(
+      'package-lock.json',
+      npmLock(
+        {
+          'node_modules/lodash': CLEAN_LODASH,
+          'node_modules/baz': { version: '1.0.0', resolved, integrity: 'sha512-baz' },
+        },
+        { lodash: '^4.17.21' }
+      )
+    );
+  }
+
+  test('an evil host with a registry-shaped path blocks under --base, at high, naming the .npmrc remedy', async () => {
+    await baseThenAdd(null, EVIL_SHAPED);
+    const result = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'HEAD' }, corpusDir: FIXTURE_CORPUS });
+
+    const finding = result.findings.find((f) => f.details?.signal === 'url-source:evil.example.com');
+    expect(finding?.severity).toBe('high');
+    expect(finding?.message).toContain('.npmrc');
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('an evil host with an unshaped path is critical', async () => {
+    await baseThenAdd(null, 'https://evil.example.com/baz-1.0.0.tgz');
+    const result = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'HEAD' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.findings.find((f) => f.details?.signal === 'url-source:evil.example.com')?.severity).toBe('critical');
+  });
+
+  test('under --trust-base a head .npmrc that vouches for the evil host does not clear it', async () => {
+    await baseThenAdd('registry=https://evil.example.com/\n', EVIL_SHAPED);
+    await commitAll('head');
+    const result = await scan({
+      repoRoot: repo,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      trustBase: 'HEAD~1',
+      corpusDir: FIXTURE_CORPUS,
+    });
+
+    expect(tamperSignals(result, 'baz')).toContain('url-source:evil.example.com');
+  });
+
+  test('a host pinned in the project .npmrc raises nothing', async () => {
+    await write('.npmrc', 'registry=https://npm.corp.example/\n');
+    await baseThenAdd(null, 'https://npm.corp.example/baz/-/baz-1.0.0.tgz');
+    const result = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'HEAD' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(tamperSignals(result, 'baz')).toEqual([]);
+  });
+
+  test('GitHub Packages with the host pinned raises nothing, and without the pin it is a finding', async () => {
+    const url = 'https://npm.pkg.github.com/download/@acme/baz/1.0.0/0123456789abcdef';
+    await write('.npmrc', '@acme:registry=https://npm.pkg.github.com\n');
+    await baseThenAdd(null, url);
+    const pinned = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'HEAD' }, corpusDir: FIXTURE_CORPUS });
+    expect(tamperSignals(pinned, 'baz')).toEqual([]);
+
+    await rm(path.join(repo, '.npmrc'));
+    const unpinned = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'HEAD' }, corpusDir: FIXTURE_CORPUS });
+    const finding = unpinned.findings.find((f) => f.details?.signal === 'url-source:npm.pkg.github.com');
+    expect(finding?.severity).toBe('high');
+  });
+});
+
+describe('N1: losing every parsed lockfile is a downgrade, not a clean pass', () => {
+  async function baseWithNpmLock(): Promise<void> {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
+    await commitAll('first');
+  }
+
+  test('npm lockfile replaced by a yarn.lock', async () => {
+    await baseWithNpmLock();
+    await rm(path.join(repo, 'package-lock.json'));
+    await write('yarn.lock', '# yarn lockfile v1\n');
+
+    await expect(scanStaged()).rejects.toMatchObject({ code: 'lockfile-downgrade' });
+  });
+
+  test('pnpm lockfile replaced by a v1 npm lockfile', async () => {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('pnpm-lock.yaml', pnpmLock('integrity: sha512-cleanlodash'));
+    await commitAll('first');
+    await rm(path.join(repo, 'pnpm-lock.yaml'));
+    await write('package-lock.json', JSON.stringify({ name: 'root', lockfileVersion: 1, dependencies: {} }));
+
+    await expect(scanStaged()).rejects.toMatchObject({ code: 'lockfile-downgrade' });
+  });
+
+  test('control: npm lockfile replaced by a parsed pnpm lockfile is not a downgrade', async () => {
+    await baseWithNpmLock();
+    await rm(path.join(repo, 'package-lock.json'));
+    await write('pnpm-lock.yaml', pnpmLock('integrity: sha512-cleanlodash'));
+
+    await expect(scanStaged()).resolves.toBeDefined();
+  });
+
+  test('control: a lockfile deleted with nothing in its place is left to the lockfile-missing path', async () => {
+    await baseWithNpmLock();
+    await rm(path.join(repo, 'package-lock.json'));
+    const result = await scanStaged();
+
+    expect(result.run.diagnostics.map((d) => d.code)).toContain('lockfile-missing');
+  });
+});
+
+describe('N2: an extra lockfile that exists only on the head side is still compared', () => {
+  test('a new pnpm-lock.yaml pointing lodash at another package tarball, beside an existing package-lock.json', async () => {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
+    await commitAll('first');
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock(
+        'integrity: sha512-otherpackagehash, tarball: https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz'
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('tarball-repointed'))).toBe(true);
+    expect(result.exitCode).toBe(1);
+  });
+});
+
+describe('N3: pnpm git resolutions are recognised in every spelling pnpm writes', () => {
+  async function addEntry(lines: string[]): Promise<ScanResult> {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('pnpm-lock.yaml', pnpmLock('integrity: sha512-cleanlodash'));
+    await commitAll('first');
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock('integrity: sha512-cleanlodash').replace('snapshots:', [...lines, '', 'snapshots:'].join('\n'))
+    );
+    return scanStaged();
+  }
+
+  test('an scp-style repo in a git resolution is git', async () => {
+    const result = await addEntry([
+      `  evil-git@git+ssh://git@github.com/attacker/evil-git.git#${SHA40}:`,
+      `    resolution: {commit: ${SHA40}, repo: git@github.com:attacker/evil-git.git, type: git}`,
+      '    version: 1.0.0',
+    ]);
+
+    expect(tamperSignals(result, 'evil-git')).toContain('git-source:github.com');
+  });
+
+  test('a key with an embedded "@" is parsed, and its entry is a finding rather than a skip diagnostic', async () => {
+    const result = await addEntry([
+      `  baz@git+ssh://git@github.com/attacker/baz.git#${SHA40}:`,
+      `    resolution: {commit: ${SHA40}, repo: ssh://git@github.com/attacker/baz.git, type: git}`,
+      '    version: 1.0.0',
+    ]);
+
+    expect(tamperSignals(result, 'baz')).toContain('git-source:github.com');
+    expect(result.run.diagnostics.map((d) => d.code)).not.toContain('pnpm-lockfile-invalid-entry');
+  });
+});
+
+describe('N6: the same signal in two lockfiles names both files', () => {
+  test('a host change identical in package-lock.json and pnpm-lock.yaml is reported for each', async () => {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
+    await write('pnpm-lock.yaml', pnpmLock('integrity: sha512-cleanlodash'));
+    await commitAll('first');
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': TAMPERED_LODASH }, { lodash: '^4.17.21' }));
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock('integrity: sha512-evilevilevil, tarball: https://evil.example.com/x.tgz')
+    );
+    const result = await scanStaged();
+
+    const files = result.findings
+      .filter((f) => f.ruleId === 'lockfile-tamper' && f.packageName === 'lodash' && String(f.details?.signal).startsWith('host-changed'))
+      .map((f) => f.lockfilePath)
+      .sort();
+    expect(files).toEqual(['package-lock.json', 'pnpm-lock.yaml']);
+  });
+});
