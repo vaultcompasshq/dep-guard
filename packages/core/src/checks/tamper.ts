@@ -282,14 +282,63 @@ interface ComparisonSubject {
   // after entry succeeds, in which case a message may only state what is
   // true of every one of them.
   candidateCount: number;
+  // The entries come from a pnpm lockfile, which records a registry
+  // resolution as an integrity hash alone and writes a tarball URL only
+  // when it is not the registry's standard one. See impliedRegistryEntry.
+  pnpmEntries?: boolean;
 }
 
-function subjectOfChange(change: DepChange): ComparisonSubject | null {
+const DEFAULT_REGISTRY = 'https://registry.npmjs.org/';
+
+// pnpm omits "tarball" from a registry entry's resolution whenever the URL
+// is the registry's standard one for that name and version, so "no URL"
+// does not mean "no location": it means the tarball the configured registry
+// serves for name@version. Comparing a bare entry to one that has gained a
+// URL as though the bare one had nowhere to compare from let an entry go
+// from {integrity: A} to {integrity: B, tarball: <any host>} at the same
+// version and scan clean. The implied URL is what makes that move a
+// host-changed or tarball-repointed comparison like any other.
+//
+// Only an entry that has an integrity hash and no URL is a registry
+// resolution: a pnpm git, directory, or tarball-by-URL entry carries no
+// hash and no implied location, and giving it one would invent a
+// registry origin for something that never came from one. The registry is
+// the scope's pin if the project .npmrc has one, else its default
+// registry, else the public registry -- the same precedence npm and pnpm
+// apply. A registry value that does not parse as an http(s) URL implies
+// nothing, which leaves the entry as it was rather than guessing.
+function impliedRegistryEntry(
+  entry: LockEntry,
+  name: string,
+  pins: Map<string, string>,
+  defaultRegistry: string | null | undefined
+): LockEntry {
+  if (entry.resolvedUrl !== undefined || entry.integrity === undefined || entry.version === undefined) {
+    return entry;
+  }
+  const scope = name.startsWith('@') && name.includes('/') ? name.slice(0, name.indexOf('/')) : null;
+  const registry = (scope === null ? undefined : pins.get(scope)) ?? defaultRegistry ?? DEFAULT_REGISTRY;
+  const base = registry.endsWith('/') ? registry : `${registry}/`;
+  let parsed: URL;
+  try {
+    parsed = new URL(base);
+  } catch {
+    return entry;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return entry;
+  }
+  const basename = name.includes('/') ? name.slice(name.lastIndexOf('/') + 1) : name;
+  return { ...entry, resolvedUrl: `${base}${name}/-/${basename}-${entry.version}.tgz` };
+}
+
+function subjectOfChange(change: DepChange, pnpmEntries: boolean): ComparisonSubject | null {
   const { before, after } = change;
   if (before === undefined || after === undefined) {
     return null;
   }
   return {
+    pnpmEntries,
     packageName: change.registryName,
     manifestPath: change.manifestPath,
     kind: change.kind,
@@ -552,7 +601,14 @@ export const tamperCheck: Check = (ctx) => {
   // side was a guess between several candidates, the caller runs this once
   // per candidate and keeps only the verdicts all of them reached.
   const compare = (subject: ComparisonSubject): Omit<Finding, 'fingerprint'>[] => {
-    const { before, after } = subject;
+    const before =
+      subject.pnpmEntries === true
+        ? impliedRegistryEntry(subject.before, subject.packageName, ctx.npmrcRegistryPins, ctx.npmrcDefaultRegistry)
+        : subject.before;
+    const after =
+      subject.pnpmEntries === true
+        ? impliedRegistryEntry(subject.after, subject.packageName, ctx.npmrcRegistryPins, ctx.npmrcDefaultRegistry)
+        : subject.after;
     const raised: Omit<Finding, 'fingerprint'>[] = [];
     const raise = (finding: Omit<Finding, 'fingerprint'>): void => {
       raised.push(finding);
@@ -654,6 +710,31 @@ export const tamperCheck: Check = (ctx) => {
           });
         }
       }
+    } else if (
+      before.integrity !== undefined &&
+      after.integrity !== undefined &&
+      before.integrity !== after.integrity &&
+      before.version === after.version &&
+      (before.resolvedUrl === undefined) !== (after.resolvedUrl === undefined)
+    ) {
+      // A hash rewritten at a held version while exactly one side names a
+      // location at all. sameOriginPair cannot say "same place" about a pair
+      // where one side has no URL, and the early return further down skips
+      // the whole resolution comparison for such a pair, so without this
+      // the rewrite was reported by nothing. (For pnpm the implied registry
+      // URL usually settles the question earlier and this is not reached;
+      // it remains for a pair no URL could be implied for, and for npm
+      // entries that drop "resolved".) There is no location to hold
+      // constant, so the algorithm ladder's forgiveness of a same-URL rehash
+      // does not apply: one version has one tarball and one hash.
+      raise({
+        ruleId: 'lockfile-tamper',
+        severity: 'critical',
+        packageName: subject.packageName,
+        message: `"${subject.packageName}" resolves to the same version as ${priorSide(subject)}, but its integrity hash was rewritten and only one side records where the tarball comes from.`,
+        manifestPath: subject.manifestPath,
+        details: { signal: comparisonSignal('integrity-changed'), kind: subject.kind },
+      });
     } else if (
       before.integrity === undefined &&
       before.version === after.version &&
@@ -979,7 +1060,7 @@ export const tamperCheck: Check = (ctx) => {
       });
     }
 
-    const subject = comparableLockfile ? subjectOfChange(change) : null;
+    const subject = comparableLockfile ? subjectOfChange(change, delta.lockfileFormat === 'pnpm') : null;
     if (subject !== null) {
       for (const finding of compare(subject)) {
         report(finding);
@@ -1000,6 +1081,7 @@ export const tamperCheck: Check = (ctx) => {
         manifestPath: entryChange.manifestPath,
         kind: entryChange.kind,
         after: entryChange.after,
+        pnpmEntries: (entryChange.lockfileFormat ?? delta.lockfileFormat) === 'pnpm',
       });
       for (const finding of certain) {
         report(finding);

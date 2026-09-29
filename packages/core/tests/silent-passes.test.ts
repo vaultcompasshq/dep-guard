@@ -170,3 +170,148 @@ describe('D1: lockfileVersion does not decide whether the packages map is read',
     await expect(scanStaged()).rejects.toMatchObject({ code: 'lockfile-downgrade' });
   });
 });
+
+// pnpm records a registry resolution as {integrity} alone and writes a
+// tarball URL only when it is not the registry's standard one, so "no URL"
+// on a pnpm entry means "the default registry's tarball for this name and
+// version" and gaining a URL is a move away from it.
+function pnpmLock(lodashResolution: string): string {
+  return [
+    "lockfileVersion: '9.0'",
+    '',
+    'settings:',
+    '  autoInstallPeers: true',
+    '  excludeLinksFromLockfile: false',
+    '',
+    'importers:',
+    '',
+    '  .:',
+    '    dependencies:',
+    '      lodash:',
+    '        specifier: ^4.17.21',
+    '        version: 4.17.21',
+    '',
+    'packages:',
+    '',
+    '  lodash@4.17.21:',
+    `    resolution: {${lodashResolution}}`,
+    '',
+    'snapshots:',
+    '',
+    '  lodash@4.17.21: {}',
+    '',
+  ].join('\n');
+}
+
+describe('D2: a pnpm resolution that gains a tarball URL is compared against the implied registry URL', () => {
+  async function commitPnpmBase(baseResolution: string): Promise<void> {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('pnpm-lock.yaml', pnpmLock(baseResolution));
+    await commitAll('first');
+  }
+
+  test('integrity rewritten and a tarball URL on another host added at the same version', async () => {
+    await commitPnpmBase('integrity: sha512-cleanlodash');
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock('integrity: sha512-evilevilevil, tarball: https://evil.example.com/x.tgz')
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('host-changed'))).toBe(true);
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('integrity rewritten and repointed to another package tarball on the same registry', async () => {
+    await commitPnpmBase('integrity: sha512-cleanlodash');
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock(
+        'integrity: sha512-otherpackagehash, tarball: https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz'
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('tarball-repointed'))).toBe(true);
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('a tarball URL on another host added with the integrity unchanged', async () => {
+    await commitPnpmBase('integrity: sha512-cleanlodash');
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock('integrity: sha512-cleanlodash, tarball: https://evil.example.com/x.tgz')
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('host-changed'))).toBe(true);
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('a tarball URL equal to the implied registry tarball is not a finding', async () => {
+    await commitPnpmBase('integrity: sha512-cleanlodash');
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock(
+        'integrity: sha512-cleanlodash, tarball: https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz'
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash')).toEqual([]);
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('the project default registry is what the implied URL is derived from', async () => {
+    await write('.npmrc', 'registry=https://npm.corp.example/\n');
+    await commitPnpmBase('integrity: sha512-cleanlodash');
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock(
+        'integrity: sha512-cleanlodash, tarball: https://npm.corp.example/lodash/-/lodash-4.17.21.tgz'
+      )
+    );
+    const held = await scanStaged();
+    expect(tamperSignals(held, 'lodash')).toEqual([]);
+
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock('integrity: sha512-evilevilevil, tarball: https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz')
+    );
+    const moved = await scanStaged();
+    expect(tamperSignals(moved, 'lodash').some((s) => s.startsWith('host-changed'))).toBe(true);
+  });
+
+  test('control: an integrity-only rewrite still gives integrity-changed', async () => {
+    await commitPnpmBase('integrity: sha512-cleanlodash');
+    await write('pnpm-lock.yaml', pnpmLock('integrity: sha512-evilevilevil'));
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash')).toContain('integrity-changed');
+  });
+
+  test('control: removing the integrity hash still gives integrity-removed', async () => {
+    await commitPnpmBase('integrity: sha512-cleanlodash');
+    await write('pnpm-lock.yaml', pnpmLock('tarball: https://evil.example.com/x.tgz'));
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash')).toContain('integrity-removed');
+  });
+
+  test('an npm entry that drops "resolved" while rewriting integrity at the same version is integrity-changed', async () => {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
+    await commitAll('first');
+    await write(
+      'package-lock.json',
+      npmLock(
+        { 'node_modules/lodash': { version: '4.17.21', integrity: 'sha512-evilevilevil' } },
+        { lodash: '^4.17.21' }
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'lodash')).toContain('integrity-changed');
+    expect(result.exitCode).toBe(1);
+  });
+});

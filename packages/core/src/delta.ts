@@ -62,6 +62,11 @@ export interface LockEntryChange {
   kind: 'added' | 'changed';
   manifestPath: string;
   lockfilePath: string;
+  // The format of the lockfile this entry came from. Optional so a change
+  // built by hand falls back to the delta's own format; set by the lockfile
+  // walk because a scan can now diff several lockfiles of different formats
+  // in one delta, and only the entry knows which one it belongs to.
+  lockfileFormat?: LockfileFormat;
   before?: LockEntry;
   after: LockEntry;
   // The `before` entry was a guess between several the selector could not
@@ -490,6 +495,7 @@ function diffLockEntries(
         // one finding.
         manifestPath: declared?.manifestPath ?? after.path,
         lockfilePath: after.path,
+        lockfileFormat: after.format,
         before: counterpart.entry,
         after: entry,
         ...(counterpart.ambiguous
