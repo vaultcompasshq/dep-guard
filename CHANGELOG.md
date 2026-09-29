@@ -63,7 +63,14 @@ an independent audit:
   dependency no longer hides a different source resolved under the same name.
 - The downgrade error also covers a base with a parsed lockfile against a
   head whose lockfiles are all unparsed (v1 npm, yarn, bun, binary); a
-  lockfile deleted with nothing in its place is not covered by it. A
+  lockfile deleted with nothing in its place is not covered by it, so a
+  two-step bypass (delete the lockfile in one pull request, add `yarn.lock`
+  in the next) is a known gap, scheduled separately. The error now says why
+  it stops (a format switch is how a tampered lockfile escapes inspection)
+  and what a maintainer does for a genuine migration to yarn or bun: review
+  the new lockfile by hand and merge with the gate's result overridden by an
+  admin, or land it with the dep-guard gate set to advisory for that one
+  pull request. A
   lockfile that exists only on the head side is compared against the base's
   primary lockfile, and the same signal in two lockfiles is reported for
   each.

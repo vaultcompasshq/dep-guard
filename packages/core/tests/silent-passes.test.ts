@@ -916,3 +916,26 @@ describe('N6: the same signal in two lockfiles names both files', () => {
     expect(files).toEqual(['package-lock.json', 'pnpm-lock.yaml']);
   });
 });
+
+describe('N5: the lockfile-downgrade message says what happened, why, and what to do', () => {
+  test('a format switch names the files, the reason, and the two ways to land a genuine migration', async () => {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
+    await commitAll('first');
+    await rm(path.join(repo, 'package-lock.json'));
+    await write('yarn.lock', '# yarn lockfile v1\n');
+
+    const error = await scanStaged().then(
+      () => null,
+      (err: unknown) => err as Error
+    );
+    expect(error).not.toBeNull();
+    const message = error?.message ?? '';
+    expect(message).toContain('package-lock.json');
+    expect(message).toContain('yarn.lock');
+    expect(message).toContain('a format switch is how a tampered lockfile escapes inspection');
+    expect(message).toContain('review the new lockfile by hand');
+    expect(message).toContain('overridden by an admin');
+    expect(message).toContain('advisory for that one pull request');
+  });
+});

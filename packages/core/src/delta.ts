@@ -581,6 +581,16 @@ function onlyBuiltDifference(before: RepoState | null, after: RepoState): string
 // for a format this tool cannot read is not a way out. A head with NO
 // lockfile at all is deliberately not this rule's case: that is the
 // lockfile-missing path, handled separately.
+// Why the scan stops, and what a maintainer with a genuine migration (npm to
+// yarn or bun, say) does about it. The refusal is deliberate and cannot be
+// escaped from inside the tree being judged: switching to a format this
+// tool cannot read is exactly how a tampered lockfile would escape
+// inspection.
+const DOWNGRADE_REMEDY =
+  'This is refused because a format switch is how a tampered lockfile escapes inspection. ' +
+  "For a genuine migration, review the new lockfile by hand and merge with this gate's result " +
+  'overridden by an admin, or land it with the dep-guard gate set to advisory for that one pull request.';
+
 function refuseLockfileDowngrade(before: RepoState | null, after: RepoState): void {
   if (before === null) {
     return;
@@ -596,7 +606,8 @@ function refuseLockfileDowngrade(before: RepoState | null, after: RepoState): vo
       `${afterAll.map((lockfile) => lockfile.path).join(', ')}: the base side of this scan had a ` +
         `lockfile this tool reads (${beforeParsed[0].path}) and this side has only lockfiles it cannot ` +
         'read (a v1 npm lockfile, or a yarn, bun or binary one), so the lockfile-backed checks would ' +
-        'silently stop while the package manager keeps installing; refusing to report a clean pass',
+        'silently stop while the package manager keeps installing; refusing to report a clean pass. ' +
+        DOWNGRADE_REMEDY,
       'lockfile-downgrade'
     );
   }
@@ -617,7 +628,8 @@ function refuseLockfileDowngrade(before: RepoState | null, after: RepoState): vo
     throw new DepGuardError(
       `${lockfile.path}: the base side of this scan has a "packages" map (${counterpart.path}) and this ` +
         'side has none, so the lockfile-backed checks would silently stop reading it while npm ' +
-        'still installs from it; refusing to report a clean pass',
+        'still installs from it; refusing to report a clean pass. ' +
+        DOWNGRADE_REMEDY,
       'lockfile-downgrade'
     );
   }

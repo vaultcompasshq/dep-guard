@@ -909,8 +909,14 @@ quiet:
   base side had a lockfile dep-guard parses and the head side has none it
   parses (a v1 npm file, yarn, bun, or a binary lockfile), the scan fails
   with exit 2 rather than passing, because that change removes what the
-  checks read while the package manager keeps installing. A lockfile deleted
-  with nothing in its place is not covered by this. Every finding's identity
+  checks read while the package manager keeps installing. A genuine
+  migration to yarn or bun trips this too, on purpose: a format switch is
+  how a tampered lockfile escapes inspection. Review the new lockfile by
+  hand and merge with the gate's result overridden by an admin, or land it
+  with the dep-guard gate set to advisory for that one pull request. A
+  lockfile deleted with nothing in its place is not covered by this, so
+  deleting the lockfile in one pull request and adding `yarn.lock` in the
+  next gets past it; that gap is known and scheduled. Every finding's identity
   (its package name) always comes from the lockfile key itself, or from a
   manifest declaration -- never from a packages entry's own `name` field,
   which is written by whoever committed the lockfile and is not something

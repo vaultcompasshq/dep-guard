@@ -1019,7 +1019,13 @@ dependency hide a nested copy fetched from an attacker's host (tests `B1:
 delta mode reports the nested evil url source...` and `audit mode reports the
 nested evil url source at critical`). The dedupe key for findings now
 includes the lockfile path, so the same signal in two lockfiles names both
-(`N6`). A lockfile present only on the head side is compared against the
+(`N6`). Known limitation: that key is the check's own dedupe, NOT the
+fingerprint. `fingerprint.ts` hashes only ruleId, packageName, manifestPath
+and `details.signal`, so the same signal in two lockfiles is two findings
+with one fingerprint, and one baseline entry suppresses both. Adding
+`lockfilePath` to the hash would change every existing fingerprint and
+break adopters' baselines, so it was deliberately not done. A lockfile
+present only on the head side is compared against the
 base's primary lockfile when no same-path or same-format file exists (`N2`).
 `lockfiles/pnpm.ts` now
 records a pnpm `{type: git, repo, commit}` resolution as
@@ -1294,8 +1300,14 @@ The codes, and what each one means:
   parses (npm with a `packages` map, or pnpm) and the head side has an npm
   lockfile with no `packages` map (a v1 file), or has lockfiles but none this
   tool parses (v1 npm, yarn, bun, binary). A head with no lockfile at all is
-  not this error. See "A lockfile that says less is not a lockfile that says
-  nothing".
+  not this error, so deleting the lockfile in one pull request and adding
+  `yarn.lock` in the next is a known, scheduled gap. The message names the
+  reason (a format switch is how a tampered lockfile escapes inspection) and
+  the remedy for a genuine migration: review by hand and merge with the gate
+  overridden by an admin, or set the gate advisory for that one pull request
+  (test `N5: a format switch names the files, the reason, and the two ways
+  to land a genuine migration`). See "A lockfile that says less is not a
+  lockfile that says nothing".
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
   corpus is absent, damaged, or -- for `corpus-corrupt` specifically --
   valid but written in a shape this build refuses to trust: a
