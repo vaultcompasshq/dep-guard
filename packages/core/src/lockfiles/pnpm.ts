@@ -285,6 +285,22 @@ function entryFromPackageValue(value: Record<string, unknown>, keyVersion: strin
     if (typeof resolution.integrity === 'string') {
       entry.integrity = resolution.integrity;
     }
+    // A git resolution carries no tarball and no hash:
+    // {type: git, repo: <url>, commit: <sha>}. Left unread, a git-sourced
+    // package was indistinguishable from a bare one and no source signal
+    // could ever fire on it. It is recorded in the spelling npm writes for
+    // the same source (git+<url>#<commit>), so the one resolution parser
+    // classifies it as git. A repo with no scheme (scp-style) is left
+    // unrecorded rather than invented into a URL nothing could parse.
+    if (
+      entry.resolvedUrl === undefined &&
+      resolution.type === 'git' &&
+      typeof resolution.repo === 'string' &&
+      resolution.repo.includes('://')
+    ) {
+      const repo = /^(?:git\+|git:|ssh:)/.test(resolution.repo) ? resolution.repo : `git+${resolution.repo}`;
+      entry.resolvedUrl = typeof resolution.commit === 'string' ? `${repo}#${resolution.commit}` : repo;
+    }
   }
   // hasInstallScript is intentionally never set here: pnpm v9 dropped that
   // flag from the lockfile, so there is no field to read it from. See the

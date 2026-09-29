@@ -1,7 +1,7 @@
 import type { DepChange, LockEntryChange } from '../delta.js';
 import type { LockEntry } from '../lockfiles/types.js';
 import type { Resolution } from '../resolution.js';
-import { resolutionOf, resolutionKindOf } from '../resolution.js';
+import { registryTarballPackageName, resolutionOf, resolutionKindOf } from '../resolution.js';
 import { agreementAcrossCandidates } from './agreement.js';
 import { comparisonSignal, type ComparisonTamperSignal } from '../tamper-signals.js';
 import type { Diagnostic, Finding } from '../types.js';
@@ -332,6 +332,72 @@ function impliedRegistryEntry(
   return { ...entry, resolvedUrl: `${base}${name}/-/${basename}-${entry.version}.tgz` };
 }
 
+// The hosts a project legitimately fetches registry tarballs from: the two
+// public registries, plus every host named by a scope pin or the default
+// registry in the project .npmrc.
+function registryHostsOf(
+  pins: Map<string, string>,
+  defaultRegistry: string | null | undefined
+): ReadonlySet<string> {
+  const hosts = new Set<string>(['registry.npmjs.org', 'registry.yarnpkg.com']);
+  for (const value of [...pins.values(), ...(defaultRegistry === null || defaultRegistry === undefined ? [] : [defaultRegistry])]) {
+    const host = hostOf(value.includes('://') ? value : `https://${value.replace(/^\/+/, '')}`);
+    if (host !== null) {
+      hosts.add(host);
+    }
+  }
+  return hosts;
+}
+
+const COMMIT_ID_SEGMENT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+// What a lockfile entry says about where its bytes came from, judged from
+// the resolved URL alone, for an entry with nothing earlier to compare
+// against. git: a git scheme, or a forge's source archive (the shape pnpm
+// writes for a github dependency). url: any other non-registry source -- a
+// scheme that is not http(s) or a local file, or an http(s) URL that is
+// neither on a host the project fetches registry tarballs from nor shaped
+// like a registry tarball path ("/<name>/-/<file>.tgz"). The host test is
+// what keeps a registry that serves tarballs from a path with no "/-/"
+// segment (GitHub Packages, for one) from reading as a url source on every
+// dependency it serves, so a project on such a registry has to name it in
+// .npmrc, which is where npm needs it anyway. A local file resolution is
+// not a network source and is left alone.
+function lockEntrySource(
+  entry: LockEntry,
+  registryHosts: ReadonlySet<string>
+): { protocol: 'git' | 'url'; host: string | null; pinned: boolean } | null {
+  if (entry.resolvedUrl === undefined) {
+    return null;
+  }
+  const resolution = resolutionOf(entry.resolvedUrl);
+  if (resolution === null) {
+    return null;
+  }
+  const host = resolution.host === '' ? null : resolution.host;
+  const kind = resolutionKindOf(resolution);
+  if (kind === 'git') {
+    let pathPinned = false;
+    try {
+      pathPinned = COMMIT_ID_SEGMENT.test(new URL(entry.resolvedUrl).pathname.split('/').pop() ?? '');
+    } catch {
+      pathPinned = false;
+    }
+    return { protocol: 'git', host, pinned: pathPinned || isCommitPinnedGitSpecifier(entry.resolvedUrl) };
+  }
+  if (kind === 'url') {
+    return { protocol: 'url', host, pinned: false };
+  }
+  if (
+    kind === 'registry' &&
+    registryTarballPackageName(entry.resolvedUrl) === null &&
+    !registryHosts.has(resolution.host)
+  ) {
+    return { protocol: 'url', host, pinned: false };
+  }
+  return null;
+}
+
 function subjectOfChange(change: DepChange, pnpmEntries: boolean): ComparisonSubject | null {
   const { before, after } = change;
   if (before === undefined || after === undefined) {
@@ -535,6 +601,11 @@ export const tamperCheck: Check = (ctx) => {
   // both, produces the same signal string for the same package at the same
   // manifest path, and is reported once.
   const seen = new Set<string>();
+  // (manifestPath, package) pairs whose git or url source the specifier walk
+  // already reported, so the lockfile walk does not report the same
+  // dependency a second time under a differently spelled signal.
+  const sourceReported = new Set<string>();
+  const registryHosts = registryHostsOf(ctx.npmrcRegistryPins, ctx.npmrcDefaultRegistry);
   const report = (
     finding: Omit<Finding, 'fingerprint'>,
     lockfilePath: string | undefined = delta.lockfilePath
@@ -1059,6 +1130,7 @@ export const tamperCheck: Check = (ctx) => {
           ...(change.protocol === 'git' ? { commitPinned: pinned } : {}),
         },
       });
+      sourceReported.add(JSON.stringify([change.manifestPath, change.registryName]));
     }
 
     const subject = comparableLockfile ? subjectOfChange(change, delta.lockfileFormat === 'pnpm') : null;
@@ -1075,7 +1147,40 @@ export const tamperCheck: Check = (ctx) => {
     for (const entryChange of delta.lockEntryChanges) {
       const candidates = candidatesOfLockEntry(entryChange);
       if (candidates.length === 0) {
-        continue; // an added entry: nothing to compare it against
+        // An added entry has nothing to compare against, but where it
+        // comes from is still a fact about it. A changed entry that moved
+        // to a git or non-registry source is caught by the comparisons
+        // above (host-changed and friends); an ADDED one, most often a
+        // transitive dependency nobody declared, was reported by nothing.
+        const source = lockEntrySource(entryChange.after, registryHosts);
+        const declaredKey = JSON.stringify([entryChange.manifestPath, entryChange.packageName]);
+        if (source !== null && !sourceReported.has(declaredKey)) {
+          const pinned = source.pinned;
+          const named = source.host === null ? `a ${source.protocol} source` : `a ${source.protocol} source ("${source.host}")`;
+          const shape = sourceSwapReport(source.protocol, named, entryChange.packageName, pinned, delta.hasComparisonBase);
+          report(
+            {
+              ruleId: 'lockfile-tamper',
+              severity: shape.severity,
+              packageName: entryChange.packageName,
+              message: shape.message,
+              manifestPath: entryChange.manifestPath,
+              details: {
+                // The same signal strings the specifier walk uses, so one
+                // fact reads the same whichever walk found it. The host is
+                // the resolved URL's own, never the URL (a resolved URL is
+                // where a credential can appear).
+                signal: `${source.protocol === 'git' ? 'git-source' : 'url-source'}${source.host === null ? '' : `:${source.host}`}`,
+                protocol: source.protocol,
+                kind: (delta.hasComparisonBase ? entryChange.kind : 'present') satisfies ReportedKind,
+                host: source.host,
+                ...(source.protocol === 'git' ? { commitPinned: pinned } : {}),
+              },
+            },
+            entryChange.lockfilePath
+          );
+        }
+        continue;
       }
       const certain = certainFindings(candidates, {
         packageName: entryChange.packageName,

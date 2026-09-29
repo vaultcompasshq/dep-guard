@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { parseManifest } from '../src/manifest.js';
 import { scan } from '../src/scan.js';
 import type { ScanResult } from '../src/scan.js';
 
@@ -402,5 +403,273 @@ describe('D3: every lockfile at the root is checked, npm-shrinkwrap.json include
     const result = await scanStaged();
 
     expect(result.run.diagnostics.map((d) => d.code)).not.toContain('multiple-lockfiles');
+  });
+});
+
+describe('D4: every git spelling npm accepts is classified as git', () => {
+  function protocolOf(specifier: string): string {
+    const parsed = parseManifest('package.json', JSON.stringify({ dependencies: { pkg: specifier } }));
+    return parsed.deps[0].protocol;
+  }
+
+  // Expected values are npm's own answer, taken from the npm-package-arg
+  // bundled with npm (npa.resolve('pkg', spec).type), not from this
+  // scanner's opinion of the syntax. "git" here is npa type git.
+  const gitForms: string[] = [
+    'attacker/lodash',
+    'attacker/lodash#v1.2.3',
+    'attacker/lodash#semver:^1',
+    'attacker/lodash#main',
+    'foo/bar.tgz',
+    'gitlab:o/r',
+    'gitlab:o/r#main',
+    'bitbucket:o/r',
+    'gist:abc123def',
+    'gist:o/abc',
+    'sourcehut:~u/r',
+    'github:o/r',
+    'GITHUB:o/r',
+    'git@github.com:o/r.git',
+    'git@github.com:o/r#v1',
+    'user@github.com:o/r',
+    'git@gitlab.com:o/r.git',
+    'git@bitbucket.org:o/r.git',
+    'git@gist.github.com:abc123',
+    'git@git.sr.ht:~u/r',
+    'ssh://git@github.com/o/r.git',
+    'git+ssh://git@github.com/o/r.git',
+    'git+https://example.com/o/r.git',
+    'git://github.com/o/r.git',
+  ];
+  for (const specifier of gitForms) {
+    test(`${JSON.stringify(specifier)} is git`, () => {
+      expect(protocolOf(specifier)).toBe('git');
+    });
+  }
+
+  // npm reads none of these as git: registry versions, ranges and tags, and
+  // the local-path and unknown-host spellings npm-package-arg reports as
+  // directory. Over-classifying them would put a critical finding on every
+  // ordinary dependency.
+  const notGit: Array<[string, string]> = [
+    ['^4.17.21', 'registry'],
+    ['4.17.21', 'registry'],
+    ['latest', 'registry'],
+    ['1.x', 'registry'],
+    ['>=1.0.0 <2', 'registry'],
+    ['1.0.0 - 2.0.0', 'registry'],
+    ['~1.2.3', 'registry'],
+    ['*', 'registry'],
+    ['', 'registry'],
+    ['./local', 'registry'],
+    ['../local', 'registry'],
+    ['/abs/path', 'registry'],
+    ['~/x/y', 'registry'],
+    ['C:\\x\\y', 'registry'],
+    ['a/b/c', 'registry'],
+    ['o/r/', 'registry'],
+    ['git@gitlab.example.com:o/r', 'registry'],
+    ['git@github.com:/o/r', 'registry'],
+    ['npm:lodash@4.17.21', 'alias'],
+    ['file:../x', 'file'],
+    ['https://evil.example.com/x.tgz', 'url'],
+  ];
+  for (const [specifier, expected] of notGit) {
+    test(`${JSON.stringify(specifier)} is ${expected}, not git`, () => {
+      expect(protocolOf(specifier)).toBe(expected);
+    });
+  }
+
+  for (const specifier of ['attacker/lodash', 'gitlab:attacker/lodash', 'git@github.com:attacker/lodash.git']) {
+    test(`a manifest that swaps a registry range for ${JSON.stringify(specifier)} scans as a blocking git source`, async () => {
+      await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+      await commitAll('first');
+      await write('package.json', manifestJson({ lodash: specifier }));
+      const result = await scanStaged();
+
+      expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('git-source'))).toBe(true);
+      expect(result.exitCode).toBe(1);
+    });
+  }
+});
+
+describe('D4: a newly added lockfile entry from a git or non-registry source is a source finding', () => {
+  const PINNED = '0123456789abcdef0123456789abcdef01234567';
+
+  async function commitBase(files: Record<string, string>): Promise<void> {
+    await write('package.json', manifestJson({ lodash: '^4.17.21' }));
+    for (const [file, content] of Object.entries(files)) {
+      await write(file, content);
+    }
+    await commitAll('first');
+  }
+
+  test('npm: a new transitive entry resolved from a git URL', async () => {
+    await commitBase({ 'package-lock.json': npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }) });
+    await write(
+      'package-lock.json',
+      npmLock(
+        {
+          'node_modules/lodash': CLEAN_LODASH,
+          'node_modules/evil-dep': {
+            version: '1.0.0',
+            resolved: `git+ssh://git@github.com/attacker/evil-dep.git#${PINNED}`,
+          },
+        },
+        { lodash: '^4.17.21' }
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'evil-dep')).toContain('git-source:github.com');
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('npm: a new transitive entry resolved from a non-registry tarball URL', async () => {
+    await commitBase({ 'package-lock.json': npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }) });
+    await write(
+      'package-lock.json',
+      npmLock(
+        {
+          'node_modules/lodash': CLEAN_LODASH,
+          'node_modules/evil-dep': {
+            version: '1.0.0',
+            resolved: 'https://evil.example.com/evil-dep-1.0.0.tgz',
+            integrity: 'sha512-evilevilevil',
+          },
+        },
+        { lodash: '^4.17.21' }
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'evil-dep')).toContain('url-source:evil.example.com');
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('npm: a new entry from an ordinary registry tarball raises nothing', async () => {
+    await commitBase({ 'package-lock.json': npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }) });
+    await write(
+      'package-lock.json',
+      npmLock(
+        {
+          'node_modules/lodash': CLEAN_LODASH,
+          'node_modules/left-pad': {
+            version: '1.3.0',
+            resolved: 'https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz',
+            integrity: 'sha512-leftpad',
+          },
+        },
+        { lodash: '^4.17.21' }
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'left-pad')).toEqual([]);
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('npm: a new entry from the project registry host with no /-/ tarball path raises nothing', async () => {
+    await write('.npmrc', '@acme:registry=https://npm.pkg.example.com/\n');
+    await commitBase({ 'package-lock.json': npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }) });
+    await write(
+      'package-lock.json',
+      npmLock(
+        {
+          'node_modules/lodash': CLEAN_LODASH,
+          'node_modules/@acme/widget': {
+            version: '1.0.0',
+            resolved: 'https://npm.pkg.example.com/download/@acme/widget/1.0.0/abcdef',
+            integrity: 'sha512-widget',
+          },
+        },
+        { lodash: '^4.17.21' }
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, '@acme/widget')).toEqual([]);
+  });
+
+  test('npm: a declared git dependency is reported once, by its specifier, not again by its lock entry', async () => {
+    await commitBase({ 'package-lock.json': npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }) });
+    await write('package.json', manifestJson({ lodash: '^4.17.21', 'evil-dep': 'github:attacker/evil-dep' }));
+    await write(
+      'package-lock.json',
+      npmLock(
+        {
+          'node_modules/lodash': CLEAN_LODASH,
+          'node_modules/evil-dep': {
+            version: '1.0.0',
+            resolved: `git+ssh://git@github.com/attacker/evil-dep.git#${PINNED}`,
+          },
+        },
+        { lodash: '^4.17.21', 'evil-dep': 'github:attacker/evil-dep' }
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'evil-dep').filter((s) => s.startsWith('git-source'))).toEqual(['git-source']);
+  });
+
+  test('pnpm: a new entry whose resolution is a non-registry tarball', async () => {
+    await commitBase({ 'pnpm-lock.yaml': pnpmLock('integrity: sha512-cleanlodash') });
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock('integrity: sha512-cleanlodash').replace(
+        'snapshots:',
+        [
+          '  evil-dep@1.0.0:',
+          '    resolution: {tarball: https://evil.example.com/evil-dep.tgz}',
+          '    version: 1.0.0',
+          '',
+          'snapshots:',
+        ].join('\n')
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'evil-dep')).toContain('url-source:evil.example.com');
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('pnpm: a new entry whose resolution is a git commit', async () => {
+    await commitBase({ 'pnpm-lock.yaml': pnpmLock('integrity: sha512-cleanlodash') });
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock('integrity: sha512-cleanlodash').replace(
+        'snapshots:',
+        [
+          '  evil-dep@https://codeload.github.com/attacker/evil-dep/tar.gz/' + PINNED + ':',
+          `    resolution: {tarball: https://codeload.github.com/attacker/evil-dep/tar.gz/${PINNED}}`,
+          '    version: 1.0.0',
+          '',
+          '  evil-git@git+https://github.com/attacker/evil-git.git#' + PINNED + ':',
+          `    resolution: {commit: ${PINNED}, repo: https://github.com/attacker/evil-git.git, type: git}`,
+          '    version: 1.0.0',
+          '',
+          'snapshots:',
+        ].join('\n')
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'evil-dep')).toContain('git-source:codeload.github.com');
+    expect(tamperSignals(result, 'evil-git')).toContain('git-source:github.com');
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('pnpm: a new entry with an integrity-only registry resolution raises nothing', async () => {
+    await commitBase({ 'pnpm-lock.yaml': pnpmLock('integrity: sha512-cleanlodash') });
+    await write(
+      'pnpm-lock.yaml',
+      pnpmLock('integrity: sha512-cleanlodash').replace(
+        'snapshots:',
+        ['  left-pad@1.3.0:', '    resolution: {integrity: sha512-leftpad}', '', 'snapshots:'].join('\n')
+      )
+    );
+    const result = await scanStaged();
+
+    expect(tamperSignals(result, 'left-pad')).toEqual([]);
   });
 });
