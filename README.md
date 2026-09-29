@@ -906,9 +906,11 @@ quiet:
   The `packages` map is read whenever it exists, whatever `lockfileVersion`
   says (npm installs from it either way). A file with no `packages` map at
   all is a real v1 lockfile: it gets a diagnostic and no entries. If the
-  base side had a `packages` map and the head side has none, the scan fails
+  base side had a lockfile dep-guard parses and the head side has none it
+  parses (a v1 npm file, yarn, bun, or a binary lockfile), the scan fails
   with exit 2 rather than passing, because that change removes what the
-  checks read while npm keeps installing. Every finding's identity
+  checks read while the package manager keeps installing. A lockfile deleted
+  with nothing in its place is not covered by this. Every finding's identity
   (its package name) always comes from the lockfile key itself, or from a
   manifest declaration -- never from a packages entry's own `name` field,
   which is written by whoever committed the lockfile and is not something

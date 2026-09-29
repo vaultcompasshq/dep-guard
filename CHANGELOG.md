@@ -53,9 +53,20 @@ an independent audit:
   git or non-registry source (a transitive dependency no manifest declares)
   was skipped by the lockfile walk; it now raises the git-source or
   url-source signal in npm and pnpm repositories. A pnpm `type: git`
-  resolution is now recorded, so it can be recognised. An added entry on a
-  registry host that serves tarballs from a path without `/-/` must have that
-  host named in `.npmrc` to avoid a url-source finding.
+  resolution is now recorded, in URL and scp-style spellings, and a pnpm key
+  with an embedded `@` (`name@git+ssh://git@host/...`) is parsed instead of
+  skipped. An added entry is judged by host first: an http(s) host that is
+  not the public registry or named by the project `.npmrc` (default or scope
+  registry) is a url-source finding whatever its path looks like, `high` for
+  a registry-shaped path and `critical` otherwise, so a private registry
+  host has to be declared in `.npmrc` to stay quiet. A declared git
+  dependency no longer hides a different source resolved under the same name.
+- The downgrade error also covers a base with a parsed lockfile against a
+  head whose lockfiles are all unparsed (v1 npm, yarn, bun, binary); a
+  lockfile deleted with nothing in its place is not covered by it. A
+  lockfile that exists only on the head side is compared against the base's
+  primary lockfile, and the same signal in two lockfiles is reported for
+  each.
 
 ### Added
 

@@ -907,7 +907,17 @@ of 2 or more with no map, both still throw `lockfile-parse`. And a base
 side that parsed a packages map against a head side that did not is a
 `lockfile-downgrade` error (`delta.ts`'s `refuseLockfileDowngrade`), exit 2,
 never a diagnostic, because that change removes what every check reads while
-npm keeps installing from the head file. Pinned by the tests named
+npm keeps installing from the head file. The guard also fires per
+repository: when the base had a parsed lockfile (npm with a packages map,
+or pnpm, with entries) and the head has lockfiles but none this tool
+parses -- only a v1 npm file, a `yarn.lock`, a `bun.lock`, or a binary one --
+it is the same error, so swapping a lockfile for a format this tool cannot
+read is not a way out (tests `N1: npm lockfile replaced by a yarn.lock` and
+`pnpm lockfile replaced by a v1 npm lockfile`; controls `npm lockfile
+replaced by a parsed pnpm lockfile is not a downgrade` and `a lockfile
+deleted with nothing in its place is left to the lockfile-missing path`,
+because a lockfile deleted outright is a separate, scheduled case and is not
+covered here). Pinned by the tests named
 `a tampered node_modules/lodash is caught when lockfileVersion is the string
 "3"`, `... is the number 1`, `... is null`, `... is deleted`, and `a base
 with a packages map whose head loses it (v1 shape) is not a clean pass`; the
@@ -919,8 +929,10 @@ registry resolution as `{integrity}` alone and writes `tarball` only when
 the URL is not the registry's standard one. So "no URL" is not "nowhere to
 compare from": `checks/tamper.ts`'s `impliedRegistryEntry` gives such an
 entry the tarball its registry serves for name@version (the scope pin, else
-the project default registry, else the public one -- both control inputs
-read from the base on a pull request, like every other .npmrc fact), and
+the project default registry, else the public one -- read from the base
+ref only under `--trust-base`; under plain `--base` the head's `.npmrc` is
+used, exactly as `.dep-guard.json` is, so a head that edits its own
+`.npmrc` moves this input), and
 `compare` runs on the result. Before this, `{integrity: A}` becoming
 `{integrity: B, tarball: <anywhere>}` at one version returned early on
 "one side has no URL" and scanned clean. Only an entry with an integrity
@@ -983,14 +995,33 @@ Second, `checks/tamper.ts`'s lockfile walk used to skip an ADDED entry
 outright ("nothing to compare it against"), so a transitive dependency
 newly resolved from a git or non-registry URL raised nothing.
 `lockEntrySource` now classifies the resolved URL of an added entry alone:
-git scheme or a forge source archive is git; any other scheme, or an
-http(s) URL that is neither on a host the project fetches registry tarballs
-from (the public registries and every `.npmrc` pin or default registry) nor
-shaped like a registry tarball path, is a url source. The host allowance is
-a judgment: a registry serving tarballs from a path with no `/-/` segment
-would otherwise read as a url source on every dependency it serves. A
-dependency the specifier walk already reported is not reported again under a
-second spelling of the signal (`sourceReported`). `lockfiles/pnpm.ts` now
+git scheme or a forge source archive is git; any other scheme is a url
+source; an http(s) URL is judged by HOST first: a host outside the registry
+set (the public registries plus every `.npmrc` pin or default registry --
+the pins come from the base only under `--trust-base`) is a url source
+whatever its path looks like, because the path is the part an attacker
+chooses. Path shape only grades severity: a registry-shaped path
+(`/name/-/file.tgz`, or the GitHub Packages `/download/@scope/name/ver/sha`)
+on an unknown host is `high`, anything else `critical`, and the message says
+to declare a legitimate private registry in the project `.npmrc`
+(`.dep-guard.json` has no key for this and none was added). Tests `B2:
+an evil host with a registry-shaped path blocks under --base, at high,
+naming the .npmrc remedy`, `... unshaped path is critical`, `under
+--trust-base a head .npmrc that vouches for the evil host does not clear
+it`, `a host pinned in the project .npmrc raises nothing`, and `GitHub
+Packages with the host pinned raises nothing, and without the pin it is a
+finding`. A dependency the specifier walk already reported is not reported
+again under a second spelling of the signal, but only when the added
+entry's canonical source (`declaredSourceIdentity` against `lockEntrySource`'s
+identity: same repo for git, same host and path for a url) equals the
+declared one; matching on the package name alone let one declared git
+dependency hide a nested copy fetched from an attacker's host (tests `B1:
+delta mode reports the nested evil url source...` and `audit mode reports the
+nested evil url source at critical`). The dedupe key for findings now
+includes the lockfile path, so the same signal in two lockfiles names both
+(`N6`). A lockfile present only on the head side is compared against the
+base's primary lockfile when no same-path or same-format file exists (`N2`).
+`lockfiles/pnpm.ts` now
 records a pnpm `{type: git, repo, commit}` resolution as
 `git+<repo>#<commit>`; before, it recorded nothing and a pnpm git entry
 could not be told from a bare one. Pinned by the `D4` tests: `"attacker/lodash"
@@ -1259,10 +1290,12 @@ The codes, and what each one means:
   throw and not a diagnostic on purpose: falling
   back would leave the entries map empty and every lockfile-backed check
   silently satisfied.
-- `lockfile-downgrade` -- the base side of a scan had an npm lockfile with a
-  `packages` map and the head side's has none (a v1 shape, or a version
-  field rewritten away from it). See "A lockfile that says less is not a
-  lockfile that says nothing".
+- `lockfile-downgrade` -- the base side of a scan had a lockfile this tool
+  parses (npm with a `packages` map, or pnpm) and the head side has an npm
+  lockfile with no `packages` map (a v1 file), or has lockfiles but none this
+  tool parses (v1 npm, yarn, bun, binary). A head with no lockfile at all is
+  not this error. See "A lockfile that says less is not a lockfile that says
+  nothing".
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
   corpus is absent, damaged, or -- for `corpus-corrupt` specifically --
   valid but written in a shape this build refuses to trust: a
