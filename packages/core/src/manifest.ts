@@ -51,6 +51,78 @@ function parseAliasTarget(rest: string): string {
   return atIndex > 0 ? rest.slice(0, atIndex) : rest;
 }
 
+// The hosted-git-info shorthand schemes npm resolves to a git repository:
+// "github:owner/repo", "gitlab:owner/repo", "bitbucket:owner/repo",
+// "gist:id" and "sourcehut:~owner/repo" (hosted-git-info's own host table).
+const HOSTED_GIT_SCHEMES = ['github:', 'gitlab:', 'bitbucket:', 'gist:', 'sourcehut:'];
+
+// A path a package manager reads as a local file before it considers any
+// git spelling (npm-package-arg's isFilespec): "./x", "../x", "/x", "~/x",
+// and a Windows drive path. None of these is a git shorthand even though
+// most contain a slash.
+const LOCAL_PATH_SPEC = /^(?:[.]|~[/]|[/\\]|[a-zA-Z]:)/;
+
+// The bare "owner/repo" shorthand, with an optional "#ref": npm treats a
+// dependency specifier of this shape as github:owner/repo. This is
+// hosted-git-info's isGitHubShorthand rule, kept as close to verbatim as
+// its logic allows because the two have to agree on which strings are git:
+// a slash that is not the first character and not at the end, no
+// whitespace, "@" or ":" before any "#", and only one slash before any "#".
+// Registry specifiers (a version, a range, a dist-tag) never contain a
+// slash, so nothing an ordinary dependency is written as reaches this.
+function isGitHubShorthand(spec: string): boolean {
+  const firstHash = spec.indexOf('#');
+  const firstSlash = spec.indexOf('/');
+  const secondSlash = spec.indexOf('/', firstSlash + 1);
+  const firstColon = spec.indexOf(':');
+  const firstSpace = /\s/.exec(spec);
+  const firstAt = spec.indexOf('@');
+
+  const spaceOnlyAfterHash = firstSpace === null || (firstHash > -1 && firstSpace.index > firstHash);
+  const atOnlyAfterHash = firstAt === -1 || (firstHash > -1 && firstAt > firstHash);
+  const colonOnlyAfterHash = firstColon === -1 || (firstHash > -1 && firstColon > firstHash);
+  const secondSlashOnlyAfterHash = secondSlash === -1 || (firstHash > -1 && secondSlash > firstHash);
+  const hasSlash = firstSlash > 0;
+  const doesNotEndWithSlash = firstHash > -1 ? spec[firstHash - 1] !== '/' : !spec.endsWith('/');
+  const doesNotStartWithDot = !spec.startsWith('.');
+
+  return (
+    spaceOnlyAfterHash &&
+    hasSlash &&
+    doesNotEndWithSlash &&
+    doesNotStartWithDot &&
+    atOnlyAfterHash &&
+    colonOnlyAfterHash &&
+    secondSlashOnlyAfterHash
+  );
+}
+
+// scp-style git: "git@github.com:owner/repo(.git)(#ref)". npm reads this
+// shape as git only for the hosts hosted-git-info knows (github.com,
+// gist.github.com, gitlab.com, bitbucket.org, git.sr.ht) and only with a
+// path that does not start with a slash; for any other host it reads the
+// same string as a local directory (checked against npm's bundled
+// npm-package-arg), so an unknown host is deliberately not git here. A
+// registry specifier never contains "@" followed later by ":", and the
+// "npm:" alias prefix is handled before this is reached.
+const SCP_STYLE_GIT = /^[^@\s/:]+@(?:github\.com|gist\.github\.com|gitlab\.com|bitbucket\.org|git\.sr\.ht):[^/\s][^\s]*$/;
+
+function isGitSpecifier(specifier: string): boolean {
+  const lower = specifier.toLowerCase();
+  if (
+    lower.startsWith('git+') ||
+    lower.startsWith('git:') ||
+    lower.startsWith('ssh://') ||
+    HOSTED_GIT_SCHEMES.some((scheme) => lower.startsWith(scheme))
+  ) {
+    return true;
+  }
+  if (LOCAL_PATH_SPEC.test(specifier)) {
+    return false;
+  }
+  return SCP_STYLE_GIT.test(specifier) || isGitHubShorthand(specifier);
+}
+
 function classifySpecifier(name: string, specifier: string): { protocol: Protocol; registryName: string } {
   if (specifier.startsWith('workspace:')) {
     return { protocol: 'workspace', registryName: name };
@@ -67,18 +139,14 @@ function classifySpecifier(name: string, specifier: string): { protocol: Protoco
   if (specifier.startsWith('file:')) {
     return { protocol: 'file', registryName: name };
   }
-  if (
-    specifier.startsWith('git+') ||
-    specifier.startsWith('github:') ||
-    specifier.startsWith('git:')
-  ) {
-    return { protocol: 'git', registryName: name };
-  }
   if (specifier.startsWith('http://') || specifier.startsWith('https://')) {
     return { protocol: 'url', registryName: name };
   }
   if (specifier.startsWith('npm:')) {
     return { protocol: 'alias', registryName: parseAliasTarget(specifier.slice(4)) };
+  }
+  if (isGitSpecifier(specifier)) {
+    return { protocol: 'git', registryName: name };
   }
   return { protocol: 'registry', registryName: name };
 }

@@ -46,6 +46,11 @@ function installedNameFromKey(key: string): string | undefined {
 // the lockfile.
 export const UNVERIFIABLE_NAME_CODE = 'npm-lockfile-unverifiable-name';
 
+// The diagnostic code for a lockfile with no "packages" map at all (a real
+// v1 lockfile). delta.ts reads it to tell "the base side was parsed and
+// this side was not" apart from "neither side ever had a packages map".
+export const NPM_LOCKFILE_V1_CODE = 'npm-lockfile-v1';
+
 function entryFromPackageValue(
   path: string,
   key: string,
@@ -113,31 +118,52 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
 
   const lockfileVersion = parsed.lockfileVersion;
   const versionNumber = typeof lockfileVersion === 'number' ? lockfileVersion : undefined;
+  const versionLabel = lockfileVersion === undefined ? '(absent)' : JSON.stringify(lockfileVersion);
 
-  if (versionNumber === undefined || versionNumber <= 1) {
-    // v1 lockfiles (and any lockfile with no numeric lockfileVersion field
-    // at all) use a nested "dependencies" tree instead of a flat
-    // "packages" map. npm still installs from them, but dep-guard treats
-    // them as legacy and out of scope, reporting a diagnostic instead of
-    // throwing or guessing at the nested v1 shape. This is the only
-    // "no packages map" case that is a diagnostic rather than a throw.
+  // The packages map decides what is parsed, never the lockfileVersion
+  // field. npm reads a "packages" map whenever one is there, whatever the
+  // version field says -- a string "3", the number 1, null, and a deleted
+  // field all install the map's entries (verified with npm ls
+  // --package-lock-only) -- so deciding "v1, skip everything" from the
+  // version alone let a pull request tamper an entry, rewrite one field,
+  // and scan clean with only a diagnostic.
+  const hasPackagesKey = Object.hasOwn(parsed, 'packages');
+  const packages = parsed.packages;
+
+  if (!hasPackagesKey) {
+    if (versionNumber !== undefined && versionNumber >= 2) {
+      // A lockfile declaring lockfileVersion >= 2 promises a flat
+      // "packages" map. If it is missing -- e.g. a hand edit deleted one
+      // key -- silently falling back to the benign v1 diagnostic would
+      // fail open: entries would come back empty with no error, and every
+      // lockfile-backed check downstream would silently stop firing.
+      // Throw instead so a corrupt v2/v3 lockfile is loud, not silent.
+      throw new DepGuardError(
+        `${path}: lockfileVersion ${versionNumber} declared but "packages" is missing or not an object`,
+        'lockfile-parse'
+      );
+    }
+    // A genuine v1 lockfile (or one with no usable version field and no
+    // packages map): a nested "dependencies" tree instead of a flat
+    // "packages" map. npm still installs from it, but dep-guard treats it
+    // as legacy and out of scope, reporting a diagnostic instead of
+    // guessing at the nested v1 shape. computeDelta turns "the base side
+    // had a packages map and this side does not" into a hard failure, so
+    // this diagnostic is only ever the whole story when neither side ever
+    // had one.
     diagnostics.push({
-      code: 'npm-lockfile-v1',
-      message: `${path}: lockfileVersion ${versionNumber ?? '(absent)'} has no "packages" map; upgrade to lockfileVersion 2 or 3 for dep-guard to inspect it`,
+      code: NPM_LOCKFILE_V1_CODE,
+      message: `${path}: lockfileVersion ${versionLabel} has no "packages" map; upgrade to lockfileVersion 2 or 3 for dep-guard to inspect it`,
     });
     return { format: 'npm', path, entries, diagnostics, workspaceLocalNames: new Set() };
   }
 
-  const packages = parsed.packages;
   if (!isPlainObject(packages)) {
-    // A lockfile declaring lockfileVersion >= 2 promises a flat "packages"
-    // map. If it is missing, null, or not an object -- e.g. a hand edit
-    // deleted one key -- silently falling back to the benign v1 diagnostic
-    // would fail open: entries would come back empty with no error, and
-    // every lockfile-backed check downstream would silently stop firing.
-    // Throw instead so a corrupt v2/v3 lockfile is loud, not silent.
+    // A "packages" key that is null, an array, or a scalar is not a v1
+    // lockfile (that has no such key at all); it is a corrupt one, and
+    // failing open on it would silently stop every lockfile-backed check.
     throw new DepGuardError(
-      `${path}: lockfileVersion ${versionNumber} declared but "packages" is missing or not an object`,
+      `${path}: lockfileVersion ${versionLabel} declared but "packages" is missing or not an object`,
       'lockfile-parse'
     );
   }

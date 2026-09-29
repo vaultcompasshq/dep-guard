@@ -69,7 +69,14 @@ Six rules, all offline and deterministic (plus four optional online checks
   repointed within the same host. It also reads the declared specifier, so a
   dependency pointed at a git or url source instead of the registry is
   reported even in a repository whose lockfile format this tool cannot
-  parse. Any revision that MOVES a dependency to a git or url source blocks
+  parse. Every spelling npm reads as git counts: `github:`, `gitlab:`,
+  `bitbucket:`, `gist:`, `sourcehut:`, a bare `owner/repo` (with or without
+  `#ref`), `git+...`, `git://`, `ssh://`, and scp-style `git@github.com:o/r`
+  for the hosts npm knows. That covers only what a manifest declares: in a
+  yarn or bun repository a transitive dependency that arrives from a git or
+  url source is invisible, because no lockfile entry is read for it. In an
+  npm or pnpm repository a lockfile entry that is newly added from a git or
+  non-registry source is reported even when no manifest declares it. Any revision that MOVES a dependency to a git or url source blocks
   at `critical`, pinned to a commit or not: an attacker's fork pinned to a
   commit is still an attacker's fork. The one softened case is a scan with
   no earlier revision to compare against, where every dependency reads as
@@ -895,7 +902,27 @@ Coverage is honest per format rather than uniform. Where a format cannot
 answer a question, the scan says so in a diagnostic instead of staying
 quiet:
 
-- `package-lock.json` v2 and v3 -- full coverage. Every finding's identity
+- `package-lock.json` and `npm-shrinkwrap.json` v2 and v3 -- full coverage.
+  The `packages` map is read whenever it exists, whatever `lockfileVersion`
+  says (npm installs from it either way). A file with no `packages` map at
+  all is a real v1 lockfile: it gets a diagnostic and no entries. If the
+  base side had a lockfile dep-guard parses and the head side has none it
+  parses (a v1 npm file, yarn, bun, or a binary lockfile), the scan fails
+  with exit 2 rather than passing, because that change removes what the
+  checks read while the package manager keeps installing. A genuine
+  migration to yarn or bun trips this too, on purpose: a format switch is
+  how a tampered lockfile escapes inspection. Either review the new
+  lockfile by hand and merge with an admin override of the failing check,
+  or first land a separate, reviewed pull request that relaxes the gate on
+  the base branch (under conductor, `enforce: false` on the dependencies
+  gate in `.guardrails.yaml`; for the standalone action, `continue-on-error`
+  on the workflow step), then land the migration, then restore the setting
+  in a third pull request. The migration pull request cannot relax the gate
+  for itself, and an advisory mode does not help, because this is a
+  could-not-run (exit 2), not a finding. A
+  lockfile deleted with nothing in its place is not covered by this, so
+  deleting the lockfile in one pull request and adding `yarn.lock` in the
+  next gets past it; that gap is known and scheduled. Every finding's identity
   (its package name) always comes from the lockfile key itself, or from a
   manifest declaration -- never from a packages entry's own `name` field,
   which is written by whoever committed the lockfile and is not something
@@ -910,11 +937,26 @@ quiet:
   that diagnostic for a perfectly genuine alias too -- expected noise for
   such a registry, never a wrong finding, since the affected entry simply
   falls back to being looked up under its lockfile key like any other.
-- `pnpm-lock.yaml` v9+ -- full, except install scripts, which the format
-  stopped recording. Additions to `onlyBuiltDependencies` are used instead.
-  A transitive `npm:` alias never needed special handling here: pnpm's
-  `packages` map is already keyed by registry identity, not by whatever name
-  a dependent's own alias used to reach it.
+- `pnpm-lock.yaml` v9+ -- host, integrity, tarball and git-source checks,
+  but not install scripts, which the format stopped recording. Additions to
+  `onlyBuiltDependencies` are used instead. pnpm records an ordinary
+  registry resolution as an integrity hash alone and writes a tarball URL
+  only when it is not the registry's standard one, so an entry with no URL
+  is compared as the default registry's tarball for its name and version
+  (the scope pin or default registry in `.npmrc` if there is one): an entry
+  that gains a URL on another host, or on another package's tarball, is a
+  finding. pnpm does not record which registry served a resolution, so a
+  registry configured somewhere dep-guard cannot see (a user-level
+  `~/.npmrc`, an environment variable) is not known to it. A transitive
+  `npm:` alias needs no special handling: pnpm's `packages` map is already
+  keyed by registry identity, not by whatever name a dependent's own alias
+  used to reach it.
+- More than one lockfile at the root -- every npm and pnpm lockfile present
+  is checked (`npm-shrinkwrap.json`, `package-lock.json`, `pnpm-lock.yaml`),
+  and a `multiple-lockfiles` diagnostic names them. Which one an install
+  honours depends on the package manager in use, so a clean file never
+  stands in for a tampered one. `yarn.lock` and `bun.lock` beside them are
+  not parsed either way.
 - `yarn.lock`, `bun.lock` -- manifest-level checks only. Neither records
   install scripts, and yarn berry records no resolved URL. A transitive
   alias in either format is therefore invisible the same way every other

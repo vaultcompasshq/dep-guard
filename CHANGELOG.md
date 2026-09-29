@@ -10,6 +10,74 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+Minor on both published packages, per the stability policy: 0.x minors may
+change scanner behavior, and this one does. Scans that used to exit 0 can
+now exit 1 (new findings) or 2 (a `lockfile-downgrade` error), and a
+repository with more than one lockfile is now checked against all of them.
+
+### Fixed
+
+Four ways a tampered or dangerous dependency change scanned clean, found by
+an independent audit:
+
+- An npm lockfile was judged "v1, skip everything" from `lockfileVersion`
+  alone. Tampering an entry and setting `lockfileVersion` to the string
+  `"3"`, to `1`, to `null`, or deleting it gave exit 0 with only an
+  `npm-lockfile-v1` diagnostic, while npm still installs the tampered entry.
+  The `packages` map is now read whenever it exists, whatever the version
+  field says; the diagnostic is kept for a lockfile with no `packages` map
+  at all. A base side that had a `packages` map against a head side that has
+  none is now a `lockfile-downgrade` error (exit 2) rather than a
+  diagnostic.
+- A pnpm registry entry records only an integrity hash and no tarball URL,
+  and the tamper check returned early whenever one side had no URL. An entry
+  going from `{integrity: A}` to `{integrity: B, tarball: <another host>}`
+  at the same version scanned clean, as did a repoint to another package's
+  registry tarball. A missing pnpm tarball is now compared as the registry's
+  implied tarball for that name and version (honouring `.npmrc` scope pins
+  and the default registry), so gaining a URL reads as `host-changed` or
+  `tarball-repointed`. Separately, a rewritten hash at a held version where
+  only one side records a location is now `integrity-changed`, which also
+  covers an npm entry that drops `resolved`.
+- Only the first lockfile found was read, `npm-shrinkwrap.json` never was,
+  and `package-lock.json` came first. A clean `package-lock.json` beside a
+  tampered `pnpm-lock.yaml`, or a tampered `npm-shrinkwrap.json` (which npm
+  prefers) beside a clean `package-lock.json`, exited 0. Every npm and pnpm
+  lockfile at the root is now parsed and checked, `npm-shrinkwrap.json`
+  included, and a `multiple-lockfiles` diagnostic names them.
+- The specifier classifier read only `git+`, `github:` and `git:` as git.
+  Bare `owner/repo` (with or without `#ref`), `gitlab:`, `bitbucket:`,
+  `gist:`, `sourcehut:`, `ssh://` and scp-style `git@github.com:o/r`
+  classified as registry, so the git-source signal never ran. They now
+  follow npm-package-arg's rules. Also, a lockfile entry newly ADDED from a
+  git or non-registry source (a transitive dependency no manifest declares)
+  was skipped by the lockfile walk; it now raises the git-source or
+  url-source signal in npm and pnpm repositories. A pnpm `type: git`
+  resolution is now recorded, in URL and scp-style spellings, and a pnpm key
+  with an embedded `@` (`name@git+ssh://git@host/...`) is parsed instead of
+  skipped. An added entry is judged by host first: an http(s) host that is
+  not the public registry or named by the project `.npmrc` (default or scope
+  registry) is a url-source finding whatever its path looks like, `high` for
+  a registry-shaped path and `critical` otherwise, so a private registry
+  host has to be declared in `.npmrc` to stay quiet. A declared git
+  dependency no longer hides a different source resolved under the same name.
+- The downgrade error also covers a base with a parsed lockfile against a
+  head whose lockfiles are all unparsed (v1 npm, yarn, bun, binary); a
+  lockfile deleted with nothing in its place is not covered by it, so a
+  two-step bypass (delete the lockfile in one pull request, add `yarn.lock`
+  in the next) is a known gap, scheduled separately. The error now says why
+  it stops (a format switch is how a tampered lockfile escapes inspection)
+  and what a maintainer does for a genuine migration to yarn or bun: review
+  the new lockfile by hand and merge with an admin override of the failing
+  check, or first land a separate, reviewed pull request that relaxes the
+  gate on the base branch (conductor: `enforce: false` on the dependencies
+  gate; standalone action: `continue-on-error` on the workflow step), then
+  the migration, then restore the setting in a third pull request. An
+  advisory mode does not help: the error is exit 2, not a finding. A
+  lockfile that exists only on the head side is compared against the base's
+  primary lockfile, and the same signal in two lockfiles is reported for
+  each.
+
 ### Added
 
 - The run-level `online` summary carries a new `cacheHits` count beside

@@ -256,6 +256,17 @@ function parsePackageKey(key: string): { name: string; version: string } | undef
   // "@", so this is unambiguous. An "@" at index 0 is the scope marker,
   // not a separator, and is excluded via atIndex > 0 (mirrors
   // manifest.ts#parseAliasTarget's scope-aware split).
+  //
+  // A URL-shaped version ("name@git+ssh://git@host/o/r.git#sha") is the
+  // exception, and it is recognised first: the version is everything after
+  // the FIRST "@" that is followed by a "scheme://", because the URL's own
+  // userinfo "@" would otherwise be taken for the separator. Skipping such a
+  // key with a diagnostic, as this once did, left a newly added git
+  // dependency in a pnpm lockfile unread.
+  const urlVersion = /^(@?[^@]+)@([a-zA-Z][a-zA-Z0-9+.-]*:\/\/.+)$/.exec(rest);
+  if (urlVersion !== null) {
+    return { name: urlVersion[1], version: urlVersion[2] };
+  }
   const atIndex = rest.lastIndexOf('@');
   if (atIndex <= 0) {
     return undefined;
@@ -284,6 +295,28 @@ function entryFromPackageValue(value: Record<string, unknown>, keyVersion: strin
     }
     if (typeof resolution.integrity === 'string') {
       entry.integrity = resolution.integrity;
+    }
+    // A git resolution carries no tarball and no hash:
+    // {type: git, repo: <url>, commit: <sha>}. Left unread, a git-sourced
+    // package was indistinguishable from a bare one and no source signal
+    // could ever fire on it. It is recorded in the spelling npm writes for
+    // the same source (git+<url>#<commit>), so the one resolution parser
+    // classifies it as git. An scp-style repo ("git@host:o/r.git") has no
+    // scheme and is the same ssh source, spelled git+ssh://git@host/o/r.git.
+    // A repo that is neither is left unrecorded rather than invented into a
+    // URL nothing could parse.
+    if (entry.resolvedUrl === undefined && resolution.type === 'git' && typeof resolution.repo === 'string') {
+      const scp = /^([^@\s/:]+)@([^:\s/]+):(?!\/)(.+)$/.exec(resolution.repo);
+      const repo = resolution.repo.includes('://')
+        ? /^(?:git\+|git:|ssh:)/.test(resolution.repo)
+          ? resolution.repo
+          : `git+${resolution.repo}`
+        : scp !== null
+          ? `git+ssh://${scp[1]}@${scp[2]}/${scp[3]}`
+          : null;
+      if (repo !== null) {
+        entry.resolvedUrl = typeof resolution.commit === 'string' ? `${repo}#${resolution.commit}` : repo;
+      }
     }
   }
   // hasInstallScript is intentionally never set here: pnpm v9 dropped that

@@ -3,7 +3,8 @@ import type { DepType, ManifestDep, Protocol } from './manifest.js';
 import { originOf } from './resolution.js';
 import type { RepoState } from './state.js';
 import { comparisonTamperSignalList } from './tamper-signals.js';
-import type { Diagnostic } from './types.js';
+import { DepGuardError, type Diagnostic } from './types.js';
+import { NPM_LOCKFILE_V1_CODE } from './lockfiles/npm.js';
 
 export interface DepChange {
   name: string;
@@ -61,6 +62,11 @@ export interface LockEntryChange {
   kind: 'added' | 'changed';
   manifestPath: string;
   lockfilePath: string;
+  // The format of the lockfile this entry came from. Optional so a change
+  // built by hand falls back to the delta's own format; set by the lockfile
+  // walk because a scan can now diff several lockfiles of different formats
+  // in one delta, and only the entry knows which one it belongs to.
+  lockfileFormat?: LockfileFormat;
   before?: LockEntry;
   after: LockEntry;
   // The `before` entry was a guess between several the selector could not
@@ -489,6 +495,7 @@ function diffLockEntries(
         // one finding.
         manifestPath: declared?.manifestPath ?? after.path,
         lockfilePath: after.path,
+        lockfileFormat: after.format,
         before: counterpart.entry,
         after: entry,
         ...(counterpart.ambiguous
@@ -557,6 +564,90 @@ function onlyBuiltDifference(before: RepoState | null, after: RepoState): string
   return added;
 }
 
+// The npm lockfile parser reads a "packages" map whenever one exists, and
+// reports a v1 diagnostic only for a lockfile that has none (a real v1
+// lockfile, whose nested "dependencies" tree this tool does not read). A
+// base side that HAD a packages map and a head side that does not is
+// therefore not a legacy repository: it is a change that removes the only
+// structure the tamper checks read while the package manager keeps
+// installing from the head file. Treating that as a diagnostic is the
+// silent pass this refuses, so it stops the scan (exit 2) instead.
+//
+// Two shapes are refused. Per file: an npm lockfile that had a packages map
+// on the base side and has none now. Per repository: the base had a parsed
+// lockfile (npm with a packages map, or pnpm, with entries) and the head has
+// lockfiles but not one of them is parsed -- only v1 npm files, manifest-only
+// formats (yarn, bun) or a binary one -- so swapping the tampered lockfile
+// for a format this tool cannot read is not a way out. A head with NO
+// lockfile at all is deliberately not this rule's case: that is the
+// lockfile-missing path, handled separately.
+// Why the scan stops, and what a maintainer with a genuine migration (npm to
+// yarn or bun, say) does about it. The refusal is deliberate and cannot be
+// escaped from inside the tree being judged: switching to a format this
+// tool cannot read is exactly how a tampered lockfile would escape
+// inspection.
+const DOWNGRADE_REMEDY =
+  'This is refused because a format switch is how a tampered lockfile escapes inspection. ' +
+  'For a genuine migration, either (a) review the new lockfile by hand and merge with an admin ' +
+  'override of the failing check, or (b) first land a separate, reviewed pull request that relaxes ' +
+  'the gate on the base branch (under conductor, enforce: false on the dependencies gate in ' +
+  '.guardrails.yaml; for the standalone action, continue-on-error on the workflow step), then land ' +
+  'the migration, then restore the setting in a third pull request. The migration pull request ' +
+  'cannot relax the gate for itself, and an advisory mode does not help: this is a could-not-run ' +
+  '(exit 2), not a finding.';
+
+function refuseLockfileDowngrade(before: RepoState | null, after: RepoState): void {
+  if (before === null) {
+    return;
+  }
+  const isParsed = (lockfile: ParsedLockfile): boolean =>
+    (lockfile.format === 'npm' && !hasV1Diagnostic(lockfile)) || lockfile.format === 'pnpm';
+  const beforeParsed = lockfilesOf(before).filter(
+    (lockfile) => isParsed(lockfile) && (lockfile.format === 'npm' || lockfile.entries.size > 0)
+  );
+  const afterAll = lockfilesOf(after);
+  if (beforeParsed.length > 0 && afterAll.length > 0 && !afterAll.some(isParsed)) {
+    throw new DepGuardError(
+      `${afterAll.map((lockfile) => lockfile.path).join(', ')}: the base side of this scan had a ` +
+        `lockfile this tool reads (${beforeParsed[0].path}) and this side has only lockfiles it cannot ` +
+        'read (a v1 npm lockfile, or a yarn, bun or binary one), so the lockfile-backed checks would ' +
+        'silently stop while the package manager keeps installing; refusing to report a clean pass. ' +
+        DOWNGRADE_REMEDY,
+      'lockfile-downgrade'
+    );
+  }
+  const beforeNpm = lockfilesOf(before).filter(
+    (lockfile) => lockfile.format === 'npm' && !hasV1Diagnostic(lockfile)
+  );
+  if (beforeNpm.length === 0) {
+    return;
+  }
+  for (const lockfile of lockfilesOf(after)) {
+    if (lockfile.format !== 'npm' || !hasV1Diagnostic(lockfile)) {
+      continue;
+    }
+    // Same path first, then any parsed npm lockfile on the base side: a
+    // package-lock.json replaced by an npm-shrinkwrap.json is the same
+    // downgrade under a different name.
+    const counterpart = beforeNpm.find((candidate) => candidate.path === lockfile.path) ?? beforeNpm[0];
+    throw new DepGuardError(
+      `${lockfile.path}: the base side of this scan has a "packages" map (${counterpart.path}) and this ` +
+        'side has none, so the lockfile-backed checks would silently stop reading it while npm ' +
+        'still installs from it; refusing to report a clean pass. ' +
+        DOWNGRADE_REMEDY,
+      'lockfile-downgrade'
+    );
+  }
+}
+
+function hasV1Diagnostic(lockfile: ParsedLockfile): boolean {
+  return lockfile.diagnostics.some((diagnostic) => diagnostic.code === NPM_LOCKFILE_V1_CODE);
+}
+
+function lockfilesOf(state: RepoState): ParsedLockfile[] {
+  return [...(state.lockfile === null ? [] : [state.lockfile]), ...(state.extraLockfiles ?? [])];
+}
+
 // Diffs two parsed sides into the set of added and changed dependencies.
 // A before of null is audit mode: nothing to compare against, so every
 // non-exempt dependency reads as added. Removals are deliberately absent
@@ -574,6 +665,7 @@ function onlyBuiltDifference(before: RepoState | null, after: RepoState): string
 // transitive entry, and a tampered entry hidden behind a same-version
 // decoy, both scan clean.
 export function computeDelta(before: RepoState | null, after: RepoState): DependencyDelta {
+  refuseLockfileDowngrade(before, after);
   const beforeDeps = indexDeps(before);
   const deltaDiagnostics: Diagnostic[] = [];
   const changes: DepChange[] = [];
@@ -666,6 +758,52 @@ export function computeDelta(before: RepoState | null, after: RepoState): Depend
 
   const lockEntries = diffLockEntries(before?.lockfile ?? null, after.lockfile, after.manifests);
 
+  // Every other npm or pnpm lockfile at the root is diffed the same way,
+  // against the before-side lockfile it corresponds to (same path first,
+  // then the same format). Which file an install honours is the package
+  // manager's choice, not something this scan can see, so a clean one must
+  // not stand in for a tampered one. Their entries join the same
+  // lockEntryChanges list the checks already walk, each tagged with its own
+  // path and format.
+  const primaryChanges = [...lockEntries.changes];
+  const beforeLockfiles = before === null ? [] : lockfilesOf(before);
+  for (const extra of after.extraLockfiles ?? []) {
+    const counterpart =
+      beforeLockfiles.find((candidate) => candidate.path === extra.path) ??
+      beforeLockfiles.find((candidate) => candidate.format === extra.format) ??
+      // A lockfile that exists only on the head side (a new pnpm-lock.yaml
+      // beside an existing package-lock.json) has no same-path or
+      // same-format counterpart, and comparing it to nothing would wave it
+      // through as all-added. The base's primary lockfile, whatever its
+      // format, is the closest thing the base had to say about these names.
+      before?.lockfile ??
+      null;
+    if (before === null) {
+      deltaDiagnostics.push({
+        code: AUDIT_NO_TAMPER_COMPARISON,
+        message:
+          `${extra.path}: this scan has no earlier revision to compare against, so the ` +
+          `lockfile-tamper signals that work by comparison (${comparisonTamperSignalList()}) could ` +
+          'not be evaluated for any entry in this lockfile; only the specifier-based git-source and ' +
+          'url-source signals ran',
+      });
+    }
+    const extraDiff = diffLockEntries(counterpart, extra, after.manifests);
+    const uncomparable = extraDiff.changes.filter((entry) => entry.before === undefined).length;
+    if (before !== null && uncomparable > 0) {
+      deltaDiagnostics.push({
+        code: NEW_LOCK_ENTRIES,
+        message:
+          `${extra.path}: ${uncomparable} lockfile entr${uncomparable === 1 ? 'y is' : 'ies are'} ` +
+          'new in this change with no earlier resolution behind them, so the lockfile-tamper signals ' +
+          `that work by comparison (${comparisonTamperSignalList()}) could not be evaluated for ` +
+          `${uncomparable === 1 ? 'it' : 'them'}`,
+      });
+    }
+    lockEntries.changes.push(...extraDiff.changes);
+    lockEntries.diagnostics.push(...extraDiff.diagnostics);
+  }
+
   // An entry with no before side has nothing for the comparison-based
   // signals to read, exactly as in audit mode -- and in a delta mode that
   // gap used to be silent, so a fresh install was indistinguishable from a
@@ -678,7 +816,7 @@ export function computeDelta(before: RepoState | null, after: RepoState): Depend
   // diagnostics that name a specific thing the engine could not judge.
   // Judging a new entry on its own merits, rather than by comparison, is a
   // separate rule and is not in this scan's scope.
-  const uncomparableAdded = lockEntries.changes.filter((entry) => entry.before === undefined).length;
+  const uncomparableAdded = primaryChanges.filter((entry) => entry.before === undefined).length;
   if (before !== null && uncomparableAdded > 0 && after.lockfile !== null) {
     deltaDiagnostics.push({
       code: NEW_LOCK_ENTRIES,
@@ -701,6 +839,8 @@ export function computeDelta(before: RepoState | null, after: RepoState): Depend
     diagnostics: dedupeDiagnostics([
       ...(before?.lockfile?.diagnostics ?? []),
       ...(after.lockfile?.diagnostics ?? []),
+      ...(before?.extraLockfiles ?? []).flatMap((extra) => extra.diagnostics),
+      ...(after.extraLockfiles ?? []).flatMap((extra) => extra.diagnostics),
       ...deltaDiagnostics,
       ...lockEntries.diagnostics,
     ]),
