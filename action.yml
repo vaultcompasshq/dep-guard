@@ -9,7 +9,7 @@ inputs:
   version:
     description: |
       The exact version of `@vaultcompass/dep-guard` to install, such as
-      `0.9.0`. Validated against `^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`,
+      `0.10.0`. Validated against `^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`,
       and the default is the SCANNER version this action tag shipped with,
       which is not always the same number as the tag: an action-only release
       moves the tag and leaves the scanner where it is.
@@ -39,7 +39,7 @@ inputs:
       request is not the place to widen a pattern for the convenience of
       testing one.
     required: false
-    default: 0.9.0
+    default: 0.10.0
   path:
     description: |
       Path to scan, relative to the workspace root. Must be 1..256 characters
@@ -238,7 +238,7 @@ runs:
         # file from the HEAD, so the `version:` input is written by the pull
         # request being judged. The shape check above proves the input names a
         # version and says nothing about WHICH one: every published version
-        # clears it, and twelve are published, 0.1.0 through 0.9.0.
+        # clears it, and thirteen are published, 0.1.0 through 0.10.0.
         #
         # WHAT ALREADY STOPS A BACKWARD PIN TODAY is not the shape check but a
         # FLAG. `--trust-base` arrived in the 0.6.0 scanner, the run step
@@ -251,14 +251,14 @@ runs:
         # a de facto flag-compatibility floor at 0.6.0, and the rule makes it
         # explicit instead of leaving it to be discovered.
         #
-        # The day a 0.10.0 scanner ships with new rules, a pull request pins
-        # 0.9.0, which knows `--trust-base` and runs cleanly, and is judged by
+        # The day a 0.11.0 scanner ships with new rules, a pull request pins
+        # 0.10.0, which knows `--trust-base` and runs cleanly, and is judged by
         # the older rule set it chose for itself.
         #
         # This is the same class of hole as `trust-base: off`, refused by name a
         # few checks below for exactly this reason. The difference is what a
         # reviewer sees: deleting a security step reads as deleting a security
-        # step, while `version: 0.9.0` reads as ordinary version management.
+        # step, while `version: 0.10.0` reads as ordinary version management.
         #
         # FORWARD STAYS ALLOWED, ON AN ASSUMPTION THIS RULE DOES NOT ENFORCE.
         # The rule assumes a newer scanner is at least as strict as the one this
@@ -275,7 +275,7 @@ runs:
         # DG_TAG_SCANNER is THE TESTED SCANNER THIS TAG SHIPS, which moves with
         # the published packages, and it is the `version` input's default. It is
         # compared against as a hardcoded constant because `inputs.version` looks
-        # identical whether the consumer wrote 0.9.0 or the default supplied it,
+        # identical whether the consumer wrote 0.10.0 or the default supplied it,
         # so the step cannot tell a pin from a default and the constant is the
         # only source of truth. It is safe to trust because action.yml comes
         # from the ref the consumer's workflow names, not from the pull
@@ -293,7 +293,7 @@ runs:
         # those in this file to end in a 40-character sha, and it cannot tell
         # prose from a step.)
         DG_TAG_SCANNER_MAJOR=0
-        DG_TAG_SCANNER_MINOR=9
+        DG_TAG_SCANNER_MINOR=10
         DG_TAG_SCANNER_PATCH=0
         DG_TAG_SCANNER="${DG_TAG_SCANNER_MAJOR}.${DG_TAG_SCANNER_MINOR}.${DG_TAG_SCANNER_PATCH}"
 

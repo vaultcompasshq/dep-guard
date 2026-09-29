@@ -10,10 +10,29 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-30
+
 Minor on both published packages, per the stability policy: 0.x minors may
-change scanner behavior, and this one does. Scans that used to exit 0 can
-now exit 1 (new findings) or 2 (a `lockfile-downgrade` error), and a
-repository with more than one lockfile is now checked against all of them.
+change scanner behavior, and this one does. `@vaultcompass/dep-guard` and
+`@vaultcompass/dep-guard-core` move from 0.9.0 to 0.10.0. The action's
+`version` input default and the `DG_TAG_SCANNER` constant move with them, so
+`vaultcompasshq/dep-guard@v0.10.0` installs `@vaultcompass/dep-guard@0.10.0`.
+Scans that used to exit 0 can now exit 1 (new findings) or 2 (a
+`lockfile-downgrade` error), and a repository with more than one lockfile is
+now checked against all of them.
+
+What a consumer will see:
+
+- A private registry host has to be named in the project `.npmrc` (as the
+  default registry or a scope registry). A new dependency resolved from an
+  http(s) host that is neither the public registry nor named there is now a
+  `url-source` finding.
+- A pull request that switches lockfile format, for example from
+  `package-lock.json` or `pnpm-lock.yaml` to `yarn.lock` or `bun.lock`, is
+  refused with exit 2 (`lockfile-downgrade`), and the error message names the
+  remedy for a genuine migration.
+- The online summary gains `cacheHits` beside `lookupsAttempted`, and the text
+  output's `online:` line prints it.
 
 ### Fixed
 
