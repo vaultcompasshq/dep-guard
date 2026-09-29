@@ -1525,7 +1525,7 @@ or which override, produced the deadline that expired.
 `ScanResult.run.online` is a sibling of `run.corpusBuiltAt`
 (`scan.ts:buildResult`), always present so a JSON consumer -- the conductor
 umbrella (issue conductor#72) in particular -- can read it unconditionally
-rather than branching on whether `--online` was on for this run. Five
+rather than branching on whether `--online` was on for this run. Six
 fields:
 
 - `enabled`: were online checks on for this run at all.
@@ -1557,14 +1557,22 @@ fields:
   are the one unit `lookupsAttempted` and `lookupsSkippedByDeadline` can
   share, which is what lets a consumer add them to answer "how many name
   lookups did the online checks want to make in total". Both are counted
-  per check, never per distinct name: a new name the corpus does not know
-  can be looked up by unknown-package, twice by registered-squat, and by
-  publish-age, and counts once in each -- the reason the fields
+  once per lookup, never per distinct name: a new name the corpus does not
+  know can be looked up by unknown-package, twice by registered-squat
+  (downloads, then creation date), and by publish-age, and counts once for
+  each of those lookups -- the reason the fields
   are two counts of the same kind of thing rather than one being requests
   and the other being candidates. A fresh counter is created per
   `enrichOnline` call (never a module-level total) so two scans in one
   process, which the shared on-disk cache singleton above already
   anticipates, cannot mix each other's counts.
+- `cacheHits` (issue #80): name lookups the on-disk cache answered, so
+  nothing was sent to the registry. Counted at the same cached-fetch call
+  sites as `lookupsAttempted` and in the same unit, once per lookup: a
+  cached fetch counts each name it is asked about in exactly one of the two.
+  `liveFetchPackument` is never cached and never adds to it.
+  `lookupsAttempted: 0` with `cacheHits` above 0 is a warm cache; both 0 is
+  a run with nothing to look up.
 - `lookupsSkippedByDeadline`: skipped LOOKUPS, read back out of every
   `online-deadline-exceeded` diagnostic this run raised (`deadline.ts`'s
   `sumDeadlineSkipped`, parsing the count each diagnostic's own message

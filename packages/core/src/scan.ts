@@ -337,8 +337,15 @@ const SCAN_BACKOFF_CAP_MS = 8_000;
 // scans in one process (checkSingle and scan() can both run in a single
 // CLI invocation, per the `cache` singleton's own comment above) never mix
 // each other's counts the way a module-level mutable total would.
+//
+// cacheHits (issue #80) counts the other outcome of the same name lookups:
+// the ones the on-disk cache answered, so nothing was sent to the registry.
+// A cached fetch counts each name it is asked about in exactly one of the
+// two. lookupsAttempted 0 with cacheHits above 0 is a warm cache; 0 and 0 is
+// a run with nothing to look up.
 interface LookupCounter {
   attempted: number;
+  cacheHits: number;
 }
 
 async function cachedFetchWeeklyDownloads(
@@ -356,6 +363,7 @@ async function cachedFetchWeeklyDownloads(
       misses.push(name);
     }
   }
+  lookups.cacheHits += names.length - misses.length;
   if (misses.length > 0) {
     // One name per miss, regardless of how many HTTP requests
     // fetchWeeklyDownloads itself turns this array into -- see this
@@ -418,6 +426,7 @@ async function cachedFetchPackument(
   const store = sharedCache();
   const hit = store.get(`created:${name}`);
   if (hit !== undefined) {
+    lookups.cacheHits += 1;
     return { createdAt: hit as string | null };
   }
   lookups.attempted += 1;
@@ -477,6 +486,7 @@ async function cachedFetchPackumentVersionTimes(
   if (hit !== undefined) {
     const cached = hit as Record<string, string>;
     if (requestedVersions.every((version) => version in cached)) {
+      lookups.cacheHits += 1;
       return { versionTimes: cached };
     }
     // A version this call needs is missing from the cached map -- refetch
@@ -555,10 +565,15 @@ export interface OnlineRunSummary {
   // LookupCounter's own doc comment above for why this counts names, never
   // wrapper calls or raw HTTP requests: a single batched downloads call can
   // carry many names in one request, and this field has to stay in the same
-  // unit as lookupsSkippedByDeadline for the two to be addable. Counted per
-  // check, never per distinct name: a name that unknown-package,
-  // registered-squat and publish-age each look up counts once for each.
+  // unit as lookupsSkippedByDeadline for the two to be addable. Counted once
+  // per lookup, never per distinct name: one step can count a name twice
+  // (registered-squat looks up its downloads and then its creation date),
+  // and every other step that looks it up counts it again.
   lookupsAttempted: number;
+  // Name lookups answered from the on-disk cache, so nothing was sent to
+  // the registry (issue #80). Same unit and same once-per-lookup counting
+  // as lookupsAttempted.
+  cacheHits: number;
   // Skipped LOOKUPS once the budget was spent, read back out of every
   // online-deadline-exceeded diagnostic this run raised (deadline.ts's
   // sumDeadlineSkipped) rather than kept as a second, independently
@@ -576,6 +591,7 @@ const ONLINE_DISABLED_SUMMARY: OnlineRunSummary = {
   enabled: false,
   budgetMs: 0,
   lookupsAttempted: 0,
+  cacheHits: 0,
   lookupsSkippedByDeadline: 0,
   deadlineExceeded: false,
 };
@@ -589,7 +605,7 @@ async function enrichOnline(
   // Threaded through every real fetch below rather than kept at module
   // scope: see LookupCounter's own comment for why a fresh one per call is
   // what keeps two scans in one process from mixing counts.
-  const lookups: LookupCounter = { attempted: 0 };
+  const lookups: LookupCounter = { attempted: 0, cacheHits: 0 };
 
   const resolved = await resolveUnknownPackages(
     rawFindings,
@@ -655,6 +671,7 @@ async function enrichOnline(
       enabled: true,
       budgetMs,
       lookupsAttempted: lookups.attempted,
+      cacheHits: lookups.cacheHits,
       // Read back out of ctx.diagnostics rather than kept as a second,
       // independently-incremented count: see sumDeadlineSkipped's own
       // comment for why this is the number a human reading the same

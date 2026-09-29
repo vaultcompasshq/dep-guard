@@ -39,6 +39,7 @@ function scanResult(findings: Finding[], overrides: Partial<ScanResult['run']> =
         enabled: false,
         budgetMs: 0,
         lookupsAttempted: 0,
+        cacheHits: 0,
         lookupsSkippedByDeadline: 0,
         deadlineExceeded: false,
       },

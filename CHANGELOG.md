@@ -10,6 +10,20 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Added
+
+- The run-level `online` summary carries a new `cacheHits` count beside
+  `lookupsAttempted`. Both count the name lookups the online steps made;
+  `lookupsAttempted` counts those sent to the registry, `cacheHits` those
+  answered from the on-disk cache. A name is counted once per lookup, so one
+  step can count a name twice (registered-squat looks up downloads and then
+  the creation date) and several steps each count it again. Before this, a
+  run answered entirely from a warm cache and a run with nothing to look up
+  both reported `lookupsAttempted: 0`; `cacheHits` tells them apart (0 and 5
+  is a warm cache, 0 and 0 is nothing to look up). The text output's
+  `online:` line prints it. Every existing field is unchanged, and a
+  disabled run reports `cacheHits: 0` (issue #80).
+
 ## [0.9.0] - 2026-09-27
 
 Minor on both published packages, per the stability policy: 0.x minors may
