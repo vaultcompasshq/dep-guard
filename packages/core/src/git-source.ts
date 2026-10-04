@@ -3,7 +3,7 @@ import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
-import { parseNpmLockfile } from './lockfiles/npm.js';
+import { MissingPackagesMapError, parseNpmLockfile } from './lockfiles/npm.js';
 import { parseOnlyBuilt, parsePnpmLockfile } from './lockfiles/pnpm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
 import { parseManifest, type ParsedManifest } from './manifest.js';
@@ -108,6 +108,10 @@ const MISSING_PATH_CODES = new Set(['ENOENT', 'ENOTDIR', 'EISDIR']);
 
 const GLOB_UNSUPPORTED = 'workspace-glob-unsupported';
 const GLOB_UNEXPANDABLE = 'workspace-glob-unexpandable';
+// What a comparison side could not read, treated as absent there (see
+// SideRole). Each names the path or pattern and the side.
+const PATTERN_UNREAD_ON_COMPARISON_SIDE = 'workspace-pattern-unread-comparison-side';
+const LOCKFILE_UNREAD_ON_COMPARISON_SIDE = 'lockfile-unread-comparison-side';
 // Glob syntax package managers expand that this module does not: "?",
 // character classes, brace sets and extglob groups. A pattern using any of
 // them would otherwise be read as a literal directory name and quietly
@@ -1045,8 +1049,9 @@ async function expandPattern(
 //   - the directories the remaining positive patterns match, minus those an
 //     exclusion matches, are the workspaces.
 //
-// What this module cannot reproduce exactly refuses (exit 2) rather than
-// discovering less: a positive pattern with ".." or a drive or with glob
+// What this module cannot reproduce exactly refuses (exit 2) on the side
+// being judged rather than discovering less, and on a comparison side names
+// no members there, with a note: a positive pattern with ".." or a drive or with glob
 // syntax beyond "*" and "**". The message for a ".." pattern that resolves
 // inside the repository says to drop the segment; otherwise it says the
 // pattern names something outside the repository. The pattern "." is the
@@ -1057,7 +1062,8 @@ async function expandPattern(
 async function discoverWorkspaceDirs(
   source: FileSource,
   patterns: string[],
-  diagnostics: Diagnostic[]
+  diagnostics: Diagnostic[],
+  role: SideRole
 ): Promise<string[]> {
   const positives: string[] = [];
   let negatedPatterns: string[] = [];
@@ -1097,10 +1103,10 @@ async function discoverWorkspaceDirs(
   negatedPatterns = negatedPatterns.map(collapseSlashes);
 
   const dirs = new Set<string>();
-  for (const raw of positives) {
+  const resolvePositive = async (raw: string): Promise<void> => {
     const pattern = collapseSlashes(raw.replace(/\\/g, '/'));
     if (pattern === '') {
-      continue; // the repository root, which is always read
+      return; // the repository root, which is always read
     }
     const reach = patternReach(pattern);
     const staysInside = !/^[a-zA-Z]:/.test(pattern) && !path.posix.normalize(pattern).startsWith('..');
@@ -1128,7 +1134,7 @@ async function discoverWorkspaceDirs(
             ? `workspace pattern "${raw}": npm maps it to the repository root, whose package.json is always scanned; it adds nothing`
             : `workspace pattern "${raw}": has a "." segment, which npm maps to no workspace; it was ignored`,
       });
-      continue;
+      return;
     }
     if (UNEXPANDABLE_GLOB_SYNTAX.test(pattern)) {
       // Provably empty: the directory above the first segment that needs
@@ -1143,7 +1149,7 @@ async function discoverWorkspaceDirs(
           code: GLOB_UNSUPPORTED,
           message: `workspace pattern "${raw}": uses glob syntax this tool does not expand, and "${literalParent === '' ? '.' : literalParent}" has no subdirectories for it to match`,
         });
-        continue;
+        return;
       }
       throw new DepGuardError(
         `workspace pattern "${raw}": uses glob syntax this tool does not expand (only "*" and "**" ` +
@@ -1162,6 +1168,26 @@ async function discoverWorkspaceDirs(
         continue;
       }
       dirs.add(dir);
+    }
+  };
+  for (const raw of positives) {
+    try {
+      await resolvePositive(raw);
+    } catch (err) {
+      // On a comparison side a pattern this tool cannot expand contributes
+      // no members there. The judged side's members are then compared
+      // against fewer manifests, so their dependencies count as new: the
+      // stricter direction, and the pull request that rewrites the pattern
+      // is not refused for the side it replaces.
+      if (role.kind === 'judged' || !(err instanceof DepGuardError) || err.code !== GLOB_UNEXPANDABLE) {
+        throw err;
+      }
+      diagnostics.push({
+        code: PATTERN_UNREAD_ON_COMPARISON_SIDE,
+        message:
+          `workspace pattern "${raw}": could not be expanded on ${role.label}, so it named no ` +
+          "workspace packages there; the scanned side's packages are judged against what remains",
+      });
     }
   }
   return [...dirs];
@@ -1249,7 +1275,8 @@ async function loadLockfiles(
   diagnostics: Diagnostic[],
   // Root lockfiles treated as absent on this side (a symlink on a
   // comparison side); they are never read.
-  unread: ReadonlySet<string>
+  unread: ReadonlySet<string>,
+  role: SideRole
 ): Promise<{ lockfile: ParsedLockfile | null; extraLockfiles: ParsedLockfile[] }> {
   const loaded: ParsedLockfile[] = [];
   for (const [name, load] of LOCKFILE_CANDIDATES) {
@@ -1262,7 +1289,31 @@ async function loadLockfiles(
     if (content === null) {
       continue;
     }
-    loaded.push(load(name, content));
+    try {
+      loaded.push(load(name, content));
+    } catch (err) {
+      // An npm lockfile whose version promises a packages map it does not
+      // have is refused on the judged side. On a comparison side it is an
+      // unread lockfile there: no entries and no coverage, so the judged
+      // side's lockfile is compared against nothing and its entries count
+      // as new, and the pull request that regenerates it is not refused
+      // for the file it replaces.
+      if (role.kind === 'judged' || !(err instanceof MissingPackagesMapError)) {
+        throw err;
+      }
+      const message =
+        `${name}: could not be read on ${role.label} (${err.message}), so it is treated as a ` +
+        "lockfile this tool does not read there; the scanned side's lockfile entries count as new";
+      diagnostics.push({ code: LOCKFILE_UNREAD_ON_COMPARISON_SIDE, message });
+      loaded.push({
+        format: 'npm',
+        path: name,
+        entries: new Map(),
+        diagnostics: [],
+        workspaceLocalNames: new Set(),
+        notRead: true,
+      });
+    }
   }
   // The primary is the first lockfile this tool actually reads, so a v1
   // npm file listed ahead of a pnpm lockfile does not become the file the
@@ -1308,6 +1359,11 @@ const PARSED_LOCKFILE_NAMES: readonly string[] = LOCKFILE_CANDIDATES.filter(
 ).map(([name]) => name);
 
 const SYMLINK_ON_COMPARISON_SIDE = 'symlinked-input-comparison-side';
+const COMPARISON_SIDE_CODES: ReadonlySet<string> = new Set([
+  SYMLINK_ON_COMPARISON_SIDE,
+  PATTERN_UNREAD_ON_COMPARISON_SIDE,
+  LOCKFILE_UNREAD_ON_COMPARISON_SIDE,
+]);
 
 // Which part a side plays in a scan. The judged side is the change under
 // review (the index under --staged, the working tree otherwise); a
@@ -1398,8 +1454,13 @@ async function loadState(
   // Each workspace source is resolved on its own, in its own order, and the
   // directories are combined; a directory either source names is scanned.
   const workspaceDirs = new Set<string>([
-    ...(await discoverWorkspaceDirs(source, workspaceGlobsFromManifest(rootManifestContent), diagnostics)),
-    ...(await discoverWorkspaceDirs(source, workspaceGlobsFromWorkspaceYaml(workspaceYamlContent), diagnostics)),
+    ...(await discoverWorkspaceDirs(source, workspaceGlobsFromManifest(rootManifestContent), diagnostics, role)),
+    ...(await discoverWorkspaceDirs(
+      source,
+      workspaceGlobsFromWorkspaceYaml(workspaceYamlContent),
+      diagnostics,
+      role
+    )),
   ]);
   const manifestPaths: string[] = [];
   for (const dir of workspaceDirs) {
@@ -1436,7 +1497,7 @@ async function loadState(
     }
   }
 
-  const { lockfile, extraLockfiles } = await loadLockfiles(source, diagnostics, unreadRoot);
+  const { lockfile, extraLockfiles } = await loadLockfiles(source, diagnostics, unreadRoot, role);
   const readRootPaths = new Set(
     [...(lockfile === null ? [] : [lockfile]), ...extraLockfiles]
       .filter(isReadLockfile)
@@ -1697,8 +1758,8 @@ function refSource(root: string, ref: string): FileSource {
  * One side read out of a git ref, for use as an additional comparison side
  * (the trust base of a pull-request run). Diagnostics from reading it are
  * dropped, since the same workspace configuration is reported from the
- * sides the scan itself loads, except the note for a symlinked input that
- * was not read on this side, which is added to `notes` when given.
+ * sides the scan itself loads, except the notes for what this side could
+ * not read and treated as absent, which are added to `notes` when given.
  */
 export async function loadRefState(
   repoRoot: string,
@@ -1714,7 +1775,7 @@ export async function loadRefState(
     kind: 'comparison',
     label: `the trust base "${ref}"`,
   });
-  notes?.push(...diagnostics.filter((d) => d.code === SYMLINK_ON_COMPARISON_SIDE));
+  notes?.push(...diagnostics.filter((d) => COMPARISON_SIDE_CODES.has(d.code)));
   return state;
 }
 

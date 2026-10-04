@@ -102,6 +102,16 @@ function entryFromPackageValue(
   return entry;
 }
 
+// The refusal for a lockfile whose lockfileVersion promises a packages map
+// that is not there. Its own class so a caller reading a comparison side
+// can tell it apart and treat that side's file as unread instead (see
+// git-source.ts, loadLockfiles); the code stays lockfile-parse.
+export class MissingPackagesMapError extends DepGuardError {
+  constructor(message: string) {
+    super(message, 'lockfile-parse');
+  }
+}
+
 export function parseNpmLockfile(path: string, content: string): ParsedLockfile {
   let parsed: unknown;
   try {
@@ -147,10 +157,9 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
       // fail open: entries would come back empty with no error, and every
       // lockfile-backed check downstream would silently stop firing.
       // Throw instead so a corrupt v2/v3 lockfile is loud, not silent.
-      throw new DepGuardError(
+      throw new MissingPackagesMapError(
         `${path}: lockfileVersion ${versionNumber} declared but "packages" is missing or not an object; ` +
-          'regenerate the lockfile with npm',
-        'lockfile-parse'
+          'regenerate the lockfile with npm'
       );
     }
     // A genuine v1 lockfile (or one with no usable version field and no

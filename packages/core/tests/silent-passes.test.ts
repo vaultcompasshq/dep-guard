@@ -1348,6 +1348,28 @@ describe('N9: a .npmrc that differs from the comparison side makes every integri
     const result = await scanPullRequest();
     expect(tamperSignals(result, 'lodash')).toEqual([]);
   });
+
+  test('a .npmrc that matches the --base side but differs from the trust base still makes the rehash count', async () => {
+    const sha1Lock = npmLock({ 'node_modules/lodash': { ...CLEAN_LODASH, integrity: 'sha1-oldsha1value' } }, L);
+    await write('package.json', manifestJson(L));
+    await write('package-lock.json', sha1Lock);
+    await commitAll('trusted');
+    await git('tag', 'trusted');
+    await write('.npmrc', 'registry=https://evil.example.com/\n');
+    await commitAll('add an npmrc');
+    await git('tag', 'base');
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': { ...CLEAN_LODASH, integrity: 'sha512-forged' } }, L));
+    await commitAll('rehash');
+
+    const result = await scan({
+      repoRoot: repo,
+      mode: { kind: 'base', ref: 'base' },
+      corpusDir: FIXTURE_CORPUS,
+      trustBase: 'trusted',
+    });
+    expect(tamperSignals(result, 'lodash')).toContain('integrity-changed');
+    expect(result.exitCode).toBe(1);
+  });
 });
 
 describe('N11: the lockfile downgrade rule is evaluated against every comparison side', () => {
@@ -1495,9 +1517,12 @@ describe('N13: an acknowledgement on the comparison side lets exactly the named 
     await expect(pullRequest()).rejects.toMatchObject({ code: 'lockfile-downgrade' });
   });
 
+  // The covering package-lock.json stays, so only the unread-bytes half of
+  // the rule can refuse here.
   test('an entry for a different blob id does not clear', async () => {
     await base({ 'package-lock.json': NPM_LOCK, '.dep-guard.json': config([`yarn.lock:${await blobOf(OTHER_YARN)}`]) });
-    await migrateToYarn();
+    await write('yarn.lock', YARN);
+    await commitAll('add yarn.lock');
 
     await expect(pullRequest()).rejects.toMatchObject({ code: 'lockfile-downgrade' });
   });
@@ -2176,4 +2201,182 @@ describe('N16: on a git side, workspace patterns follow core.ignorecase', () => 
       expect(await memberFindings(pattern, false)).toEqual([]);
     });
   }
+});
+
+describe('N17: what a comparison side cannot read is refused only on the side being judged', () => {
+  const L = { lodash: '^4.17.21' };
+  const BAD_PATTERN = 'packages/{a,b}';
+  const BAD_NPM = JSON.stringify({ name: 'root', lockfileVersion: '3', requires: true });
+  const GOOD_NPM = npmLock({ 'node_modules/lodash': CLEAN_LODASH }, L);
+  const HALLUCINATED = { 'zz-made-up-hallucinated-pkg': '^1.0.0' };
+
+  function pullRequest(trustBase = 'base'): Promise<ScanResult> {
+    return scan({ repoRoot: repo, mode: { kind: 'base', ref: 'base' }, corpusDir: FIXTURE_CORPUS, trustBase });
+  }
+
+  function notes(result: ScanResult, code: string): string[] {
+    return result.run.diagnostics.filter((d) => d.code === code).map((d) => d.message);
+  }
+
+  async function refusalCode(promise: Promise<unknown>): Promise<string | undefined> {
+    return promise.then(
+      () => undefined,
+      (err: unknown) => (err as { code?: string }).code
+    );
+  }
+
+  function workspaceRoot(pattern: string): string {
+    return JSON.stringify({ name: 'root', version: '1.0.0', private: true, workspaces: [pattern] });
+  }
+
+  async function baseWithPattern(pattern: string): Promise<void> {
+    await write('package.json', workspaceRoot(pattern));
+    await write('packages/a/package.json', JSON.stringify({ name: 'a', version: '1.0.0' }));
+    await write('packages/b/package.json', JSON.stringify({ name: 'b', version: '1.0.0' }));
+    await commitAll('base');
+    await git('tag', 'base');
+  }
+
+  async function baseWithLockfile(lock: string): Promise<void> {
+    await write('package.json', manifestJson(L));
+    await write('package-lock.json', lock);
+    await commitAll('base');
+    await git('tag', 'base');
+  }
+
+  test('a pull request that rewrites an unexpandable base workspace pattern passes, with a note', async () => {
+    await baseWithPattern(BAD_PATTERN);
+    await write('package.json', workspaceRoot('packages/*'));
+    await commitAll('rewrite the pattern');
+
+    const result = await pullRequest();
+    expect(result.exitCode).toBe(0);
+    expect(notes(result, 'workspace-pattern-unread-comparison-side')).toEqual([
+      `workspace pattern "${BAD_PATTERN}": could not be expanded on the --base ref "base", so it named no ` +
+        "workspace packages there; the scanned side's packages are judged against what remains",
+    ]);
+  });
+
+  test('a staged commit that rewrites an unexpandable workspace pattern at HEAD passes', async () => {
+    await baseWithPattern(BAD_PATTERN);
+    await write('package.json', workspaceRoot('packages/*'));
+
+    const result = await scanStaged();
+    expect(result.exitCode).toBe(0);
+    expect(notes(result, 'workspace-pattern-unread-comparison-side').join('\n')).toContain('on HEAD');
+  });
+
+  test('an unexpandable workspace pattern on a trust base that is a different tree is noted, not refused', async () => {
+    await baseWithPattern(BAD_PATTERN);
+    await git('tag', 'trusted', 'base');
+    await git('tag', '-d', 'base');
+    await write('package.json', workspaceRoot('packages/*'));
+    await commitAll('rewrite the pattern');
+    await git('tag', 'base');
+    await write('README.md', 'head\n');
+    await commitAll('head');
+
+    const result = await pullRequest('trusted');
+    expect(result.exitCode).toBe(0);
+    expect(notes(result, 'workspace-pattern-unread-comparison-side').join('\n')).toContain(
+      'on the trust base "trusted"'
+    );
+  });
+
+  test('an unexpandable workspace pattern on the head side is still refused', async () => {
+    await baseWithPattern('packages/*');
+    await write('package.json', workspaceRoot(BAD_PATTERN));
+    await commitAll('break the pattern');
+
+    expect(await refusalCode(pullRequest())).toBe('workspace-glob-unexpandable');
+  });
+
+  test('an unexpandable base workspace pattern never hides a dependency the head adds to a member', async () => {
+    await baseWithPattern(BAD_PATTERN);
+    await write('package.json', workspaceRoot('packages/*'));
+    await write('packages/a/package.json', JSON.stringify({ name: 'a', version: '1.0.0', dependencies: HALLUCINATED }));
+    await commitAll('rewrite the pattern and add a dependency');
+
+    const result = await pullRequest();
+    expect(result.exitCode).toBe(1);
+    expect(result.findings.map((f) => `${f.ruleId}:${f.packageName}`)).toContain(
+      'unknown-package:zz-made-up-hallucinated-pkg'
+    );
+  });
+
+  test('a pull request that regenerates a base npm lockfile with no packages map passes, with a note', async () => {
+    await baseWithLockfile(BAD_NPM);
+    await write('package-lock.json', GOOD_NPM);
+    await commitAll('regenerate');
+
+    const result = await pullRequest();
+    expect(result.exitCode).toBe(0);
+    const [note, ...rest] = notes(result, 'lockfile-unread-comparison-side');
+    expect(rest).toEqual([]);
+    expect(note).toContain('package-lock.json: could not be read on the --base ref "base"');
+    expect(note).toContain("the scanned side's lockfile entries count as new");
+    expect(notes(result, 'npm-lockfile-v1')).toEqual([]);
+  });
+
+  test('a staged commit that regenerates an npm lockfile with no packages map at HEAD passes', async () => {
+    await baseWithLockfile(BAD_NPM);
+    await write('package-lock.json', GOOD_NPM);
+
+    const result = await scanStaged();
+    expect(result.exitCode).toBe(0);
+    expect(notes(result, 'lockfile-unread-comparison-side').join('\n')).toContain('could not be read on HEAD');
+  });
+
+  test('an npm lockfile with no packages map on a trust base that is a different tree is noted, not refused', async () => {
+    await baseWithLockfile(BAD_NPM);
+    await git('tag', 'trusted', 'base');
+    await git('tag', '-d', 'base');
+    await write('package-lock.json', GOOD_NPM);
+    await commitAll('regenerate');
+    await git('tag', 'base');
+    await write('README.md', 'head\n');
+    await commitAll('head');
+
+    const result = await pullRequest('trusted');
+    expect(result.exitCode).toBe(0);
+    expect(notes(result, 'lockfile-unread-comparison-side').join('\n')).toContain(
+      'could not be read on the trust base "trusted"'
+    );
+  });
+
+  test('an npm lockfile with no packages map on the head side is still refused', async () => {
+    await baseWithLockfile(GOOD_NPM);
+    await write('package-lock.json', BAD_NPM);
+    await commitAll('break the lockfile');
+
+    expect(await refusalCode(pullRequest())).toBe('lockfile-parse');
+  });
+
+  test('an unreadable base npm lockfile never makes a tampered head lockfile look clean', async () => {
+    await baseWithLockfile(BAD_NPM);
+    await write('package-lock.json', npmLock({ 'node_modules/lodash': TAMPERED_LODASH }, L));
+    await commitAll('regenerate with a tampered entry');
+
+    const result = await pullRequest();
+    expect(result.exitCode).toBe(1);
+    expect(tamperSignals(result, 'lodash').length).toBeGreaterThan(0);
+  });
+
+  test('an unreadable base npm lockfile is not coverage the head may drop, and no acknowledgement of it clears a refusal', async () => {
+    const pnpm = pnpmLock('integrity: sha512-cleanlodash');
+    await write('.blob-probe', BAD_NPM);
+    const badBlob = (await git('hash-object', '.blob-probe')).trim();
+    await rm(path.join(repo, '.blob-probe'));
+    await write('package.json', manifestJson(L));
+    await write('package-lock.json', BAD_NPM);
+    await write('pnpm-lock.yaml', pnpm);
+    await write('.dep-guard.json', JSON.stringify({ acknowledgedLockfiles: [`package-lock.json:${badBlob}`] }));
+    await commitAll('base');
+    await git('tag', 'base');
+    await rm(path.join(repo, 'package-lock.json'));
+    await rm(path.join(repo, 'pnpm-lock.yaml'));
+    await commitAll('stop committing lockfiles');
+
+    expect(await refusalCode(pullRequest())).toBe('lockfile-downgrade');
+  });
 });

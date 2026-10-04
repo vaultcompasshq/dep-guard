@@ -7,6 +7,9 @@ import { withoutByteOrderMark } from './text.js';
 // map, or pnpm. Everything else (a v1 npm file, yarn, bun) is present but
 // unread.
 export function isReadLockfile(lockfile: ParsedLockfile): boolean {
+  if (lockfile.notRead === true) {
+    return false;
+  }
   if (lockfile.format === 'pnpm') {
     return true;
   }

@@ -113,4 +113,8 @@ export interface ParsedLockfile {
   // Set on an additional document: the real file it was read from. Such a
   // document never counts as coverage on its own.
   documentOf?: string;
+  // Set on a comparison side's lockfile that could not be read there (see
+  // git-source.ts, loadLockfiles): present, with no entries, and never a
+  // read lockfile.
+  notRead?: true;
 }
