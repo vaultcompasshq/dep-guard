@@ -997,7 +997,10 @@ quiet:
   the trust base) the file is treated as absent there and the
   `symlinked-input-comparison-side` diagnostic names it, so the pull request
   that replaces the link is judged as adding a new file and passes when
-  that file is clean.
+  that file is clean. In that pull request the checks that compare a lockfile
+  entry with its earlier resolution have no earlier resolution to compare
+  against for that file, so the note is printed and the lockfile in that pull
+  request should be reviewed by a person.
 - The lockfile downgrade rule. When the base side has a lockfile dep-guard
   reads with at least one entry, the head side may not (a) carry a root
   lockfile dep-guard does not read (a v1 npm file, yarn, bun, a binary
@@ -1044,7 +1047,10 @@ quiet:
   judged; on a comparison side such a pattern names no workspace packages
   there and is named in `workspace-pattern-unread-comparison-side`, so the
   pull request that rewrites it is judged in full and passes when it is
-  clean. An exclusion that cannot be applied
+  clean. In that pull request the checks that compare a lockfile
+  entry with its earlier resolution have no earlier resolution to compare
+  against for that file, so the note is printed and the lockfile in that pull
+  request should be reviewed by a person. An exclusion that cannot be applied
   exactly is not applied, which only ever widens the scan. Patterns reach
   test fixtures and examples that are workspace members, and their findings
   are reported like any other; an `ignorePaths` entry on the base branch

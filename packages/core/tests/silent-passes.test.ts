@@ -2040,7 +2040,7 @@ describe('N15: a symlinked root lockfile or manifest is not parsed on any side',
     ]);
   });
 
-  test('a symlinked pnpm-lock.yaml on the base never makes a tampered head lockfile look unchanged', async () => {
+  test('a symlinked pnpm-lock.yaml on the base does not hide a head lockfile entry resolved from another host', async () => {
     await baseWithLinkedLockfile();
     await write('pnpm-lock.yaml', EVIL);
     await commitAll('replace the link with a tampered file');
@@ -2352,7 +2352,7 @@ describe('N17: what a comparison side cannot read is refused only on the side be
     expect(await refusalCode(pullRequest())).toBe('lockfile-parse');
   });
 
-  test('an unreadable base npm lockfile never makes a tampered head lockfile look clean', async () => {
+  test('an unreadable base npm lockfile does not hide a head entry resolved from another host', async () => {
     await baseWithLockfile(BAD_NPM);
     await write('package-lock.json', npmLock({ 'node_modules/lodash': TAMPERED_LODASH }, L));
     await commitAll('regenerate with a tampered entry');

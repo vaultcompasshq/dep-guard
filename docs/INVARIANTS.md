@@ -913,11 +913,15 @@ with no map is refused on the side being judged only. On a comparison side
 unread lockfile there, with no entries and no coverage, named in
 `lockfile-unread-comparison-side`; the judged side's lockfile is then
 compared against nothing, its entries count as new, and the pull request
-that regenerates the file passes when it is clean (the `N17:` group, among
+that regenerates the file passes when it is clean. In that pull request the
+checks that compare a lockfile entry with its earlier resolution have no
+earlier resolution to compare against for that file, so the note is printed
+and the lockfile in that pull request should be reviewed by a person (the
+`N17:` group, among
 them `a pull request that regenerates a base npm lockfile with no packages
 map passes, with a note`, `an npm lockfile with no packages map on the head
-side is still refused`, `an unreadable base npm lockfile never makes a
-tampered head lockfile look clean` and `an unreadable base npm lockfile is
+side is still refused`, `an unreadable base npm lockfile does not hide a head
+entry resolved from another host` and `an unreadable base npm lockfile is
 not coverage the head may drop, and no acknowledgement of it clears a
 refusal`). A base side that
 parsed a packages map against a head side that did not is a
@@ -1109,7 +1113,10 @@ regular file is compared against nothing and every entry in it is judged
 as new; it cannot make a judged change look unchanged, and it is not a
 lockfile an acknowledgement or the deletion form can name. The pull request
 that replaces such a link with a regular file therefore passes when the new
-file is clean.
+file is clean. In that pull request the checks that compare a lockfile entry
+with its earlier resolution have no earlier resolution to compare against for
+that file, so the note is printed and the lockfile in that pull request
+should be reviewed by a person.
 
 Tests: `a symlinked pnpm-lock.yaml whose link text is a valid lockfile is
 refused on a staged scan`, `a symlinked pnpm-lock.yaml on the head side of
@@ -1121,8 +1128,8 @@ staged scan`, `a symlinked workspace member package.json is refused on a
 staged scan`, `a root manifest that is a symlink out of the root is
 refused, never read`, `a pull request that replaces a symlinked
 pnpm-lock.yaml on the base with a clean regular file passes`, `a symlinked
-pnpm-lock.yaml on the base never makes a tampered head lockfile look
-unchanged`, `a symlinked pnpm-lock.yaml on the trust base alone is noted,
+pnpm-lock.yaml on the base does not hide a head lockfile entry resolved
+from another host`, `a symlinked pnpm-lock.yaml on the trust base alone is noted,
 not refused`, `a symlinked pnpm-lock.yaml at HEAD replaced by a regular
 file in the index passes a staged scan`, `a pull request that replaces a
 symlinked root package.json on the base with a regular file passes` and `a
@@ -1295,7 +1302,11 @@ made on the side being judged only. On a comparison side the same pattern
 names no workspace packages there and is noted in
 `workspace-pattern-unread-comparison-side`, so the judged side's members
 are compared against fewer manifests and their dependencies count as new,
-and the pull request that rewrites the pattern passes when it is clean
+and the pull request that rewrites the pattern passes when it is clean. In that
+pull request the checks that compare a lockfile entry with its earlier
+resolution have no earlier resolution to compare against for that file, so
+the note is printed and the lockfile in that pull request should be reviewed
+by a person
 (the `N17:` group, among them `a pull request that rewrites an
 unexpandable base workspace pattern passes, with a note`, `an unexpandable
 workspace pattern on the head side is still refused` and `an unexpandable

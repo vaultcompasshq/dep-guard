@@ -124,7 +124,10 @@ compared against what remains.
   comparison side it is treated as absent there and named in the new
   `symlinked-input-comparison-side` diagnostic. Clearing path: replace the
   link with a regular file; that pull request passes when the new file is
-  clean.
+  clean. In that pull request the checks that compare a lockfile entry with
+  its earlier resolution have no earlier resolution to compare against for
+  that file, so the note is printed and the lockfile in that pull request
+  should be reviewed by a person.
 - With `--base` and `--trust-base` together the downgrade rule must hold
   against both sides; with `--trust-base` alone it is evaluated against the
   trust base; with `--staged` against HEAD only. Pass `--base` and
@@ -140,7 +143,10 @@ compared against what remains.
   (`workspace-glob-unexpandable`), and so is a `**` walk deeper than 32
   directories. Clearing path: rewrite the pattern inside the repository,
   without `..`, with `*` or `**`, or list the directories; the pull request
-  that does so passes when it is clean.
+  that does so passes when it is clean. In that pull request the checks that
+  compare a lockfile entry with its earlier resolution have no earlier
+  resolution to compare against for that file, so the note is printed and the
+  lockfile in that pull request should be reviewed by a person.
   An exclusion that cannot be applied exactly is not applied and noted,
   which only widens the scan.
 - The primary lockfile (the one the run summary names and the manifest walk
@@ -150,7 +156,10 @@ compared against what remains.
 - An npm `lockfileVersion` written as a string of digits is read as that
   number, so `"2"` or `"3"` with no `packages` map on the side being judged
   is `lockfile-parse` (exit 2). Clearing path: regenerate the lockfile; the
-  pull request that does so passes when it is clean.
+  pull request that does so passes when it is clean. In that pull request the
+  checks that compare a lockfile entry with its earlier resolution have no
+  earlier resolution to compare against for that file, so the note is printed
+  and the lockfile in that pull request should be reviewed by a person.
 - Two unreadable resolutions at a held version, with no integrity hash on
   either side and a moved location, are a high `resolution-unreadable`
   finding. Clearing path: record an integrity hash for the entry, or the
