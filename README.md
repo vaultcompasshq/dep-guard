@@ -790,8 +790,10 @@ dep-guard scan --base origin/main --trust-base origin/main   # judging a pull re
 
 `--trust-base <ref>` is pull-request mode, on both `scan` and `check`: the
 config and the baseline come from `<ref>` rather than from the tree being
-judged, and a head-side change to either is reported and ignored. It is a
-different question from `--base`, which only decides what the change is
+judged, and a head-side change to either is reported and ignored. The ref
+is also a comparison side for the lockfile set rule, and when it is a
+different tree from the `--base` ref its dependency state is read too. It
+is a different question from `--base`, which decides what the change is
 compared against. See the pull-request section above.
 
 `--format json` prints a single result object on stdout with diagnostics on
@@ -931,7 +933,12 @@ quiet:
   says (npm installs from it either way). A file with no `packages` map at
   all is a real v1 lockfile: it gets a diagnostic and no entries; a
   `lockfileVersion` of 2 or 3, written as a number or as a string of digits,
-  with no `packages` map is a parse error. Every finding's identity
+  with no `packages` map is a parse error (exit 2, `lockfile-parse`; clear it
+  by regenerating the lockfile with npm). That error is raised for the side
+  being judged; on a comparison side (HEAD for `--staged`, the `--base` ref,
+  the trust base) such a file is treated as a lockfile dep-guard does not
+  read, named in `lockfile-unread-comparison-side`, so the pull request that
+  regenerates it is judged as adding a new lockfile. Every finding's identity
   (its package name) always comes from the lockfile key itself, or from a
   manifest declaration -- never from a packages entry's own `name` field,
   which is written by whoever committed the lockfile and is not something
@@ -977,7 +984,8 @@ quiet:
   honours depends on the package manager in use, so a clean file never
   stands in for a tampered one. The run summary names the first lockfile
   dep-guard reads. A `yarn.lock` or `bun.lock` beside them is not parsed;
-  while it is unchanged the `lockfile-unread-sibling` diagnostic names it.
+  on a run that is not refused for it (unchanged, acknowledged, or with no
+  comparison side) the `lockfile-unread-sibling` diagnostic names it.
 - No symlinked lockfile or manifest is parsed. On every side of a scan (the
   index, a ref, the trust base, the working tree), a root lockfile dep-guard
   parses, the root `package.json`, or a workspace member's `package.json`
@@ -1015,8 +1023,9 @@ quiet:
   named in the `lockfile-nested-changed` diagnostic: dep-guard did not read
   it, so the run says nothing about what would be installed from it. A path
   covered by `ignorePaths` (read from the base on a pull-request run) is
-  noted as `lockfile-nested-ignored` instead. A run that finds lockfiles but
-  reads none says which in `lockfile-not-read`.
+  noted as `lockfile-nested-ignored` instead. `lockfile-not-read` names
+  every lockfile below the root, and, when no root lockfile was read, every
+  root lockfile name that is present.
 - Workspace patterns -- a `workspaces` list in `package.json` is resolved
   the way npm's own workspace mapper resolves it, checked against npm
   10.9.8: patterns in order, a run of leading `!` negating when odd, one
@@ -1031,7 +1040,11 @@ quiet:
   letter, or one that uses other glob syntax (`?`, `[...]`, `{...}`,
   extglob groups) is exit 2 (`workspace-glob-unexpandable`), with a message
   saying how to rewrite it; so is a `**` walk deeper than 32 directories,
-  cleared by listing the directories. An exclusion that cannot be applied
+  cleared by listing the directories. That refusal is for the side being
+  judged; on a comparison side such a pattern names no workspace packages
+  there and is named in `workspace-pattern-unread-comparison-side`, so the
+  pull request that rewrites it is judged in full and passes when it is
+  clean. An exclusion that cannot be applied
   exactly is not applied, which only ever widens the scan. Patterns reach
   test fixtures and examples that are workspace members, and their findings
   are reported like any other; an `ignorePaths` entry on the base branch

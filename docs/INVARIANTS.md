@@ -907,7 +907,19 @@ of 2 or more with no map (a number, or a string of digits, which is read as
 that number), both still throw `lockfile-parse` (tests `a string
 lockfileVersion of digits is read as that number, so "3" or "2" with no
 packages map is a parse error` and `a string lockfileVersion "1", or one
-that is not digits, still gives the v1 diagnostic`). A base side that
+that is not digits, still gives the v1 diagnostic`). The declared version
+with no map is refused on the side being judged only. On a comparison side
+(HEAD under `--staged`, the `--base` ref, the trust base) that file is an
+unread lockfile there, with no entries and no coverage, named in
+`lockfile-unread-comparison-side`; the judged side's lockfile is then
+compared against nothing, its entries count as new, and the pull request
+that regenerates the file passes when it is clean (the `N17:` group, among
+them `a pull request that regenerates a base npm lockfile with no packages
+map passes, with a note`, `an npm lockfile with no packages map on the head
+side is still refused`, `an unreadable base npm lockfile never makes a
+tampered head lockfile look clean` and `an unreadable base npm lockfile is
+not coverage the head may drop, and no acknowledgement of it clears a
+refusal`). A base side that
 parsed a packages map against a head side that did not is a
 `lockfile-downgrade` error, exit 2, never a diagnostic; that and every other
 way the lockfile set can lose what this tool reads is the lockfile
@@ -1158,10 +1170,11 @@ resolves`, `control: bun.lockb replaced by bun.lock with no readable lockfile
 on the base resolves`, `control: one of two covering lockfiles deleted
 resolves`, `control: a lockfile left with only workspace links while only
 workspace packages are declared resolves` and `control: a pnpm lockfileVersion
-5.4 lockfile migrated to v9 resolves`. An unchanged unread root lockfile
-beside a read one is named in `lockfile-unread-sibling` (`control: an
-unchanged legacy yarn.lock beside package-lock.json resolves with
-lockfile-unread-sibling`).
+5.4 lockfile migrated to v9 resolves`. An unread root lockfile beside a
+read one on a run this rule does not refuse (it is unchanged, its change was
+acknowledged, or the run has no comparison side) is named in
+`lockfile-unread-sibling` (`control: an unchanged legacy yarn.lock beside
+package-lock.json resolves with lockfile-unread-sibling`).
 
 **Every comparison side.** With `--base` and `--trust-base` this rule is
 evaluated against the `--base` side and against the trust base, and fails if
@@ -1213,10 +1226,13 @@ lockfile below the repository root. One whose blob differs from the
 comparison side, a new one included, is named in `lockfile-nested-changed`,
 which says the run says nothing about what would be installed from it; the
 run continues and the exit code is decided by the findings. A path covered
-by `ignorePaths` (from the comparison side's config as everywhere else) is
+by `ignorePaths` (from the same config the findings filter uses: the trust
+base's on a `--trust-base` run, otherwise the `.dep-guard.json` on disk in
+the scanned repository, which is the judged side's) is
 `lockfile-nested-ignored` instead, and such an entry is not reported as
 unmatched. The no-lockfile note `lockfile-missing` is printed only when the
-inventory is empty; otherwise `lockfile-not-read` names what is present.
+inventory is empty; `lockfile-not-read` names every lockfile below the root,
+and every present root lockfile name when the scan has no root lockfile.
 Tests: the `N8:` group and `computeDelta lockfiles below the repository
 root`.
 
@@ -1274,7 +1290,17 @@ pattern resolves inside the repository the message says to write it
 without the parent segment) or using other glob syntax (`?`, `[...]`, `{...}`, extglob groups,
 unless the directory it would expand has no subdirectories) is
 `workspace-glob-unexpandable`, exit 2, and so is a `**` walk deeper than 32
-directories; each message says how to rewrite the pattern. A pattern with a
+directories; each message says how to rewrite the pattern. That refusal is
+made on the side being judged only. On a comparison side the same pattern
+names no workspace packages there and is noted in
+`workspace-pattern-unread-comparison-side`, so the judged side's members
+are compared against fewer manifests and their dependencies count as new,
+and the pull request that rewrites the pattern passes when it is clean
+(the `N17:` group, among them `a pull request that rewrites an
+unexpandable base workspace pattern passes, with a note`, `an unexpandable
+workspace pattern on the head side is still refused` and `an unexpandable
+base workspace pattern never hides a dependency the head adds to a
+member`). A pattern with a
 `.` segment, which npm maps to nothing, and `.` itself, which npm maps to
 the root that is always scanned, are notes (tests `the pattern "." is noted
 as the repository root, which is scanned anyway` and `a pattern with a
@@ -1460,7 +1486,8 @@ Current diagnostic codes: `audit-anchor-differs`,
 `ignore-path-unmatched`, `lockfile-binary-skipped`,
 `lockfile-downgrade-acknowledged`, `lockfile-format-manifest-only`,
 `lockfile-missing`, `lockfile-nested-changed`, `lockfile-nested-ignored`,
-`lockfile-not-read`, `lockfile-unread-sibling`,
+`lockfile-not-read`, `lockfile-unread-comparison-side`,
+`lockfile-unread-sibling`,
 `manifest-alias-empty`, `multiple-lockfiles`, `npm-lockfile-invalid-entry`,
 `npm-lockfile-unverifiable-name`, `npm-lockfile-v1`,
 `npmrc-pin-unparseable`, `online-check-unreachable`,
@@ -1470,11 +1497,13 @@ Current diagnostic codes: `audit-anchor-differs`,
 `pnpm-no-install-script-flag`, `publish-age-allowed`,
 `publish-age-package-unknown`, `publish-age-private-origin-skipped`,
 `publish-age-version-unknown`, `registered-squat-private-origin-skipped`,
-`symlink-cycle`, `tamper-resolution-unreadable`,
+`symlink-cycle`, `symlinked-input-comparison-side`,
+`tamper-resolution-unreadable`,
 `typosquat-asymmetry-private-origin-skipped`,
 `unknown-package-private-origin-skipped`,
 `unknown-package-private-scope-skipped`, `workspace-dir-unreadable`,
-`workspace-duplicate-directory`, `workspace-glob-unsupported`.
+`workspace-duplicate-directory`, `workspace-glob-unsupported`,
+`workspace-pattern-unread-comparison-side`.
 
 This list is hand-maintained, not compile-checked -- `Diagnostic.code` is
 typed `string`, so a new code compiles and runs without ever being added
@@ -1557,7 +1586,10 @@ The codes, and what each one means:
 - `manifest-parse` -- a manifest is present and unparseable.
 - `lockfile-parse` -- a lockfile is present and unparseable, including a
   lockfile that declares a format version whose required structure is
-  missing, a multi-document pnpm lockfile whose documents leave the
+  missing (an npm lockfile whose version promises a packages map it does
+  not have is refused on the side being judged; on a comparison side it is
+  an unread lockfile there, noted as `lockfile-unread-comparison-side`), a
+  multi-document pnpm lockfile whose documents leave the
   selection rule below no single project document to read, and a pnpm
   lockfile stream holding more documents than the parser will read before
   it fails closed (four; a real file has two). This case is a
@@ -1580,9 +1612,20 @@ The codes, and what each one means:
   exit 2 (test `N5: a format switch names the files, the reason, and the two
   ways to land a genuine migration`). See "The lockfile set may not lose
   coverage or gain unread bytes".
-- `workspace-glob-unexpandable` -- a workspace pattern uses glob syntax this
-  tool does not expand and could match something, or a `**` walk is deeper
-  than the cap. See the workspace paragraph of the same section.
+- `workspace-glob-unexpandable` -- on the side being judged, a positive
+  workspace pattern uses glob syntax this tool does not expand and could
+  match something, contains a `..` parent segment (the message says to
+  write it without the segment when it stays inside the repository, and
+  that it names a directory outside the repository when it does not), or
+  starts with a drive letter; or a `**` walk is deeper than the cap. On a
+  comparison side the same pattern names no members there and is noted
+  (`workspace-pattern-unread-comparison-side`). See the workspace paragraph
+  of the same section.
+- `symlinked-input` -- on the side being judged, a root lockfile this tool
+  parses, the root `package.json`, or a workspace member's `package.json` is
+  a symlink. On a comparison side it is treated as absent there and noted
+  (`symlinked-input-comparison-side`). See "A symlinked input is never
+  parsed".
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
   corpus is absent, damaged, or -- for `corpus-corrupt` specifically --
   valid but written in a shape this build refuses to trust: a

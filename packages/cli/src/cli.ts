@@ -162,8 +162,9 @@ function parseFormat(value: string): OutputFormat {
 // other.
 const TRUST_BASE_FLAG_DESCRIPTION =
   'pull-request mode: read .dep-guard.json and the baseline from this git ref instead of ' +
-  'from the tree being judged, reporting any head-side change to them as a proposal. ' +
-  'Not the same as --base, which only decides what the change is compared against';
+  'from the tree being judged, reporting any head-side change to them as a proposal. The ' +
+  'ref is also a comparison side for the lockfile set rule. Not the same as --base, which ' +
+  'decides what the change is compared against';
 
 interface ScanCliOptions {
   staged?: boolean;

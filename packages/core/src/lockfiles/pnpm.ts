@@ -473,13 +473,9 @@ export function parsePnpmLockfile(path: string, rawContent: string): ParsedLockf
     // the documents this parser passed over are really installed, and
     // nothing else in the scan will mention them.
     //
-    // The count is every UNSELECTED document, which is not the same set as
-    // "the self-management documents": step 4 of the selection rule can
-    // pick a document on importer count alone, and then a discarded
-    // document was never classified as self-management at all. Calling the
-    // count self-management documents would name a cause the number does
-    // not support, which is the shape of misreport these diagnostics exist
-    // to avoid.
+    // The count is every document that is not shaped like a pnpm lockfile
+    // and so was not read. Every lockfile-shaped document, the selected one
+    // and the others alike, is read and is not counted here.
     diagnostics.push({
       code: 'pnpm-multi-document-lockfile',
       message:

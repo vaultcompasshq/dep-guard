@@ -10,10 +10,42 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
-Scans that exited 0 can now exit 2 (`lockfile-downgrade`,
-`workspace-glob-unexpandable`, `lockfile-parse`, `symlinked-input`) or 1
-(new findings). Each
-change that can newly block names how to clear it.
+Scans that exited 0 can now exit 2 or 1. What can newly block, and how to
+clear each:
+
+- `lockfile-downgrade` (exit 2): the head loses lockfile coverage or gains
+  root lockfile bytes dep-guard does not read, against any comparison side.
+  Clear it by adding the entries the message prints to
+  `acknowledgedLockfiles` on the base branch first, by deleting the stale
+  lockfile in the pull request, or by an admin override after review.
+- `workspace-glob-unexpandable` (exit 2): a workspace pattern on the side
+  being judged that dep-guard cannot expand. Clear it by rewriting the
+  pattern in the pull request; a base that still has the old pattern does
+  not block that pull request.
+- `lockfile-parse` (exit 2): an npm lockfile on the side being judged whose
+  `lockfileVersion` (a number or a string of digits, 2 or more) promises a
+  `packages` map it does not have. Clear it by regenerating the lockfile
+  with npm in the pull request; a base that still has the old file does not
+  block that pull request.
+- `symlinked-input` (exit 2): a root lockfile dep-guard parses, the root
+  `package.json` or a workspace member's `package.json` that is a symlink on
+  the side being judged. Clear it by replacing the link with a regular file;
+  a base that still has the link does not block that pull request.
+- `config-invalid` (exit 2): a malformed `acknowledgedLockfiles` entry. Clear
+  it by correcting the entry.
+- New findings (exit 1): from pnpm lockfile documents now read, from
+  `requiresBuild` in pnpm lockfiles older than v9, from the keys of pnpm
+  lockfile versions 5.x and 6.x now read, from wider workspace expansion,
+  and from the comparison changes listed under Changed. Clear them as any
+  finding: an `allow` entry for the rules it covers, `ignorePaths`, or the
+  baseline, each on the base branch for a pull-request run.
+
+With `--base` and a trust base that is a different tree, the trust base's
+dependency state is now also read, as a comparison side for the lockfile set
+rule. What a comparison side cannot read (a symlinked input, a workspace
+pattern dep-guard cannot expand, an npm lockfile missing its `packages` map)
+is treated as absent there and named in a diagnostic, and the judged side is
+compared against what remains.
 
 ### Added
 
@@ -43,16 +75,21 @@ change that can newly block names how to clear it.
   read it, so the run says nothing about what would be installed from it),
   `lockfile-nested-ignored` the same for a path covered by `ignorePaths`,
   `lockfile-not-read` the lockfiles present that dep-guard does not read,
-  and `lockfile-unread-sibling` an unchanged unread root lockfile beside a
-  read one. The `lockfile-missing` note is printed only when no lockfile is
-  present at all.
+  and `lockfile-unread-sibling` an unread root lockfile beside a read one on
+  a run that is not refused for it. The `lockfile-missing` note is printed
+  only when no lockfile is present at all.
+- `symlinked-input-comparison-side`, `workspace-pattern-unread-comparison-side`
+  and `lockfile-unread-comparison-side`: what a comparison side could not
+  read and treated as absent there, naming the path or pattern and the side.
 - `unknown-package-private-scope-skipped`: a new dependency whose scope the
   project `.npmrc` pins to a non-public registry is not checked against the
   public corpus, and this diagnostic names the scope. On a `--trust-base`
   run the pins come from the trust base. An unscoped name under a private
   default registry is still checked.
 - pnpm lockfiles from `lockfileVersion` 5.x on are read, and `requiresBuild`
-  is read as an install script in lockfiles older than v9.
+  is read as an install script in lockfiles older than v9. Both can add
+  findings; clear them with an `allow` entry for the rules it covers or the
+  baseline.
 - On a `--trust-base` run, a changed `minAgeDays` and added `minAgeAllow`
   entries are named in the config proposal, and removed `minAgeAllow`
   entries are counted.
@@ -92,11 +129,12 @@ change that can newly block names how to clear it.
   a repository whose `core.ignorecase` is true, names in any case), so more
   workspace manifests are checked. Wider workspace expansion can surface findings in
   fixture and example workspaces; clearing path: `ignorePaths` on the base
-  branch. A pattern with a `..` segment or a drive letter, or using glob
-  syntax beyond `*` and `**` is exit 2 (`workspace-glob-unexpandable`), and
-  so is a `**` walk deeper than 32 directories. Clearing path: rewrite the
-  pattern inside the repository, without `..`, with `*` or `**`, or list
-  the directories.
+  branch. On the side being judged, a pattern with a `..` segment or a drive
+  letter, or using glob syntax beyond `*` and `**`, is exit 2
+  (`workspace-glob-unexpandable`), and so is a `**` walk deeper than 32
+  directories. Clearing path: rewrite the pattern inside the repository,
+  without `..`, with `*` or `**`, or list the directories; the pull request
+  that does so passes when it is clean.
   An exclusion that cannot be applied exactly is not applied and noted,
   which only widens the scan.
 - The primary lockfile (the one the run summary names and the manifest walk
@@ -104,8 +142,9 @@ change that can newly block names how to clear it.
   pnpm lockfile no longer takes that place. This can add findings in a
   repository carrying both; clear them as any finding.
 - An npm `lockfileVersion` written as a string of digits is read as that
-  number, so `"2"` or `"3"` with no `packages` map is `lockfile-parse` (exit
-  2). Clearing path: regenerate the lockfile.
+  number, so `"2"` or `"3"` with no `packages` map on the side being judged
+  is `lockfile-parse` (exit 2). Clearing path: regenerate the lockfile; the
+  pull request that does so passes when it is clean.
 - Two unreadable resolutions at a held version, with no integrity hash on
   either side and a moved location, are a high `resolution-unreadable`
   finding. Clearing path: record an integrity hash for the entry, or the
