@@ -549,6 +549,14 @@ only for a scope that *has* a pin. So a pull request that adds
 dep-guard scan --base origin/main --trust-base origin/main
 ```
 
+On a pull request, pass `--base` and `--trust-base` together. With both,
+the lockfile downgrade rule (see "Lockfile support" below) has to hold
+against the `--base` side and against the trust base. The entry-level
+checks (tamper, install script, the name checks) compare against the
+`--base` side. `--trust-base` on its own still judges the lockfile set
+against the trust base, but reports findings as an audit; with `--staged`,
+the lockfile set is compared with HEAD only.
+
 The config, the baseline and the `.npmrc` pins are read from `<ref>` with
 `git ls-tree` and `git show`. Nothing is checked out, nothing is written
 into the repository. A head-side change to any of them never takes effect
@@ -814,7 +822,8 @@ Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
   "ignorePaths": ["fixtures"],
   "minAgeDays": 7,
   "minAgeAllow": ["some-package@1.2.3"],
-  "onlineBudgetMs": 20000
+  "onlineBudgetMs": 20000,
+  "acknowledgedLockfiles": ["yarn.lock:3b18e512dba79e4c8300dd08aeb37f8e728b8dad"]
 }
 ```
 
@@ -839,6 +848,21 @@ true`. Unset, the budget defaults to 20000 for a plain run or 300000 for a
 `--base`/`--trust-base` run -- setting this key picks one number for every
 invocation regardless of shape, the same way `--online-budget-ms` picks one
 for a single run.
+
+`acknowledgedLockfiles` lets one reviewed lockfile change through the
+lockfile downgrade rule (see "Lockfile support" below). Each entry is
+`LOCKFILE:BLOBID`: a root lockfile name and the full lowercase git blob id
+of the exact bytes being acknowledged, so an entry never covers any other
+version of the file. The refusal message prints the entries to add. They
+are read only from the comparison side (the trust base, else the `--base`
+ref, else HEAD for `--staged`), so they land on the base branch first, in
+their own reviewed pull request. An acknowledgement affects that rule only:
+every finding and every check still applies, and a run that uses one says
+so in the `lockfile-downgrade-acknowledged` diagnostic. On a staged scan
+(the pre-commit hook) the entries are read from HEAD, so they are committed
+first, in a commit of their own. A lockfile path that is a symlink has no
+identity to acknowledge. dep-guard 0.10.0 and earlier refuse a config that
+contains this key, so it needs 0.10.1 or later.
 
 Every key here, the baseline file beside it, and the scope pins in
 `.npmrc`, are **control inputs**: they decide what dep-guard reports rather
@@ -905,24 +929,9 @@ quiet:
 - `package-lock.json` and `npm-shrinkwrap.json` v2 and v3 -- full coverage.
   The `packages` map is read whenever it exists, whatever `lockfileVersion`
   says (npm installs from it either way). A file with no `packages` map at
-  all is a real v1 lockfile: it gets a diagnostic and no entries. If the
-  base side had a lockfile dep-guard parses and the head side has none it
-  parses (a v1 npm file, yarn, bun, or a binary lockfile), the scan fails
-  with exit 2 rather than passing, because that change removes what the
-  checks read while the package manager keeps installing. A genuine
-  migration to yarn or bun trips this too, on purpose: a format switch is
-  how a tampered lockfile escapes inspection. Either review the new
-  lockfile by hand and merge with an admin override of the failing check,
-  or first land a separate, reviewed pull request that relaxes the gate on
-  the base branch (under conductor, `enforce: false` on the dependencies
-  gate in `.guardrails.yaml`; for the standalone action, `continue-on-error`
-  on the workflow step), then land the migration, then restore the setting
-  in a third pull request. The migration pull request cannot relax the gate
-  for itself, and an advisory mode does not help, because this is a
-  could-not-run (exit 2), not a finding. A
-  lockfile deleted with nothing in its place is not covered by this, so
-  deleting the lockfile in one pull request and adding `yarn.lock` in the
-  next gets past it; that gap is known and scheduled. Every finding's identity
+  all is a real v1 lockfile: it gets a diagnostic and no entries; a
+  `lockfileVersion` of 2 or 3, written as a number or as a string of digits,
+  with no `packages` map is a parse error. Every finding's identity
   (its package name) always comes from the lockfile key itself, or from a
   manifest declaration -- never from a packages entry's own `name` field,
   which is written by whoever committed the lockfile and is not something
@@ -937,9 +946,20 @@ quiet:
   that diagnostic for a perfectly genuine alias too -- expected noise for
   such a registry, never a wrong finding, since the affected entry simply
   falls back to being looked up under its lockfile key like any other.
-- `pnpm-lock.yaml` v9+ -- host, integrity, tarball and git-source checks,
-  but not install scripts, which the format stopped recording. Additions to
-  `onlyBuiltDependencies` are used instead. pnpm records an ordinary
+- `pnpm-lock.yaml` -- host, integrity, tarball and git-source checks for
+  every `lockfileVersion` from 5.x on (the slash-separated 5.x keys, the
+  6.x keys and the v9 keys). Install scripts are read from `requiresBuild`
+  in lockfiles older than v9; v9 stopped recording them, so for v9
+  additions to `onlyBuiltDependencies` are used instead. A file holding more
+  than one YAML document is read whole: the project document is what the
+  manifest walk reads, and every other document shaped like a pnpm lockfile
+  (pnpm writes one for its own managed version) is read and checked as a
+  lockfile of its own, named `pnpm-lock.yaml#package-manager` or
+  `pnpm-lock.yaml#document-N` in findings. A document that is not shaped
+  like a pnpm lockfile is not read: the file's bytes outside the documents
+  that are read are compared byte for byte, in order, with the base side,
+  and a change to them is the same exit 2 as a changed lockfile dep-guard
+  does not read (see below). pnpm records an ordinary
   registry resolution as an integrity hash alone and writes a tarball URL
   only when it is not the registry's standard one, so an entry with no URL
   is compared as the default registry's tarball for its name and version
@@ -955,8 +975,67 @@ quiet:
   is checked (`npm-shrinkwrap.json`, `package-lock.json`, `pnpm-lock.yaml`),
   and a `multiple-lockfiles` diagnostic names them. Which one an install
   honours depends on the package manager in use, so a clean file never
-  stands in for a tampered one. `yarn.lock` and `bun.lock` beside them are
-  not parsed either way.
+  stands in for a tampered one. The run summary names the first lockfile
+  dep-guard reads. A `yarn.lock` or `bun.lock` beside them is not parsed;
+  while it is unchanged the `lockfile-unread-sibling` diagnostic names it.
+- No symlinked lockfile or manifest is parsed. On every side of a scan (the
+  index, a ref, the trust base, the working tree), a root lockfile dep-guard
+  parses, the root `package.json`, or a workspace member's `package.json`
+  that is a symlink is not read. A git side decides from the file mode, the
+  working tree with `lstat`; the link is never followed. On the side being
+  judged (the index under `--staged`, the working tree otherwise) the run is
+  exit 2 (`symlinked-input`) with a message naming the path: replace the
+  link with a regular file. On a comparison side (HEAD, the `--base` ref,
+  the trust base) the file is treated as absent there and the
+  `symlinked-input-comparison-side` diagnostic names it, so the pull request
+  that replaces the link is judged as adding a new file and passes when
+  that file is clean.
+- The lockfile downgrade rule. When the base side has a lockfile dep-guard
+  reads with at least one entry, the head side may not (a) carry a root
+  lockfile dep-guard does not read (a v1 npm file, yarn, bun, a binary
+  lockfile, or a lockfile name that is not a regular file, such as a
+  symlinked `yarn.lock`, which always counts as changed) whose bytes differ from the base, a new file
+  included, nor (b) lose every read lockfile with
+  entries while a manifest still declares a dependency a lockfile would
+  record, deleting the only lockfile included. An npm lockfile dep-guard
+  read on the base side may also never become one it does not read. A
+  violation is exit 2 (`lockfile-downgrade`), never a finding. Identity is
+  the git blob id, so a binary file changed in one byte still differs. For a
+  genuine migration: add the entries the error message prints to
+  `acknowledgedLockfiles` on the base branch first (see "Configuration");
+  or review the new lockfile by hand and merge with an admin override of
+  the failing check; or relax the gate on the base branch in a separate,
+  reviewed pull request (under conductor, `enforce: false` on the
+  dependencies gate in `.guardrails.yaml`; for the standalone action,
+  `continue-on-error` on the workflow step) and restore it afterwards. The
+  migration pull request cannot clear the rule for itself, and an advisory
+  mode does not help, because this is a could-not-run, not a finding.
+- Lockfiles below the repository root -- not read. Every tracked file with
+  a lockfile name is listed, and one whose bytes differ from the base is
+  named in the `lockfile-nested-changed` diagnostic: dep-guard did not read
+  it, so the run says nothing about what would be installed from it. A path
+  covered by `ignorePaths` (read from the base on a pull-request run) is
+  noted as `lockfile-nested-ignored` instead. A run that finds lockfiles but
+  reads none says which in `lockfile-not-read`.
+- Workspace patterns -- a `workspaces` list in `package.json` is resolved
+  the way npm's own workspace mapper resolves it, checked against npm
+  10.9.8: patterns in order, a run of leading `!` negating when odd, one
+  leading `./` or `/` stripped, a later pattern cancelling an earlier
+  exclusion it matches, `*` in any segment and `**` at any depth, a
+  wildcard not matching a name that starts with `.`, and a backslash read
+  as a separator. The patterns in `pnpm-workspace.yaml` are resolved with
+  the same rules. When the repository's `core.ignorecase` is true, a
+  staged scan and the `--base` and trust-base refs match pattern segments
+  against directory names without regard to case, as npm does on a
+  case-insensitive file system. A pattern with a `..` segment or a drive
+  letter, or one that uses other glob syntax (`?`, `[...]`, `{...}`,
+  extglob groups) is exit 2 (`workspace-glob-unexpandable`), with a message
+  saying how to rewrite it; so is a `**` walk deeper than 32 directories,
+  cleared by listing the directories. An exclusion that cannot be applied
+  exactly is not applied, which only ever widens the scan. Patterns reach
+  test fixtures and examples that are workspace members, and their findings
+  are reported like any other; an `ignorePaths` entry on the base branch
+  clears them.
 - `yarn.lock`, `bun.lock` -- manifest-level checks only. Neither records
   install scripts, and yarn berry records no resolved URL. A transitive
   alias in either format is therefore invisible the same way every other

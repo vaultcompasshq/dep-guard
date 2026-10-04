@@ -2,6 +2,9 @@ import type { Finding } from '../types.js';
 import { allowClears, isInternalName } from './allow.js';
 import { newRegistryNames } from './candidates.js';
 import type { Check } from './types.js';
+import { privatePinnedScope } from '../online/registry-scope.js';
+
+const PRIVATE_SCOPE_SKIPPED = 'unknown-package-private-scope-skipped';
 
 // The hallucination signal: a dependency name that was not on the registry
 // when the corpus was built.
@@ -29,6 +32,25 @@ export const existenceCheck: Check = (ctx) => {
     // internal registry), so reporting it here as well would be one
     // problem told twice, once wrongly.
     if (isInternalName(registryName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
+      continue;
+    }
+
+    // A scope the project .npmrc pins to a non-public registry is resolved
+    // there, so the public corpus has nothing to say about it, and the
+    // online lookup skips it for the same reason. The pins are a control
+    // input: on a --trust-base run they come from the trust base, so a pull
+    // request cannot add a pin and use it in the same change.
+    const privateScope = privatePinnedScope(ctx, registryName);
+    if (privateScope !== null) {
+      if (!ctx.diagnostics.some((d) => d.code === PRIVATE_SCOPE_SKIPPED && d.message.startsWith(`${privateScope}:`))) {
+        ctx.diagnostics.push({
+          code: PRIVATE_SCOPE_SKIPPED,
+          message:
+            `${privateScope}: pinned to a non-public registry in the project .npmrc (on a --trust-base ` +
+            'run, the .npmrc of the trust base), so names in this scope were not checked against the ' +
+            'public package corpus',
+        });
+      }
       continue;
     }
 

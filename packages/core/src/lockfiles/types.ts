@@ -98,4 +98,19 @@ export interface ParsedLockfile {
   // the manifest/specifier level. This is discovered once, here, at parse
   // time, and carried forward rather than re-derived by a check.
   workspaceLocalNames: Set<string>;
+  // For a pnpm lockfile of several YAML documents with at least one that is
+  // not shaped like a lockfile: the file's bytes outside every document
+  // that was read (the unread documents in order, with their directives
+  // and separators). Part of what the package manager installs from, so
+  // the downgrade rule compares it with the same path on the other side.
+  unreadText?: string;
+  // The other documents of a multi-document pnpm lockfile that are shaped
+  // like a lockfile, each read into a lockfile of its own whose path is
+  // the file's path plus "#" and a label ("#package-manager" for the
+  // document pnpm writes for its own version). The loader adds them to the
+  // extra lockfiles so they are diffed and checked like any other.
+  additionalDocuments?: ParsedLockfile[];
+  // Set on an additional document: the real file it was read from. Such a
+  // document never counts as coverage on its own.
+  documentOf?: string;
 }

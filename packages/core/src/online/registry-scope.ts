@@ -58,6 +58,25 @@ export const PUBLIC_REGISTRY_ORIGIN = originOf(DEFAULT_REGISTRY);
  *    default is neither public nor private evidence, so this does not
  *    guess).
  */
+/**
+ * The scope of `name` when the project .npmrc pins that scope to a
+ * non-public registry, else null. Only the scoped-pin half of
+ * isNonPublicName: a private DEFAULT registry is deliberately not read
+ * here, because it is most often a proxy of the public registry and would
+ * make every unscoped name look private.
+ */
+export function privatePinnedScope(ctx: CheckContext, name: string): string | null {
+  const scope = scopeOf(name);
+  if (scope === null) {
+    return null;
+  }
+  const pin = ctx.npmrcRegistryPins.get(scope);
+  if (pin === undefined) {
+    return null;
+  }
+  return originOf(pin) !== PUBLIC_REGISTRY_ORIGIN ? scope : null;
+}
+
 export function isNonPublicName(ctx: CheckContext, name: string): boolean {
   const scope = scopeOf(name);
   if (scope !== null) {

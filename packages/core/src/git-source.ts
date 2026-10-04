@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
-import { readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
@@ -7,7 +7,13 @@ import { parseNpmLockfile } from './lockfiles/npm.js';
 import { parseOnlyBuilt, parsePnpmLockfile } from './lockfiles/pnpm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
 import { parseManifest, type ParsedManifest } from './manifest.js';
-import { parseNpmrcDefaultRegistry, parseNpmrcPins, type RepoState } from './state.js';
+import {
+  isReadLockfile,
+  parseNpmrcDefaultRegistry,
+  parseNpmrcPins,
+  type RepoState,
+} from './state.js';
+import { withoutByteOrderMark } from './text.js';
 import { DepGuardError, type Diagnostic } from './types.js';
 
 // Loads the two sides of a scan out of a repository. Everything below
@@ -101,6 +107,13 @@ export function isUsableRef(ref: string): boolean {
 const MISSING_PATH_CODES = new Set(['ENOENT', 'ENOTDIR', 'EISDIR']);
 
 const GLOB_UNSUPPORTED = 'workspace-glob-unsupported';
+const GLOB_UNEXPANDABLE = 'workspace-glob-unexpandable';
+// Glob syntax package managers expand that this module does not: "?",
+// character classes, brace sets and extglob groups. A pattern using any of
+// them would otherwise be read as a literal directory name and quietly
+// discover nothing.
+const UNEXPANDABLE_GLOB_SYNTAX = /[?[\]{}()]/;
+const MAX_WORKSPACE_PATTERN_DEPTH = 32;
 const DIR_UNREADABLE = 'workspace-dir-unreadable';
 const PATH_OUTSIDE_ROOT = 'path-outside-root';
 const SYMLINK_CYCLE = 'symlink-cycle';
@@ -194,6 +207,66 @@ async function gitOrThrow(cwd: string, args: string[]): Promise<string> {
   return run.stdout;
 }
 
+// Many blobs in one git process. Each requested id maps to its utf8
+// content; an id git reports as missing, or any failure of the call,
+// leaves the id out of the map, and the caller falls back to reading that
+// path on its own, so a batch problem can only cost time, never content.
+function catFileBatch(root: string, blobIds: string[]): Promise<Map<string, string>> {
+  return new Promise((resolve) => {
+    const result = new Map<string, string>();
+    let child;
+    try {
+      child = spawn('git', ['cat-file', '--batch'], { cwd: root, windowsHide: true });
+    } catch {
+      resolve(result);
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    child.stdout.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total <= MAX_GIT_OUTPUT_BYTES) {
+        chunks.push(chunk);
+      }
+    });
+    child.on('error', () => resolve(new Map()));
+    child.on('close', (code) => {
+      if (code !== 0 || total > MAX_GIT_OUTPUT_BYTES) {
+        resolve(new Map());
+        return;
+      }
+      const output = Buffer.concat(chunks);
+      let offset = 0;
+      for (const blobId of blobIds) {
+        const newline = output.indexOf(0x0a, offset);
+        if (newline === -1) {
+          break;
+        }
+        const header = output.subarray(offset, newline).toString('utf8').split(' ');
+        offset = newline + 1;
+        if (header.length !== 3 || header[0] !== blobId) {
+          // "<id> missing" or anything unexpected: stop trusting the stream.
+          if (header[1] === 'missing' && header[0] === blobId) {
+            continue;
+          }
+          break;
+        }
+        const size = Number(header[2]);
+        if (!Number.isInteger(size) || size < 0 || offset + size > output.length) {
+          break;
+        }
+        if (header[1] === 'blob') {
+          result.set(blobId, output.subarray(offset, offset + size).toString('utf8'));
+        }
+        offset += size + 1;
+      }
+      resolve(result);
+    });
+    child.stdin.on('error', () => undefined);
+    child.stdin.end(`${blobIds.join('\n')}\n`);
+  });
+}
+
 async function readBlob(root: string, spec: string): Promise<string | null> {
   const run = await runGit(root, ['show', spec]);
   if (run.ok) {
@@ -213,45 +286,113 @@ async function readBlob(root: string, spec: string): Promise<string | null> {
 // disk right now.
 interface FileSource {
   read(relPath: string): Promise<string | null>;
+  // The same answer as read() for each path, possibly fetched together.
+  readMany(relPaths: string[]): Promise<Map<string, string | null>>;
   listChildDirs(dir: string): Promise<string[]>;
   // A stable identity for a directory, used to notice that two discovered
   // paths are the same directory reached two ways. Null means the path
   // cannot be used at all (it escapes the root, or its links cycle) and
   // has already been reported. The empty string identifies the root.
   identifyDir(relPath: string): Promise<string | null>;
+  // Every file on this side whose name is a known lockfile name, at any
+  // depth, with the git blob id of its bytes (see LockfileInventoryEntry
+  // in state.ts). A root lockfile name that exists but is not a readable
+  // file is listed too, with a null id.
+  lockfileInventory(): Promise<Array<{ path: string; blobId: string | null }>>;
+  // True when the path itself is a symlink on this side: mode 120000 on a
+  // git side, lstat on the working tree. The link is never followed to
+  // answer this.
+  isSymlink(relPath: string): Promise<boolean>;
+  // True when workspace pattern segments are matched against this side's
+  // directory names without regard to case. Only a git side of a
+  // repository whose core.ignorecase is true answers yes; it only ever
+  // widens what a pattern reaches.
+  ignoresCase(): Promise<boolean>;
 }
 
-async function loadGitListing(root: string, args: string[]): Promise<Set<string>> {
+// path -> blob id, or null when the path has no single stage-0 blob or is
+// a symlink.
+type GitListing = Map<string, string | null>;
+const SYMLINK_MODE = '120000';
+
+interface GitListingResult {
+  files: GitListing;
+  // Every listed path whose entry is a symlink (mode 120000).
+  symlinks: Set<string>;
+}
+
+// Parses the -z output of "git ls-tree -r" ("mode type oid<TAB>path") or
+// of "git ls-files -s" ("mode oid stage<TAB>path"). -z output is
+// NUL-separated, which is the only listing form that survives a path
+// containing a newline or a quote character; the path is everything after
+// the first tab, verbatim.
+async function loadGitListing(
+  root: string,
+  args: string[],
+  shape: 'tree' | 'index'
+): Promise<GitListingResult> {
   const stdout = await gitOrThrow(root, args);
-  const files = new Set<string>();
-  // -z output is NUL-separated, which is the only listing form that
-  // survives a path containing a newline or a quote character.
+  const files: GitListing = new Map();
+  const symlinks = new Set<string>();
   for (const entry of stdout.split('\0')) {
-    if (entry !== '') {
-      files.add(entry);
-    }
-  }
-  return files;
-}
-
-function childDirsOf(files: ReadonlySet<string>, dir: string): string[] {
-  const prefix = dir === '' ? '' : `${dir}/`;
-  const names = new Set<string>();
-  for (const file of files) {
-    if (!file.startsWith(prefix)) {
+    if (entry === '') {
       continue;
     }
-    const rest = file.slice(prefix.length);
-    const slash = rest.indexOf('/');
-    // git records files, never directories, so a subdirectory is only
-    // visible through the files underneath it. No remaining slash means
-    // this entry is a file sitting directly in dir, not a package
-    // directory.
-    if (slash > 0) {
-      names.add(rest.slice(0, slash));
+    const tab = entry.indexOf('\t');
+    if (tab === -1) {
+      continue;
+    }
+    const fields = entry.slice(0, tab).split(' ');
+    const filePath = entry.slice(tab + 1);
+    // A symlink (mode 120000) gets no identity: its blob is the link text,
+    // which stays the same while what the link points at changes.
+    if (fields[0] === SYMLINK_MODE) {
+      files.set(filePath, null);
+      symlinks.add(filePath);
+      continue;
+    }
+    if (shape === 'tree') {
+      files.set(filePath, fields[2] ?? null);
+      continue;
+    }
+    // An index path with a conflict carries several stages and no single
+    // blob; its identity is unknown, which compares as changed.
+    const stage = fields[2];
+    const known = files.has(filePath);
+    files.set(filePath, stage === '0' && !known ? (fields[1] ?? null) : null);
+  }
+  return { files, symlinks };
+}
+
+function isLockfileName(filePath: string): boolean {
+  const slash = filePath.lastIndexOf('/');
+  return LOCKFILE_NAME_SET.has(slash === -1 ? filePath : filePath.slice(slash + 1));
+}
+
+// git records files, never directories, so a subdirectory is only visible
+// through the files underneath it: every directory on a file's path is a
+// child of the one above it, and the final segment is a file, not a
+// directory.
+function buildChildIndex(files: Iterable<string>): Map<string, string[]> {
+  const index = new Map<string, Set<string>>();
+  for (const file of files) {
+    const segments = file.split('/');
+    let parent = '';
+    for (let i = 0; i < segments.length - 1; i += 1) {
+      const name = segments[i];
+      if (name === '') {
+        break;
+      }
+      let names = index.get(parent);
+      if (names === undefined) {
+        names = new Set();
+        index.set(parent, names);
+      }
+      names.add(name);
+      parent = parent === '' ? name : `${parent}/${name}`;
     }
   }
-  return [...names];
+  return new Map([...index].map(([dir, names]) => [dir, [...names]]));
 }
 
 // A git-backed side: the index (revision ":0") or a ref. The file listing
@@ -264,11 +405,25 @@ function childDirsOf(files: ReadonlySet<string>, dir: string): string[] {
 // A git side needs none of the symlink containment the working tree needs:
 // git stores a symlink as a blob holding its target text, so a blob read
 // can never leave the repository.
-function gitSource(root: string, revision: string, listArgs: string[]): FileSource {
-  let listing: Promise<Set<string>> | null = null;
-  const files = (): Promise<Set<string>> => {
-    listing ??= loadGitListing(root, listArgs);
+function gitSource(
+  root: string,
+  revision: string,
+  listArgs: string[],
+  shape: 'tree' | 'index'
+): FileSource {
+  let listing: Promise<GitListingResult> | null = null;
+  const loaded = (): Promise<GitListingResult> => {
+    listing ??= loadGitListing(root, listArgs, shape);
     return listing;
+  };
+  const files = async (): Promise<GitListing> => (await loaded()).files;
+  let ignoreCase: Promise<boolean> | null = null;
+  // directory -> its child directory names, built once from the listing so
+  // a "**" walk does not rescan every path at every directory.
+  let childIndex: Promise<Map<string, string[]>> | null = null;
+  const children = (): Promise<Map<string, string[]>> => {
+    childIndex ??= files().then((listed) => buildChildIndex(listed.keys()));
+    return childIndex;
   };
   return {
     async read(relPath: string): Promise<string | null> {
@@ -277,8 +432,63 @@ function gitSource(root: string, revision: string, listArgs: string[]): FileSour
       }
       return readBlob(root, `${revision}:${relPath}`);
     },
+    // Paths with a known blob id are fetched in one "git cat-file --batch"
+    // call; anything else (a symlink, a conflicted index path) goes
+    // through read() exactly as before.
+    async readMany(relPaths: string[]): Promise<Map<string, string | null>> {
+      const listed = await files();
+      const result = new Map<string, string | null>();
+      const byId = new Map<string, string[]>();
+      for (const relPath of relPaths) {
+        if (!listed.has(relPath)) {
+          result.set(relPath, null);
+          continue;
+        }
+        const blobId = listed.get(relPath) ?? null;
+        if (blobId === null) {
+          result.set(relPath, await readBlob(root, `${revision}:${relPath}`));
+          continue;
+        }
+        byId.set(blobId, [...(byId.get(blobId) ?? []), relPath]);
+      }
+      if (byId.size > 0) {
+        const blobs = await catFileBatch(root, [...byId.keys()]);
+        for (const [blobId, paths] of byId) {
+          const content = blobs.get(blobId);
+          for (const relPath of paths) {
+            result.set(
+              relPath,
+              content === undefined ? await readBlob(root, `${revision}:${relPath}`) : content
+            );
+          }
+        }
+      }
+      return result;
+    },
     async listChildDirs(dir: string): Promise<string[]> {
-      return childDirsOf(await files(), dir);
+      return (await children()).get(dir) ?? [];
+    },
+    async lockfileInventory(): Promise<Array<{ path: string; blobId: string | null }>> {
+      const found: Array<{ path: string; blobId: string | null }> = [];
+      for (const [filePath, blobId] of await files()) {
+        if (isLockfileName(filePath)) {
+          found.push({ path: filePath, blobId });
+        }
+      }
+      return found;
+    },
+    async isSymlink(relPath: string): Promise<boolean> {
+      return (await loaded()).symlinks.has(relPath);
+    },
+    // npm on a case-insensitive file system maps "lib/a" onto a directory
+    // spelled "Lib/A", and git records that a checkout is on such a file
+    // system in core.ignorecase. An unset or unreadable setting is false,
+    // which keeps exact matching.
+    ignoresCase(): Promise<boolean> {
+      ignoreCase ??= runGit(root, ['config', '--bool', '--get', 'core.ignorecase']).then(
+        (run) => run.ok && run.stdout.trim() === 'true'
+      );
+      return ignoreCase;
     },
     // git stores a symlink as a blob holding its target text and never
     // follows it, so two different paths in a tree are always two
@@ -362,7 +572,7 @@ async function createWorkingTreeSource(
     }
   };
 
-  return {
+  const source: FileSource = {
     // The canonical spelling of a directory is where it really lives,
     // written relative to the root. Reporting that -- rather than whichever
     // pattern happened to reach it first -- is what keeps the two sides of
@@ -411,6 +621,37 @@ async function createWorkingTreeSource(
       }
     },
 
+    lockfileInventory(): Promise<Array<{ path: string; blobId: string | null }>> {
+      return workingTreeLockfileInventory(root);
+    },
+
+    // lstat, so the answer is about the path itself and never about what a
+    // link points at. Only the final segment is asked about: a workspace
+    // manifest path is built from the directory's resolved identity.
+    // The file system itself decides case for a literal path here.
+    async ignoresCase(): Promise<boolean> {
+      return false;
+    },
+
+    async isSymlink(relPath: string): Promise<boolean> {
+      try {
+        return (await lstat(path.join(root, relPath))).isSymbolicLink();
+      } catch (err) {
+        if (isMissingPathError(err)) {
+          return false;
+        }
+        throw unreadable(relPath, err);
+      }
+    },
+
+    async readMany(relPaths: string[]): Promise<Map<string, string | null>> {
+      const result = new Map<string, string | null>();
+      for (const relPath of relPaths) {
+        result.set(relPath, await source.read(relPath));
+      }
+      return result;
+    },
+
     async listChildDirs(dir: string): Promise<string[]> {
       let entries;
       try {
@@ -443,6 +684,63 @@ async function createWorkingTreeSource(
         .map((entry) => entry.name);
     },
   };
+  return source;
+}
+
+// The working tree's lockfile inventory: every tracked file with a
+// lockfile name at any depth, plus each root lockfile name present on disk
+// whether tracked or not (the root files are the ones loadLockfiles reads
+// from disk). Blob ids come from git hash-object, which applies the same
+// clean filters git applies when it stores the file, so a checkout with
+// converted line endings still compares equal to the committed blob.
+//
+// Identity is the blob id rather than a hash of decoded text: reads here
+// are utf8 strings, and two different binary lockfiles can decode to the
+// same string. A lockfile name that exists but is a symlink, a directory or
+// a device is listed with a null id instead of being treated as absent. A
+// symlink is never followed and never identified by its link text: the
+// text stays the same while what it points at changes.
+async function workingTreeLockfileInventory(
+  root: string
+): Promise<Array<{ path: string; blobId: string | null }>> {
+  const candidates = new Set<string>(LOCKFILE_FILE_NAMES);
+  const tracked = await runGit(root, ['ls-files', '-z', '--cached']);
+  if (tracked.ok) {
+    for (const entry of tracked.stdout.split('\0')) {
+      if (entry !== '' && isLockfileName(entry)) {
+        candidates.add(entry);
+      }
+    }
+  }
+
+  const found: Array<{ path: string; blobId: string | null }> = [];
+  const regular: string[] = [];
+  for (const candidate of [...candidates].sort()) {
+    let stats;
+    try {
+      stats = await lstat(path.join(root, candidate));
+    } catch (err) {
+      if (isMissingPathError(err)) {
+        continue;
+      }
+      found.push({ path: candidate, blobId: null });
+      continue;
+    }
+    if (stats.isFile()) {
+      regular.push(candidate);
+    } else {
+      found.push({ path: candidate, blobId: null });
+    }
+  }
+
+  if (regular.length > 0) {
+    const hashed = await runGit(root, ['hash-object', '--', ...regular]);
+    const ids = hashed.ok ? hashed.stdout.split('\n').filter((line) => line !== '') : [];
+    regular.forEach((candidate, index) => {
+      found.push({ path: candidate, blobId: ids.length === regular.length ? ids[index] : null });
+    });
+  }
+  return found.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
 function stringArray(value: unknown): string[] {
@@ -459,7 +757,7 @@ function workspaceGlobsFromManifest(content: string | null): string[] {
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    parsed = JSON.parse(withoutByteOrderMark(content));
   } catch {
     // Unreachable in practice: parseManifest reads the same bytes and
     // raises the manifest-parse error for them. Returning nothing here
@@ -482,7 +780,7 @@ function workspaceGlobsFromWorkspaceYaml(content: string | null): string[] {
   }
   let parsed: unknown;
   try {
-    parsed = parseYaml(content);
+    parsed = parseYaml(withoutByteOrderMark(content));
   } catch {
     // Same reasoning as above: parseOnlyBuilt parses this exact content
     // later in the same load and raises the DepGuardError for a malformed
@@ -495,36 +793,59 @@ function workspaceGlobsFromWorkspaceYaml(content: string | null): string[] {
   return stringArray(parsed.packages);
 }
 
-function normalizePattern(pattern: string): string {
-  let normalized = pattern.trim();
-  while (normalized.startsWith('./')) {
-    normalized = normalized.slice(2);
-  }
-  while (normalized.endsWith('/')) {
-    normalized = normalized.slice(0, -1);
-  }
-  return normalized;
+// Collapses runs of slashes and drops trailing ones, the way a glob reads
+// a path: "packages//a/" is "packages/a".
+function collapseSlashes(pattern: string): string {
+  return pattern.replace(/\/{2,}/g, '/').replace(/\/$/, '');
 }
 
-// A workspaces list is attacker-writable content in the very repository
-// being scanned, so a pattern that reaches outside the root -- "../*",
-// "/etc/*", a Windows drive letter -- is dropped rather than expanded.
-// Every path this module reads is built from a pattern that passed here.
-//
-// A backslash is rejected outright rather than analysed: this check only
-// understands "/" as a separator, while path.join treats "\" as one on
-// win32, so "..\evil" would otherwise sail through a "/"-only containment
-// test and then escape once joined.
-function isContainedRelativePath(candidate: string): boolean {
-  if (candidate === '' || candidate.startsWith('/') || candidate.includes('\\')) {
-    return false;
+// How a pattern's segments relate to the repository. "outside" (a ".."
+// segment, or a drive letter) names something this scan cannot read;
+// "dot" (a "." segment left after npm's single leading "./" or "/" strip)
+// is a pattern npm itself maps to nothing.
+function patternReach(pattern: string): 'inside' | 'outside' | 'dot' {
+  if (/^[a-zA-Z]:/.test(pattern)) {
+    return 'outside';
   }
-  if (/^[a-zA-Z]:/.test(candidate)) {
-    return false;
+  const segments = collapseSlashes(pattern).split('/');
+  if (segments.includes('..')) {
+    return 'outside';
   }
-  return candidate
-    .split('/')
-    .every((segment) => segment !== '' && segment !== '.' && segment !== '..');
+  return segments.includes('.') ? 'dot' : 'inside';
+}
+
+// A minimatch-shaped match for patterns made of literal text, "*" and
+// "**": a "*" never matches a name that starts with "." unless the pattern
+// segment starts with "." too, and "**" never crosses such a name. Used
+// both to match a directory against an exclusion and, as npm does, to
+// match one pattern's text against another. Dynamic programming over
+// segment positions, so no input can make it backtrack.
+function matchNpmGlob(pattern: string, candidate: string): boolean {
+  const patternSegments = collapseSlashes(pattern).split('/');
+  const candidateSegments = collapseSlashes(candidate).split('/');
+  const segmentMatches = (segment: string, name: string): boolean =>
+    !(name.startsWith('.') && !segment.startsWith('.')) && matchWildcard(segment, name);
+  // reachable[j]: the pattern prefix processed so far can consume exactly
+  // the first j candidate segments.
+  let reachable = candidateSegments.map((_, index) => index === 0).concat([candidateSegments.length === 0]);
+  for (const segment of patternSegments) {
+    const next = new Array<boolean>(candidateSegments.length + 1).fill(false);
+    for (let j = 0; j <= candidateSegments.length; j += 1) {
+      if (!reachable[j]) {
+        continue;
+      }
+      if (segment === '**') {
+        next[j] = true;
+        for (let k = j; k < candidateSegments.length && !candidateSegments[k].startsWith('.'); k += 1) {
+          next[k + 1] = true;
+        }
+      } else if (j < candidateSegments.length && segmentMatches(segment, candidateSegments[j])) {
+        next[j + 1] = true;
+      }
+    }
+    reachable = next;
+  }
+  return reachable[candidateSegments.length];
 }
 
 // Wildcard matching is done by hand rather than by translating a pattern
@@ -620,69 +941,224 @@ async function expandPattern(
   pattern: string,
   diagnostics: Diagnostic[]
 ): Promise<string[]> {
-  const segments = pattern.split('/');
-  const wildcardIndex = segments.findIndex((segment) => segment.includes('*'));
-  if (wildcardIndex === -1) {
-    return [pattern];
+  const segments = collapseSlashes(pattern).split('/');
+  const ignoreCase = await source.ignoresCase();
+  const literal = !segments.some((segment) => segment.includes('*'));
+  if (literal && !ignoreCase) {
+    return [segments.join('/')];
   }
-  const lastSegment = segments[segments.length - 1];
-  if (wildcardIndex !== segments.length - 1) {
-    // One level of expansion, so the wildcard has to be in the final
-    // segment. A deeper pattern ("packages/*/inner") would need a
-    // recursive walk and a glob dependency; rather than guess, it expands
-    // to nothing and says so, because a workspace package that silently
-    // never gets scanned is the one blind spot this tool must not have.
-    diagnostics.push({
-      code: GLOB_UNSUPPORTED,
-      message: `workspace pattern "${pattern}": only a wildcard in the final path segment is expanded, so no packages were discovered for it`,
-    });
-    return [];
+  // With case ignored, a literal segment is matched against the names the
+  // side lists, and a wildcard against lowercased names, so every spelling
+  // of the directory is reached.
+  const fold = (text: string): string => (ignoreCase ? text.toLowerCase() : text);
+
+  // A segment-by-segment walk. "*" inside a segment matches within one
+  // directory name; a segment that is exactly "**" matches zero or more
+  // directories. As in npm's glob, a wildcard does not match a name that
+  // starts with "." unless the pattern segment does, and "**" does not
+  // descend into one.
+  //
+  // A "**" walk visits each real directory once per pattern position, by
+  // identity, so a symlink that loops back ends the walk instead of
+  // recursing. The depth cap is a backstop: a tree deeper than it cannot
+  // be expanded completely, and that is could-not-run, not a quiet miss.
+  const results: string[] = [];
+  const visited = new Set<string>();
+  const walk = async (dir: string, index: number, depth: number): Promise<void> => {
+    if (index === segments.length) {
+      results.push(dir);
+      return;
+    }
+    if (depth > MAX_WORKSPACE_PATTERN_DEPTH) {
+      throw new DepGuardError(
+        `workspace pattern "${pattern}": the directory tree under it is deeper than ` +
+          `${MAX_WORKSPACE_PATTERN_DEPTH} levels, so it could not be expanded completely; list the ` +
+          'workspace directories explicitly instead of this pattern. Refusing to report a clean pass ' +
+          'over workspace packages that were not discovered',
+        GLOB_UNEXPANDABLE
+      );
+    }
+    const segment = segments[index];
+    const childPath = (child: string): string => (dir === '' ? child : `${dir}/${child}`);
+    if (segment === '**') {
+      const identity = await source.identifyDir(dir);
+      if (identity === null) {
+        return; // outside the root, or an unresolvable link; already reported
+      }
+      const key = JSON.stringify([identity, index]);
+      if (visited.has(key)) {
+        return;
+      }
+      visited.add(key);
+      await walk(dir, index + 1, depth);
+      for (const child of await source.listChildDirs(dir)) {
+        if (child === NEVER_A_PACKAGE_DIR || child.startsWith('.')) {
+          continue;
+        }
+        await walk(childPath(child), index, depth + 1);
+      }
+      return;
+    }
+    if (segment.includes('*')) {
+      for (const child of await source.listChildDirs(dir)) {
+        if (
+          child === NEVER_A_PACKAGE_DIR ||
+          (child.startsWith('.') && !segment.startsWith('.')) ||
+          !matchWildcard(fold(segment), fold(child))
+        ) {
+          continue;
+        }
+        await walk(childPath(child), index + 1, depth + 1);
+      }
+      return;
+    }
+    if (ignoreCase) {
+      for (const child of await source.listChildDirs(dir)) {
+        if (fold(child) === fold(segment)) {
+          await walk(childPath(child), index + 1, depth + 1);
+        }
+      }
+      return;
+    }
+    await walk(childPath(segment), index + 1, depth + 1);
+  };
+  await walk('', 0, 0);
+  if (literal && results.length === 0) {
+    // Nothing on this side under any spelling: the pattern stands as
+    // written, exactly as when case is not ignored.
+    return [segments.join('/')];
   }
-  if (lastSegment.includes('**')) {
-    // A trailing "**" means "at any depth" to pnpm. One level is still
-    // expanded, since discovering more is the safe direction, but anything
-    // nested deeper is missed and that has to be visible.
-    diagnostics.push({
-      code: GLOB_UNSUPPORTED,
-      message: `workspace pattern "${pattern}": "**" is expanded one level only, so packages nested more deeply were not discovered`,
-    });
-  }
-  const parent = segments.slice(0, -1).join('/');
-  const children = await source.listChildDirs(parent);
-  return children
-    .filter((child) => child !== NEVER_A_PACKAGE_DIR && matchWildcard(lastSegment, child))
-    .map((child) => (parent === '' ? child : `${parent}/${child}`));
+  return results;
 }
 
+// One workspaces list, resolved the way npm's own workspace mapper resolves
+// it (checked against npm 10.9.8's @npmcli/map-workspaces; see the
+// git-source tests). Patterns are taken in order:
+//
+//   - a run of leading "!" negates when its length is odd;
+//   - one leading "./" or run of "/" is stripped, so "/packages/a" is
+//     repository-relative;
+//   - a positive pattern cancels every earlier exclusion its own text
+//     matches, and every exclusion left at the end removes the positive
+//     patterns whose text it matches;
+//   - a backslash in a positive pattern is a separator;
+//   - the directories the remaining positive patterns match, minus those an
+//     exclusion matches, are the workspaces.
+//
+// What this module cannot reproduce exactly refuses (exit 2) rather than
+// discovering less: a positive pattern with ".." or a drive or with glob
+// syntax beyond "*" and "**". The message for a ".." pattern that resolves
+// inside the repository says to drop the segment; otherwise it says the
+// pattern names something outside the repository. The pattern "." is the
+// root, which is always read, and is noted; any other positive pattern
+// with a "." segment is one npm maps to nothing, and is noted. An
+// exclusion this module cannot apply exactly is not applied and is noted,
+// which only ever widens the scan.
 async function discoverWorkspaceDirs(
   source: FileSource,
   patterns: string[],
   diagnostics: Diagnostic[]
 ): Promise<string[]> {
-  const includes: string[] = [];
-  const excludes: string[] = [];
+  const positives: string[] = [];
+  let negatedPatterns: string[] = [];
   for (const raw of patterns) {
-    const trimmed = raw.trim();
-    const negated = trimmed.startsWith('!');
-    const pattern = normalizePattern(negated ? trimmed.slice(1) : trimmed);
-    if (!isContainedRelativePath(pattern)) {
+    const bangs = /^!+/.exec(raw)?.[0].length ?? 0;
+    const pattern = raw.slice(bangs).replace(/^\.?\/+/, '');
+    if (bangs % 2 === 1) {
+      if (
+        pattern.includes('\\') ||
+        UNEXPANDABLE_GLOB_SYNTAX.test(pattern) ||
+        patternReach(pattern) !== 'inside'
+      ) {
+        diagnostics.push({
+          code: GLOB_UNSUPPORTED,
+          message: `workspace exclusion "${raw}": this tool cannot apply it exactly, so it was not applied and the directories it names were scanned`,
+        });
+        continue;
+      }
+      negatedPatterns.push(pattern);
+      continue;
+    }
+    // npm's own loop, reproduced with its quirk: an exclusion removed here
+    // shifts the next one into its index, and that next one is not tested
+    // against this pattern.
+    for (let i = 0; i < negatedPatterns.length; i += 1) {
+      if (matchNpmGlob(negatedPatterns[i], pattern)) {
+        negatedPatterns.splice(i, 1);
+      }
+    }
+    positives.push(pattern);
+  }
+  for (const negated of negatedPatterns) {
+    for (const matched of positives.filter((pattern) => matchNpmGlob(negated, pattern))) {
+      positives.splice(positives.indexOf(matched), 1);
+    }
+  }
+  negatedPatterns = negatedPatterns.map(collapseSlashes);
+
+  const dirs = new Set<string>();
+  for (const raw of positives) {
+    const pattern = collapseSlashes(raw.replace(/\\/g, '/'));
+    if (pattern === '') {
+      continue; // the repository root, which is always read
+    }
+    const reach = patternReach(pattern);
+    const staysInside = !/^[a-zA-Z]:/.test(pattern) && !path.posix.normalize(pattern).startsWith('..');
+    if (reach === 'outside' && staysInside) {
+      throw new DepGuardError(
+        `workspace pattern "${raw}": contains a ".." parent segment, which this tool does not expand; ` +
+          'refusing to report a clean pass over workspace packages that were not read. Write the ' +
+          'pattern without it',
+        GLOB_UNEXPANDABLE
+      );
+    }
+    if (reach === 'outside') {
+      throw new DepGuardError(
+        `workspace pattern "${raw}": names a directory outside the repository, which this scan cannot ` +
+          'read; refusing to report a clean pass over workspace packages that were not read. Rewrite it ' +
+          'as a path inside the repository, or remove it',
+        GLOB_UNEXPANDABLE
+      );
+    }
+    if (reach === 'dot') {
       diagnostics.push({
         code: GLOB_UNSUPPORTED,
-        message: `workspace pattern "${raw}": only repository-relative patterns without "..", a leading "/", or a backslash are expanded; it was ignored`,
+        message:
+          pattern === '.'
+            ? `workspace pattern "${raw}": npm maps it to the repository root, whose package.json is always scanned; it adds nothing`
+            : `workspace pattern "${raw}": has a "." segment, which npm maps to no workspace; it was ignored`,
       });
       continue;
     }
-    if (negated) {
-      excludes.push(pattern);
-    } else {
-      includes.push(pattern);
+    if (UNEXPANDABLE_GLOB_SYNTAX.test(pattern)) {
+      // Provably empty: the directory above the first segment that needs
+      // expanding has no subdirectories at all, so nothing could match.
+      const segments = pattern.split('/');
+      const firstGlob = segments.findIndex(
+        (segment) => segment.includes('*') || UNEXPANDABLE_GLOB_SYNTAX.test(segment)
+      );
+      const literalParent = segments.slice(0, firstGlob).join('/');
+      if ((await source.listChildDirs(literalParent)).length === 0) {
+        diagnostics.push({
+          code: GLOB_UNSUPPORTED,
+          message: `workspace pattern "${raw}": uses glob syntax this tool does not expand, and "${literalParent === '' ? '.' : literalParent}" has no subdirectories for it to match`,
+        });
+        continue;
+      }
+      throw new DepGuardError(
+        `workspace pattern "${raw}": uses glob syntax this tool does not expand (only "*" and "**" ` +
+          'are), so the workspace packages it names could not be discovered; refusing to report a ' +
+          'clean pass over manifests that were not read. Rewrite it with "*" and "**", or list the ' +
+          'directories explicitly',
+        GLOB_UNEXPANDABLE
+      );
     }
-  }
-
-  const dirs = new Set<string>();
-  for (const pattern of includes) {
     for (const dir of await expandPattern(source, pattern, diagnostics)) {
-      if (excludes.some((exclusion) => matchGlobPath(exclusion, dir))) {
+      if (
+        dir === '' ||
+        dir.split('/').includes(NEVER_A_PACKAGE_DIR) ||
+        negatedPatterns.some((negated) => matchNpmGlob(negated, dir))
+      ) {
         continue;
       }
       dirs.add(dir);
@@ -754,6 +1230,7 @@ const LOCKFILE_CANDIDATES: Array<[string, LockfileLoader]> = [
 // LOCKFILE_CANDIDATES, order carries no meaning here: every consumer of
 // this array only ever asks "is this name one of them".
 export const LOCKFILE_FILE_NAMES: readonly string[] = LOCKFILE_CANDIDATES.map(([name]) => name);
+const LOCKFILE_NAME_SET: ReadonlySet<string> = new Set(LOCKFILE_FILE_NAMES);
 
 // A parse failure propagates. A null return means the file is genuinely
 // absent and nothing else: swallowing a malformed before-side lockfile
@@ -761,33 +1238,40 @@ export const LOCKFILE_FILE_NAMES: readonly string[] = LOCKFILE_CANDIDATES.map(([
 // which is exactly the shape an attacker would want a corrupt lockfile to
 // produce.
 //
-// Returns the primary lockfile (first present in detection order) and every
-// other present lockfile that has a real parser behind it. yarn.lock and
-// bun lockfiles are not added as extras: they parse to nothing but a
-// manifest-only note, and a repository migrating off yarn would otherwise
-// carry that note for a file no check can read either way.
+// Returns the primary lockfile (the first READ one in detection order, else
+// the first present) and every other present lockfile that has a real
+// parser behind it. yarn.lock and bun lockfiles are not added as extras:
+// they have no entries to diff. Their presence is still recorded, in the
+// lockfile inventory, which is what the downgrade rule and the
+// lockfile-unread-sibling note read.
 async function loadLockfiles(
   source: FileSource,
-  diagnostics: Diagnostic[]
+  diagnostics: Diagnostic[],
+  // Root lockfiles treated as absent on this side (a symlink on a
+  // comparison side); they are never read.
+  unread: ReadonlySet<string>
 ): Promise<{ lockfile: ParsedLockfile | null; extraLockfiles: ParsedLockfile[] }> {
-  let lockfile: ParsedLockfile | null = null;
-  const extraLockfiles: ParsedLockfile[] = [];
+  const loaded: ParsedLockfile[] = [];
   for (const [name, load] of LOCKFILE_CANDIDATES) {
+    if (unread.has(name)) {
+      continue;
+    }
     // bun.lockb is binary and is read only to learn that it exists; the
     // lossily decoded content it returns is never parsed.
     const content = await source.read(name);
     if (content === null) {
       continue;
     }
-    if (lockfile === null) {
-      lockfile = load(name, content);
-      continue;
-    }
-    const parsed = load(name, content);
-    if (parsed.format === 'npm' || parsed.format === 'pnpm') {
-      extraLockfiles.push(parsed);
-    }
+    loaded.push(load(name, content));
   }
+  // The primary is the first lockfile this tool actually reads, so a v1
+  // npm file listed ahead of a pnpm lockfile does not become the file the
+  // manifest walk and the run summary describe. With nothing read, the
+  // first present one stands.
+  const lockfile = loaded.find(isReadLockfile) ?? loaded[0] ?? null;
+  const extraLockfiles = loaded.filter(
+    (parsed) => parsed !== lockfile && (parsed.format === 'npm' || parsed.format === 'pnpm')
+  );
   if (lockfile !== null && extraLockfiles.length > 0) {
     diagnostics.push({
       code: MULTIPLE_LOCKFILES,
@@ -796,6 +1280,11 @@ async function loadLockfiles(
         'lockfile is present at the repository root; every one of them was checked, because which one ' +
         'an install honours depends on the package manager in use',
     });
+  }
+  // The further documents of a multi-document pnpm lockfile ride as extra
+  // lockfiles of their own, after the files themselves.
+  for (const parsed of lockfile === null ? extraLockfiles : [lockfile, ...extraLockfiles]) {
+    extraLockfiles.push(...(parsed.additionalDocuments ?? []));
   }
   return { lockfile, extraLockfiles };
 }
@@ -811,8 +1300,75 @@ const WORKSPACE_YAML = 'pnpm-workspace.yaml';
 // the tree being judged".
 export const NPMRC = '.npmrc';
 
-async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise<RepoState> {
-  const rootManifestContent = await source.read(ROOT_MANIFEST);
+// The root lockfiles this module parses. yarn.lock and the bun lockfiles
+// are only recorded as present, and keep the inventory rule for a
+// symlinked unread lockfile.
+const PARSED_LOCKFILE_NAMES: readonly string[] = LOCKFILE_CANDIDATES.filter(
+  ([, load]) => load === parseNpmLockfile || load === parsePnpmLockfile
+).map(([name]) => name);
+
+const SYMLINK_ON_COMPARISON_SIDE = 'symlinked-input-comparison-side';
+
+// Which part a side plays in a scan. The judged side is the change under
+// review (the index under --staged, the working tree otherwise); a
+// comparison side is what it is compared against (HEAD under --staged, the
+// --base ref, the trust base), named in diagnostics by its label.
+type SideRole = { kind: 'judged' } | { kind: 'comparison'; label: string };
+const JUDGED: SideRole = { kind: 'judged' };
+
+// A lockfile or manifest this scan parses is never read through a symlink,
+// on any side. A git side stores a symlink as its link text and the working
+// tree follows it, so the two kinds of side would parse different bytes for
+// one path.
+//
+// On the judged side such a path is could-not-run. On a comparison side it
+// is treated as absent there, with a diagnostic: it contributes no entries
+// and no coverage, so the judged side's regular file is compared against
+// nothing and every entry in it is judged as new. That is the stricter
+// direction, and it is what lets the pull request that replaces the link
+// with a regular file pass. Returns the paths treated as absent.
+async function screenSymlinkedInputs(
+  source: FileSource,
+  relPaths: string[],
+  role: SideRole,
+  diagnostics: Diagnostic[]
+): Promise<Set<string>> {
+  const absent = new Set<string>();
+  for (const relPath of relPaths) {
+    if (!(await source.isSymlink(relPath))) {
+      continue;
+    }
+    if (role.kind === 'judged') {
+      throw new DepGuardError(
+        `${relPath}: is a symlink on the side being judged. dep-guard does not parse a lockfile or a ` +
+          'package.json through a symlink; replace the link with a regular file. A comparison side ' +
+          'that still has the link does not block that change',
+        'symlinked-input'
+      );
+    }
+    absent.add(relPath);
+    diagnostics.push({
+      code: SYMLINK_ON_COMPARISON_SIDE,
+      message:
+        `${relPath}: is a symlink on ${role.label}, so it was not read there; the scanned side's ` +
+        'file is judged as if that side had no such file',
+    });
+  }
+  return absent;
+}
+
+async function loadState(
+  source: FileSource,
+  diagnostics: Diagnostic[],
+  role: SideRole
+): Promise<RepoState> {
+  const unreadRoot = await screenSymlinkedInputs(
+    source,
+    [ROOT_MANIFEST, ...PARSED_LOCKFILE_NAMES],
+    role,
+    diagnostics
+  );
+  const rootManifestContent = unreadRoot.has(ROOT_MANIFEST) ? null : await source.read(ROOT_MANIFEST);
   const workspaceYamlContent = await source.read(WORKSPACE_YAML);
 
   const manifests: ParsedManifest[] = [];
@@ -839,13 +1395,14 @@ async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise
   // string on both kinds of source.
   const seenDirs = new Set<string>(['']);
 
-  const patterns = [
-    ...workspaceGlobsFromManifest(rootManifestContent),
-    ...workspaceGlobsFromWorkspaceYaml(workspaceYamlContent),
-  ];
-  // discoverWorkspaceDirs already returns each spelling once, so a pattern
-  // listed by both workspace sources costs nothing here and says nothing.
-  for (const dir of await discoverWorkspaceDirs(source, patterns, diagnostics)) {
+  // Each workspace source is resolved on its own, in its own order, and the
+  // directories are combined; a directory either source names is scanned.
+  const workspaceDirs = new Set<string>([
+    ...(await discoverWorkspaceDirs(source, workspaceGlobsFromManifest(rootManifestContent), diagnostics)),
+    ...(await discoverWorkspaceDirs(source, workspaceGlobsFromWorkspaceYaml(workspaceYamlContent), diagnostics)),
+  ]);
+  const manifestPaths: string[] = [];
+  for (const dir of workspaceDirs) {
     const identity = await source.identifyDir(dir);
     if (identity === null) {
       continue; // outside the root, or an unresolvable link; already reported
@@ -865,15 +1422,31 @@ async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise
       continue;
     }
     seenDirs.add(identity);
-
-    const manifestPath = `${identity}/${ROOT_MANIFEST}`;
-    const content = await source.read(manifestPath);
+    manifestPaths.push(`${identity}/${ROOT_MANIFEST}`);
+  }
+  // Read together, in one git call on a git side, then parsed in discovery
+  // order.
+  const unreadMembers = await screenSymlinkedInputs(source, manifestPaths, role, diagnostics);
+  const readPaths = manifestPaths.filter((manifestPath) => !unreadMembers.has(manifestPath));
+  const contents = await source.readMany(readPaths);
+  for (const manifestPath of readPaths) {
+    const content = contents.get(manifestPath) ?? null;
     if (content !== null) {
       manifests.push(parseManifest(manifestPath, content));
     }
   }
 
-  const { lockfile, extraLockfiles } = await loadLockfiles(source, diagnostics);
+  const { lockfile, extraLockfiles } = await loadLockfiles(source, diagnostics, unreadRoot);
+  const readRootPaths = new Set(
+    [...(lockfile === null ? [] : [lockfile]), ...extraLockfiles]
+      .filter(isReadLockfile)
+      .map((parsed) => parsed.path)
+  );
+  const lockfileInventory = (await source.lockfileInventory()).map((entry) => ({
+    path: entry.path,
+    read: readRootPaths.has(entry.path),
+    blobId: entry.blobId,
+  }));
   // Read once and handed to both parsers below -- parseNpmrcPins and
   // parseNpmrcDefaultRegistry read the same file for two different keys,
   // and a source's read() is not assumed free of cost (a git source shells
@@ -884,11 +1457,13 @@ async function loadState(source: FileSource, diagnostics: Diagnostic[]): Promise
     manifests,
     lockfile,
     extraLockfiles,
+    lockfileInventory,
     // pnpm honours the workspace-level allowlist and every manifest's own
     // pnpm block together, and computeDelta reads only this merged list,
     // so the merge has to happen here rather than in the install-script
     // check. Skipping it would leave that check permanently empty.
     onlyBuilt: parseOnlyBuilt(workspaceYamlContent, manifests),
+    npmrcContent,
     npmrcRegistryPins: parseNpmrcPins(npmrcContent),
     npmrcDefaultRegistry: parseNpmrcDefaultRegistry(npmrcContent),
     // A straight carry of what the lockfile parser already discovered
@@ -1109,13 +1684,55 @@ async function hasCommittedHead(root: string): Promise<boolean> {
 }
 
 function indexSource(root: string): FileSource {
-  return gitSource(root, ':0', ['ls-files', '-z']);
+  return gitSource(root, ':0', ['ls-files', '-s', '-z'], 'index');
 }
 
 function refSource(root: string, ref: string): FileSource {
   // The trailing "--" keeps a ref whose name also matches a file in the
   // repository from being read as a pathspec.
-  return gitSource(root, ref, ['ls-tree', '-r', '--name-only', '-z', ref, '--']);
+  return gitSource(root, ref, ['ls-tree', '-r', '-z', ref, '--'], 'tree');
+}
+
+/**
+ * One side read out of a git ref, for use as an additional comparison side
+ * (the trust base of a pull-request run). Diagnostics from reading it are
+ * dropped, since the same workspace configuration is reported from the
+ * sides the scan itself loads, except the note for a symlinked input that
+ * was not read on this side, which is added to `notes` when given.
+ */
+export async function loadRefState(
+  repoRoot: string,
+  ref: string,
+  notes?: Diagnostic[]
+): Promise<RepoState> {
+  if (!isUsableRef(ref)) {
+    throw new DepGuardError(`ref "${ref}" is not a usable git ref`, 'git-error');
+  }
+  const root = await resolveRepoRoot(repoRoot);
+  const diagnostics: Diagnostic[] = [];
+  const state = await loadState(refSource(root, ref), diagnostics, {
+    kind: 'comparison',
+    label: `the trust base "${ref}"`,
+  });
+  notes?.push(...diagnostics.filter((d) => d.code === SYMLINK_ON_COMPARISON_SIDE));
+  return state;
+}
+
+/**
+ * True when two refs name the same tree, so a side already read from one
+ * is exactly the side the other would give. Any failure answers false and
+ * the caller reads the side again.
+ */
+export async function refsNameSameTree(repoRoot: string, a: string, b: string): Promise<boolean> {
+  if (!isUsableRef(a) || !isUsableRef(b)) {
+    return false;
+  }
+  const root = await resolveRepoRoot(repoRoot);
+  const [left, right] = await Promise.all([
+    runGit(root, ['rev-parse', '--verify', '--quiet', `${a}^{tree}`]),
+    runGit(root, ['rev-parse', '--verify', '--quiet', `${b}^{tree}`]),
+  ]);
+  return left.ok && right.ok && left.stdout.trim() !== '' && left.stdout.trim() === right.stdout.trim();
 }
 
 export async function loadStates(repoRoot: string, mode: ScanMode): Promise<StatePair> {
@@ -1125,7 +1742,7 @@ export async function loadStates(repoRoot: string, mode: ScanMode): Promise<Stat
   if (mode.kind === 'audit') {
     const root = await resolveAuditRoot(repoRoot);
     await noteAnchorDifference(repoRoot, root, diagnostics);
-    const after = await loadState(await createWorkingTreeSource(root, diagnostics), diagnostics);
+    const after = await loadState(await createWorkingTreeSource(root, diagnostics), diagnostics, JUDGED);
     return { before: null, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
 
@@ -1134,16 +1751,19 @@ export async function loadStates(repoRoot: string, mode: ScanMode): Promise<Stat
 
   if (mode.kind === 'staged') {
     const before = (await hasCommittedHead(root))
-      ? await loadState(refSource(root, 'HEAD'), diagnostics)
+      ? await loadState(refSource(root, 'HEAD'), diagnostics, { kind: 'comparison', label: 'HEAD' })
       : null;
-    const after = await loadState(indexSource(root), diagnostics);
+    const after = await loadState(indexSource(root), diagnostics, JUDGED);
     return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
 
   if (!isUsableRef(mode.ref)) {
     throw new DepGuardError(`base ref "${mode.ref}" is not a usable git ref`, 'git-error');
   }
-  const before = await loadState(refSource(root, mode.ref), diagnostics);
-  const after = await loadState(await createWorkingTreeSource(root, diagnostics), diagnostics);
+  const before = await loadState(refSource(root, mode.ref), diagnostics, {
+    kind: 'comparison',
+    label: `the --base ref "${mode.ref}"`,
+  });
+  const after = await loadState(await createWorkingTreeSource(root, diagnostics), diagnostics, JUDGED);
   return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
 }

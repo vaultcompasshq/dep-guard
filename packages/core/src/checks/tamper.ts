@@ -846,7 +846,15 @@ export const tamperCheck: Check = (ctx) => {
       } else {
         // Which of the two signals a rewrite in place is (and whether it is
         // one at all) is the algorithm ladder's answer, not this branch's.
-        const verdict = integrityVerdict(before.integrity, after.integrity);
+        //
+        // The ladder's forgiveness of an upward rehash rests on the same URL
+        // meaning the same bytes. The install reads the judged side's
+        // .npmrc, so when that file differs from the comparison side's, the
+        // same URL text no longer pins the bytes, and nothing is forgiven:
+        // the rewrite is reported as the integrity-changed it would be
+        // without the ladder.
+        const laddered = integrityVerdict(before.integrity, after.integrity);
+        const verdict = laddered === null && ctx.npmrcChanged === true ? 'forged' : laddered;
         if (verdict === 'forged') {
           raise({
             ruleId: 'lockfile-tamper',
@@ -884,13 +892,23 @@ export const tamperCheck: Check = (ctx) => {
       // entries that drop "resolved".) There is no location to hold
       // constant, so the algorithm ladder's forgiveness of a same-URL rehash
       // does not apply: one version has one tarball and one hash.
+      //
+      // The ladder may still RELABEL here, never forgive: a move to a
+      // weaker algorithm is reported as integrity-downgraded, and every
+      // other answer, an upward rehash included, stays integrity-changed.
+      const downgraded = integrityVerdict(before.integrity, after.integrity) === 'downgraded';
       raise({
         ruleId: 'lockfile-tamper',
         severity: 'critical',
         packageName: subject.packageName,
-        message: `"${subject.packageName}" resolves to the same version as ${priorSide(subject)}, but its integrity hash was rewritten and only one side records where the tarball comes from.`,
+        message: downgraded
+          ? `"${subject.packageName}" resolves to the same version as ${priorSide(subject)}, but its integrity hash was re-recorded under a weaker algorithm and only one side records where the tarball comes from.`
+          : `"${subject.packageName}" resolves to the same version as ${priorSide(subject)}, but its integrity hash was rewritten and only one side records where the tarball comes from.`,
         manifestPath: subject.manifestPath,
-        details: { signal: comparisonSignal('integrity-changed'), kind: subject.kind },
+        details: {
+          signal: comparisonSignal(downgraded ? 'integrity-downgraded' : 'integrity-changed'),
+          kind: subject.kind,
+        },
       });
     } else if (
       before.integrity === undefined &&
@@ -996,10 +1014,25 @@ export const tamperCheck: Check = (ctx) => {
         before.integrity === after.integrity;
       const somethingToGoOn =
         beforeRes !== null || afterRes !== null || before.integrity !== after.integrity;
-      if (before.resolvedUrl !== after.resolvedUrl && !bytesVouchedFor && somethingToGoOn) {
+      // Both sides unreadable, no hash on either, the version held, and the
+      // location text moved: no hash proves the bytes changed, but nothing
+      // vouches for them either, and the same version from a different
+      // place is a different artifact. High rather than critical, for the
+      // same reason as tarball-repointed-unverified. A version that moved
+      // stays a diagnostic, as a bump does everywhere else in this engine.
+      const heldAndHashless =
+        before.integrity === undefined &&
+        after.integrity === undefined &&
+        before.version !== undefined &&
+        before.version === after.version;
+      if (
+        before.resolvedUrl !== after.resolvedUrl &&
+        !bytesVouchedFor &&
+        (somethingToGoOn || heldAndHashless)
+      ) {
         raise({
           ruleId: 'lockfile-tamper',
-          severity: 'critical',
+          severity: somethingToGoOn ? 'critical' : 'high',
           packageName: subject.packageName,
           message: `"${subject.packageName}" now resolves from a location this scan could not read as a URL, and nothing on either side vouches for the bytes it names.`,
           manifestPath: subject.manifestPath,

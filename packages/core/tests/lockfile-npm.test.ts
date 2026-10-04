@@ -359,6 +359,18 @@ describe('parseNpmLockfile v1 lockfile handling', () => {
     expect(() => parseNpmLockfile(PATH, v1Content)).not.toThrow();
   });
 
+  test('a string lockfileVersion of digits is read as that number, so "3" or "2" with no packages map is a parse error', () => {
+    expectLockfileParse(() => parseNpmLockfile(PATH, JSON.stringify({ lockfileVersion: '3' })));
+    expectLockfileParse(() => parseNpmLockfile(PATH, JSON.stringify({ lockfileVersion: '2' })));
+  });
+
+  test('a string lockfileVersion "1", or one that is not digits, still gives the v1 diagnostic', () => {
+    for (const version of ['1', 'x', ' 3', '3.0']) {
+      const result = parseNpmLockfile(PATH, JSON.stringify({ lockfileVersion: version }));
+      expect(result.diagnostics.map((d) => d.code)).toEqual(['npm-lockfile-v1']);
+    }
+  });
+
   test('a lockfile with no lockfileVersion field at all is treated as v1, not thrown', () => {
     const content = JSON.stringify({ name: 'legacy-app', version: '1.0.0' });
     const result = parseNpmLockfile(PATH, content);

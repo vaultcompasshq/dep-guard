@@ -903,21 +903,15 @@ diagnostic is now raised only for a lockfile with NO `packages` key (a real
 v1 lockfile), so it is not "the only case where a missing map is a
 diagnostic" so much as the only case where a missing map is not an error:
 a `packages` key that is present and not an object, and a declared version
-of 2 or more with no map, both still throw `lockfile-parse`. And a base
-side that parsed a packages map against a head side that did not is a
-`lockfile-downgrade` error (`delta.ts`'s `refuseLockfileDowngrade`), exit 2,
-never a diagnostic, because that change removes what every check reads while
-npm keeps installing from the head file. The guard also fires per
-repository: when the base had a parsed lockfile (npm with a packages map,
-or pnpm, with entries) and the head has lockfiles but none this tool
-parses -- only a v1 npm file, a `yarn.lock`, a `bun.lock`, or a binary one --
-it is the same error, so swapping a lockfile for a format this tool cannot
-read is not a way out (tests `N1: npm lockfile replaced by a yarn.lock` and
-`pnpm lockfile replaced by a v1 npm lockfile`; controls `npm lockfile
-replaced by a parsed pnpm lockfile is not a downgrade` and `a lockfile
-deleted with nothing in its place is left to the lockfile-missing path`,
-because a lockfile deleted outright is a separate, scheduled case and is not
-covered here). Pinned by the tests named
+of 2 or more with no map (a number, or a string of digits, which is read as
+that number), both still throw `lockfile-parse` (tests `a string
+lockfileVersion of digits is read as that number, so "3" or "2" with no
+packages map is a parse error` and `a string lockfileVersion "1", or one
+that is not digits, still gives the v1 diagnostic`). A base side that
+parsed a packages map against a head side that did not is a
+`lockfile-downgrade` error, exit 2, never a diagnostic; that and every other
+way the lockfile set can lose what this tool reads is the lockfile
+downgrade rule, described in its own section below. Pinned by the tests named
 `a tampered node_modules/lodash is caught when lockfileVersion is the string
 "3"`, `... is the number 1`, `... is null`, `... is deleted`, and `a base
 with a packages map whose head loses it (v1 shape) is not a clean pass`; the
@@ -940,7 +934,23 @@ hash and no URL is given one; a git or directory entry has neither and is
 not invented a registry origin. Separately, and for npm as well, a rewritten
 hash at a held version where exactly one side names a location is
 `integrity-changed` outright (a new `else if` in `compare`), because there is
-no location to hold constant. Pinned by `integrity rewritten and a tarball
+no location to hold constant. The algorithm ladder may relabel there and
+never forgive: a move to a weaker algorithm is `integrity-downgraded`, every
+other rewrite, an upward one included, stays `integrity-changed` (tests
+`sha512 to sha1 while resolved is dropped is integrity-downgraded` and `sha1
+to sha512 while resolved is dropped is still integrity-changed and
+critical`). The ladder's forgiveness of an upward rehash at the same URL
+assumes the same URL means the same bytes, which holds only while the
+`.npmrc` the install reads is the one the comparison side had: when the
+judged side's `.npmrc` differs from any comparison side (`--base` or HEAD by
+bytes, the trust base by its own comparison), nothing is forgiven and the
+rewrite is `integrity-changed` (`CheckContext.npmrcChanged`; tests `an upward
+rehash at the same URL is reported as integrity-changed when .npmrc changed
+in this change`, `N9: npm: a head .npmrc plus a sha1 to sha512 rehash at the
+same URL is integrity-changed`, `pnpm: a head .npmrc plus a sha1 to sha512
+rehash is integrity-changed`, controls `control: an upward rehash at the
+same URL with .npmrc unchanged is not a finding` and `control: the same
+rehash with .npmrc unchanged is not a finding`). Pinned by `integrity rewritten and a tarball
 URL on another host added at the same version`, `integrity rewritten and
 repointed to another package tarball on the same registry`, `a tarball URL
 on another host added with the integrity unchanged`, `the project default
@@ -963,8 +973,11 @@ looked at `npm-shrinkwrap.json`, which npm prefers over `package-lock.json`
 shrinkwrap's resolved value). A clean file beside a tampered one therefore
 scanned clean. `loadLockfiles` now reads `npm-shrinkwrap.json` first, then
 `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb`;
-the first present is the primary lockfile (the one the run summary names)
-and every other npm or pnpm one rides in `RepoState.extraLockfiles`, which
+the first one this tool READS (npm with a packages map, or pnpm) is the
+primary lockfile (the one the run summary names and the manifest walk
+selects from), falling back to the first present when none is read (test
+`the primary lockfile is the first one this tool reads`), and every other
+npm or pnpm one rides in `RepoState.extraLockfiles`, which
 `computeDelta` diffs against the before-side file with the same path (else
 the same format) and appends to `lockEntryChanges`, each change tagged with
 its own `lockfilePath` and `lockfileFormat`. A `multiple-lockfiles`
@@ -972,8 +985,10 @@ diagnostic names them. `LOCKFILE_FILE_NAMES` is derived from the same list, so
 the empty-scan probe in `scan.ts` recognises a shrinkwrap. Deliberately not
 done: choosing one lockfile from the `packageManager` field, because a
 developer machine and CI may not agree and checking all of them needs no
-such guess. yarn and bun beside npm or pnpm are not added as extras; they
-parse to nothing but a manifest-only note. Pinned by `a clean package-lock.json
+such guess. yarn and bun beside npm or pnpm are not added as extras, since
+they have no entries to diff; their presence is recorded in the lockfile
+inventory instead, where the downgrade rule and the
+`lockfile-unread-sibling` diagnostic read it. Pinned by `a clean package-lock.json
 decoy beside a tampered pnpm-lock.yaml`, `a tampered npm-shrinkwrap.json
 beside a clean package-lock.json`, `a tampered npm-shrinkwrap.json newly
 added beside the package-lock.json the base already had`, `npm-shrinkwrap.json
@@ -1041,6 +1056,247 @@ entry whose resolution is a git commit`, and the controls `npm: a new entry
 from an ordinary registry tarball raises nothing`, `npm: a new entry from the
 project registry host with no /-/ tarball path raises nothing` and `pnpm: a
 new entry with an integrity-only registry resolution raises nothing`.
+
+## The lockfile set may not lose coverage or gain unread bytes (0.10.1)
+
+**The inventory.** Each side of a scan lists every file whose name is a
+known lockfile name, at any depth, read or not, with the git blob id of its
+bytes (`RepoState.lockfileInventory`, built in `git-source.ts`). A git side
+takes ids from `ls-tree -r` or `ls-files -s`; the working tree from `git
+hash-object`, which applies the same clean filters git applies when storing.
+Identity is never a hash of decoded text: reads are utf8 strings, and two
+different binary lockfiles can decode to the same one (test `a bun.lockb
+that changes in one invalid utf8 byte beside a covering lockfile is
+refused`). A lockfile name that is a symlink (mode 120000 on a git side, a
+link on the working tree, never followed) or that exists but is a directory
+is listed with a null id, and a null id never compares equal and can never
+be acknowledged: a link's text stays the same while what it points at
+changes (tests `a head yarn.lock that is a directory beside a covering
+lockfile is refused`, `a head yarn.lock that is a symlink cycle beside a
+covering lockfile is refused`, `a symlinked root lockfile whose target
+changes is refused on the working tree`, `a symlinked root lockfile is
+refused on a staged scan, from its git mode` and `an acknowledgement can
+never match a symlinked lockfile`). On the working tree, files below the
+root are the tracked ones.
+
+**A symlinked input is never parsed.** On every side, a root lockfile this
+tool parses (`npm-shrinkwrap.json`, `package-lock.json`, `pnpm-lock.yaml`),
+the root `package.json`, or a workspace member's `package.json` that is a
+symlink is not read (`git-source.ts`, `screenSymlinkedInputs`). A git side
+decides from the entry's mode (120000) in its listing, never from the link
+text; the working tree decides with `lstat` and never follows the link.
+
+On the side being judged (the index under `--staged`, the working tree
+otherwise) the scan is could-not-run, exit 2 (`symlinked-input`), with a
+message naming the path and saying to replace the link with a regular file.
+On a comparison side (HEAD under `--staged`, the `--base` ref, the trust
+base) the path is treated as absent there and the
+`symlinked-input-comparison-side` diagnostic names it and the side. It
+contributes no entries and no coverage on that side, so the judged side's
+regular file is compared against nothing and every entry in it is judged
+as new; it cannot make a judged change look unchanged, and it is not a
+lockfile an acknowledgement or the deletion form can name. The pull request
+that replaces such a link with a regular file therefore passes when the new
+file is clean.
+
+Tests: `a symlinked pnpm-lock.yaml whose link text is a valid lockfile is
+refused on a staged scan`, `a symlinked pnpm-lock.yaml on the head side of
+a pull request is refused`, `a symlinked root package.json on the head side
+of a pull request is refused`, `a symlinked pnpm-lock.yaml in the working
+tree is refused without following it`, `a symlinked package-lock.json is
+refused on a staged scan`, `a symlinked root package.json is refused on a
+staged scan`, `a symlinked workspace member package.json is refused on a
+staged scan`, `a root manifest that is a symlink out of the root is
+refused, never read`, `a pull request that replaces a symlinked
+pnpm-lock.yaml on the base with a clean regular file passes`, `a symlinked
+pnpm-lock.yaml on the base never makes a tampered head lockfile look
+unchanged`, `a symlinked pnpm-lock.yaml on the trust base alone is noted,
+not refused`, `a symlinked pnpm-lock.yaml at HEAD replaced by a regular
+file in the index passes a staged scan`, `a pull request that replaces a
+symlinked root package.json on the base with a regular file passes` and `a
+symlinked root package.json on the base never hides a dependency the head
+adds`. A symlinked `yarn.lock` or bun lockfile is only recorded as present
+and keeps the inventory rule above.
+
+**The rule** (`delta.ts`, `refuseLockfileDowngrade`). A lockfile is READ when
+this tool parses its entries (npm with a packages map, or pnpm); a side has
+COVERAGE when a read lockfile on it has an entry. When the comparison side
+has coverage, the judged side may not carry a root lockfile this tool does
+not read whose blob differs from the same path there (a new path, and a path
+that was read there, both count), and may not lose coverage while any
+manifest declares a dependency a lockfile would record: every non-exempt
+dependency in any section, peerDependencies included, except names of
+workspace packages discovered as manifests. That exemption reads
+`ParsedManifest.name`, never the lockfile's `"link": true` entries, which the
+lockfile author writes (test `a package-lock.json gutted by marking lodash
+"link": true is refused`). Independently of coverage, an npm lockfile read on
+the comparison side may not become an unread npm lockfile under either npm
+name. In a multi-document pnpm lockfile, every document shaped like a pnpm
+lockfile is read (see "A pnpm lockfile is a YAML stream" below); the bytes
+outside the documents that are read are unread bytes of that file, compared
+in order with the same path, directives and separators included (tests `a
+document not shaped like a pnpm lockfile, newly added, is refused`, `... that
+is duplicated is refused`, `one of several documents not shaped like a pnpm
+lockfile, removed, is refused`, `the only document not shaped like a pnpm
+lockfile, removed, is refused`, `a YAML directive added before a document not
+shaped like a pnpm lockfile is refused`, control `control: an unchanged
+document not shaped like a pnpm lockfile keeps the multi-document note`).
+Such a refusal is acknowledged by the plain lockfile path and its blob (test
+`a changed pnpm document this tool does not read prints exactly one entry,
+for the plain lockfile path and its head blob`). Every violation is one error,
+`lockfile-downgrade`, exit 2, never a finding, with one message that names
+which half fired and the paths. Tests: the `N7:` group in
+`silent-passes.test.ts`, among them `a clean package-lock.json kept and a new
+yarn.lock added is refused`, `a package-lock.json gutted to zero entries
+while package.json declares lodash is refused`, `a v1 package-lock.json added
+beside a parsed pnpm-lock.yaml is refused`, `a yarn.lock beside a covering
+package-lock.json that changes is refused`, `the only lockfile deleted while
+dependencies are still declared is refused, and the message says so`, and
+the controls `control: pnpm replaced by an npm v3 lockfile with entries
+resolves`, `control: every dependency removed and the lockfile emptied
+resolves`, `control: bun.lockb replaced by bun.lock with no readable lockfile
+on the base resolves`, `control: one of two covering lockfiles deleted
+resolves`, `control: a lockfile left with only workspace links while only
+workspace packages are declared resolves` and `control: a pnpm lockfileVersion
+5.4 lockfile migrated to v9 resolves`. An unchanged unread root lockfile
+beside a read one is named in `lockfile-unread-sibling` (`control: an
+unchanged legacy yarn.lock beside package-lock.json resolves with
+lockfile-unread-sibling`).
+
+**Every comparison side.** With `--base` and `--trust-base` this rule is
+evaluated against the `--base` side and against the trust base, and fails if
+either fails. (The entry-level checks compare against the `--base` side.)
+When the trust base is the same tree as the `--base` side, that side is
+reused rather than read again. With `--trust-base` alone
+the trust base is the comparison side for the lockfile set while findings
+stay an audit. With `--staged` it compares the index with HEAD only, even
+under `--trust-base`, because every commit on a migration branch would
+otherwise be refused. Tests: `N11:` `--trust-base alone: npm replaced by yarn
+is refused against the trust base`, `--base X --trust-base Y where X already
+has the yarn.lock and Y does not is refused`, `control: --staged with
+--trust-base compares the index against HEAD only`, and at the CLI `--base
+with --trust-base exits 2 with lockfile-downgrade on stderr` and
+`--trust-base alone compares the lockfile set against the trust base and
+exits 2`.
+
+**The acknowledgement is for exact bytes, from the comparison side only.**
+`acknowledgedLockfiles` entries (`PATH:BLOBID`, PATH a root lockfile name,
+BLOBID a full lowercase blob id, split on the last colon, anything else
+`config-invalid`) clear the rule for exactly the named bytes: a changed unread
+file by its blob on the judged side; lost coverage when every root lockfile
+on the judged side is named; and, when the judged side has no root lockfile,
+a removal only when every covering lockfile of the comparison side is named
+with its blob there. Entries come from the trust base's config when there is
+one, else from the `--base` ref's, else from HEAD's for `--staged`; the
+judged side's config never clears its own refusal. Without a trust base that
+config is read only after the rule has refused. An acknowledgement clears
+this rule and nothing else, changes no fingerprint, and every use is named in
+`lockfile-downgrade-acknowledged`. The refusal prints the entries to add and
+the one place they are read on that kind of run (tests `on a staged scan the
+refusal says to commit the entry first, because it is read from HEAD` and
+`on a --base run without a trust base the refusal names the --base ref`).
+An acknowledged lockfile this tool reads keeps every entry check (test `an
+acknowledged lockfile this tool reads still has its entries checked`).
+Tests: the `N13:` group, among them `an entry added only on the head does not
+clear`, `an entry for a different blob id does not clear`, `an entry for the
+right blob clears a changed unread lockfile beside a covering one`, `the
+deletion form clears only when every covering base lockfile is named with its
+base blob id`, `a partial deletion set does not clear`, `without a trust
+base, an entry only in the working tree does not clear`, `on a staged scan an
+entry only in the index does not clear`, `an acknowledgement does not
+suppress a finding in a lockfile this tool reads` and `the refusal prints the
+exact entry to add and says it goes on the base branch first`; config
+validation in `loadConfig acknowledgedLockfiles`.
+
+**Lockfiles below the root are named, not judged.** This tool reads no
+lockfile below the repository root. One whose blob differs from the
+comparison side, a new one included, is named in `lockfile-nested-changed`,
+which says the run says nothing about what would be installed from it; the
+run continues and the exit code is decided by the findings. A path covered
+by `ignorePaths` (from the comparison side's config as everywhere else) is
+`lockfile-nested-ignored` instead, and such an entry is not reported as
+unmatched. The no-lockfile note `lockfile-missing` is printed only when the
+inventory is empty; otherwise `lockfile-not-read` names what is present.
+Tests: the `N8:` group and `computeDelta lockfiles below the repository
+root`.
+
+**Two hashless unreadable resolutions at a held version are a finding.**
+When both resolved values are unreadable, neither side has an integrity
+hash, the version is held and the location text moved, `compare` raises a
+high `resolution-unreadable` (`checks/tamper.ts`); a moved version stays the
+`tamper-resolution-unreadable` diagnostic. Tests `two unreadable resolutions
+at a held version, with no hash on either side, are one high
+resolution-unreadable` and `two unreadable resolutions where the version
+moved, with no hash on either side, are noted, not reported`.
+
+**A scope pinned to a private registry skips the corpus check.** A new
+dependency whose scope the `.npmrc` pins to a non-public origin is not
+checked against the public corpus and `unknown-package-private-scope-skipped`
+names the scope (`checks/existence.ts`, `privatePinnedScope` in
+`online/registry-scope.ts`). Only the scoped-pin half counts: a private
+default registry does not. The pins are the trust base's under
+`--trust-base`. Tests `a name whose scope is pinned to a private registry is
+skipped with a diagnostic naming the scope`, `a name whose scope is pinned
+to registry.npmjs.org is still reported`, `an unscoped name under a private
+default registry is still reported`, `a pin added only on the head does not
+clear a new private-scope name` and `a pin on the trust base clears it even
+when the head deletes .npmrc`.
+
+**pnpm from lockfileVersion 5.x.** `parsePackageKey` reads the 5.x
+`/name/version` and `/@scope/name/version` keys (peer sets after `_`
+dropped), and `requiresBuild: true` is an install script in lockfiles older
+than v9; `pnpm-no-install-script-flag` is raised only for a lockfile not
+provably older than v9. Tests: `parsePnpmLockfile lockfileVersion 5.x keys
+and requiresBuild`.
+
+**Workspace patterns: what is expanded, and the rest refuses.** Each list
+(`package.json` workspaces, `pnpm-workspace.yaml` packages) is resolved on
+its own, by the rules of npm's workspace mapper as measured against npm
+10.9.8's `@npmcli/map-workspaces` (`discoverWorkspaceDirs` in
+`git-source.ts`): patterns in order; a run of leading `!` negates when odd;
+one leading `./` or run of `/` is stripped; a positive pattern cancels an
+earlier exclusion its text matches, and an exclusion left at the end removes
+the positive patterns its text matches; a backslash in a positive pattern is
+a separator; `*` matches within any segment and a segment that is exactly
+`**` matches zero or more directories, neither matching a name that starts
+with `.` unless the pattern does; `node_modules` is never a workspace; runs
+of slashes read as one. On a git side (the index or a ref) of a repository
+whose `core.ignorecase` is true, pattern segments, literal and wildcard,
+match directory names without regard to case, as npm does on a
+case-insensitive file system; with the setting false or unset, matching is
+exact. This only ever widens the scan (the `N16:` group, four tests, both
+settings, for `lib/a` and `lib/*` against `Lib/A`). The expected results in
+the test group `package.json workspaces resolve to the directories npm
+maps` are npm's own output for the same tree. Whether pnpm resolves `pnpm-workspace.yaml` the
+same way is not established here. What is not reproduced refuses: a
+positive pattern with a `..` segment or a drive letter (when a `..`
+pattern resolves inside the repository the message says to write it
+without the parent segment) or using other glob syntax (`?`, `[...]`, `{...}`, extglob groups,
+unless the directory it would expand has no subdirectories) is
+`workspace-glob-unexpandable`, exit 2, and so is a `**` walk deeper than 32
+directories; each message says how to rewrite the pattern. A pattern with a
+`.` segment, which npm maps to nothing, and `.` itself, which npm maps to
+the root that is always scanned, are notes (tests `the pattern "." is noted
+as the repository root, which is scanned anyway` and `a pattern with a
+parent segment that resolves inside the repository is refused for the
+segment`). An
+exclusion that cannot be applied exactly is not applied and noted, which only
+ever widens the scan. A `**` walk visits each real directory once per
+pattern position, so a symlink loop ends it. Tests: that group, `a workspace
+pattern reaching outside the repository root is could-not-run`, `a backslash
+in a workspace pattern reads as a separator, so "..\evil" is could-not-run`,
+`a workspace pattern naming a drive is could-not-run`, `a double star walk
+ends at a symlink cycle`, `a pattern using glob syntax this tool cannot
+expand is could-not-run`, `an exclusion this tool cannot apply only ever
+makes the scan cover more`, and the `N12:` group.
+
+**A leading byte order mark is accepted.** Every JSON and YAML file the scan
+reads, and the project `.npmrc`, passes through one helper
+(`withoutByteOrderMark` in `text.ts`) before it is parsed. npm's ini parser
+honours the first `.npmrc` line after the mark, and so does this tool.
+Tests: `a leading UTF-8 byte order mark is accepted wherever a file is
+parsed` (its `.npmrc` case included) and `a root manifest and a workspace
+manifest with a byte order mark are both read`.
 
 ## Path spellings have one source
 
@@ -1151,21 +1407,30 @@ would call every such lockfile ambiguous and keep failing precisely the
 scans this exists to fix. This is the standing trap for anyone
 re-deriving the rule from the format description instead of from a file.
 
-The self-management document's own packages are deliberately NOT scanned.
-They are genuinely installed dependencies and reading them would be real
-coverage, and it is deferred rather than bundled here so that the fix for
-the exit-2 failure is not carrying a coverage change nobody asked for.
-`pnpm-multi-document-lockfile` names how many documents the file held and
-how many were not scanned, so the omission cannot read as a clean scan of
-the whole file. Scanning both importer sets, attributed, is the open
-follow-up.
-
-That diagnostic counts every UNSELECTED document, and it says exactly
-that rather than calling them self-management documents. Step 4 of the
-rule can select on importer count alone, in which case a discarded
-document was never classified as self-management at all, and a message
-naming a cause its own number does not support is the failure these
-diagnostics exist to prevent.
+The selected document is what the manifest walk reads. Every other
+document shaped like a pnpm lockfile (a lockfile version, and importers and
+packages that are mappings when present), the self-management document
+included, is read as well, into a lockfile of its own whose path is the
+file's path plus `#package-manager` (numbered after the first) or
+`#document-N`. Those lockfiles ride as extra lockfiles: their entries go
+through every check, and each is diffed against one lockfile on the other
+side, chosen as for every extra lockfile (`computeDelta` in `delta.ts`): the
+same labelled path when the other side has it, else the first lockfile of
+the same format there, which is normally that side's project document, else
+that side's primary lockfile. Within one side, entries of different
+documents never merge and never make an ambiguity by accident, and these
+lockfiles never count as the project's coverage (`documentOf` in
+`lockfiles/types.ts`). Tests: `the self-management
+document is read into a lockfile of its own`, `the same name and version in
+two documents stays one entry in each, never merged`, `a pnpm
+self-management document prepended with a tarball on another host is a
+finding, exit 1`, `a pnpm self-management document repointed to another
+host is a finding, exit 1` and `an honest pnpm self-update is exit 0 with no
+refusal`. A document that is not shaped like a pnpm lockfile is not read;
+`pnpm-multi-document-lockfile` counts those documents and only those, and
+the downgrade rule compares the file's bytes outside the read documents
+(test `a document not shaped like a pnpm lockfile is not read, is named in a
+diagnostic, and its text is kept`).
 
 ## Diagnostics never change the exit code
 
@@ -1193,7 +1458,9 @@ Current diagnostic codes: `audit-anchor-differs`,
 `delta-ambiguous-lock-entry`, `delta-new-lock-entries`,
 `ignore-path-dropped`,
 `ignore-path-unmatched`, `lockfile-binary-skipped`,
-`lockfile-format-manifest-only`, `lockfile-missing`,
+`lockfile-downgrade-acknowledged`, `lockfile-format-manifest-only`,
+`lockfile-missing`, `lockfile-nested-changed`, `lockfile-nested-ignored`,
+`lockfile-not-read`, `lockfile-unread-sibling`,
 `manifest-alias-empty`, `multiple-lockfiles`, `npm-lockfile-invalid-entry`,
 `npm-lockfile-unverifiable-name`, `npm-lockfile-v1`,
 `npmrc-pin-unparseable`, `online-check-unreachable`,
@@ -1205,7 +1472,8 @@ Current diagnostic codes: `audit-anchor-differs`,
 `publish-age-version-unknown`, `registered-squat-private-origin-skipped`,
 `symlink-cycle`, `tamper-resolution-unreadable`,
 `typosquat-asymmetry-private-origin-skipped`,
-`unknown-package-private-origin-skipped`, `workspace-dir-unreadable`,
+`unknown-package-private-origin-skipped`,
+`unknown-package-private-scope-skipped`, `workspace-dir-unreadable`,
 `workspace-duplicate-directory`, `workspace-glob-unsupported`.
 
 This list is hand-maintained, not compile-checked -- `Diagnostic.code` is
@@ -1296,21 +1564,25 @@ The codes, and what each one means:
   throw and not a diagnostic on purpose: falling
   back would leave the entries map empty and every lockfile-backed check
   silently satisfied.
-- `lockfile-downgrade` -- the base side of a scan had a lockfile this tool
-  parses (npm with a `packages` map, or pnpm) and the head side has an npm
-  lockfile with no `packages` map (a v1 file), or has lockfiles but none this
-  tool parses (v1 npm, yarn, bun, binary). A head with no lockfile at all is
-  not this error, so deleting the lockfile in one pull request and adding
-  `yarn.lock` in the next is a known, scheduled gap. The message names the
-  reason (a format switch is how a tampered lockfile escapes inspection) and
-  the remedy for a genuine migration: review by hand and merge with an admin
-  override of the failing check, or land a separate reviewed pull request
-  that relaxes the gate on the base branch first (conductor `enforce: false`
-  on the dependencies gate; standalone action `continue-on-error` on the
-  step), then the migration, then restore it. The pull request cannot relax
-  its own gate, and advisory mode does not help because this is exit 2 (test `N5: a format switch names the files, the reason, and the two ways
-  to land a genuine migration`). See "A lockfile that says less is not a
-  lockfile that says nothing".
+- `lockfile-downgrade` -- the lockfile set lost what this tool reads, or
+  gained root lockfile bytes it does not read, against a comparison side;
+  deleting the only lockfile while dependencies are declared included (test
+  `a lockfile deleted with nothing in its place while dependencies are
+  declared is a downgrade`, control `control: a lockfile deleted together
+  with every dependency is left to the lockfile-missing path`). The message
+  names which half fired, the paths, the reason (a format switch is how a
+  tampered lockfile escapes inspection) and the remedies for a genuine
+  migration: the exact `acknowledgedLockfiles` entries to land on the base
+  branch first, review by hand and merge with an admin override of the
+  failing check, or relax the gate on the base branch in a separate
+  reviewed pull request and restore it afterwards. The pull request cannot
+  clear its own refusal, and advisory mode does not help because this is
+  exit 2 (test `N5: a format switch names the files, the reason, and the two
+  ways to land a genuine migration`). See "The lockfile set may not lose
+  coverage or gain unread bytes".
+- `workspace-glob-unexpandable` -- a workspace pattern uses glob syntax this
+  tool does not expand and could match something, or a `**` walk is deeper
+  than the cap. See the workspace paragraph of the same section.
 - `corpus-missing`, `corpus-unreadable`, `corpus-corrupt` -- the shipped
   corpus is absent, damaged, or -- for `corpus-corrupt` specifically --
   valid but written in a shape this build refuses to trust: a

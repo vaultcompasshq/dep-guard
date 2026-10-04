@@ -1,5 +1,6 @@
 import { DepGuardError, type Diagnostic } from '../types.js';
 import { registryTarballPackageName } from '../resolution.js';
+import { withoutByteOrderMark } from '../text.js';
 import type { LockEntry, ParsedLockfile } from './types.js';
 
 const NODE_MODULES_SEGMENT = 'node_modules/';
@@ -104,7 +105,7 @@ function entryFromPackageValue(
 export function parseNpmLockfile(path: string, content: string): ParsedLockfile {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    parsed = JSON.parse(withoutByteOrderMark(content));
   } catch {
     throw new DepGuardError(`${path}: not valid JSON`, 'lockfile-parse');
   }
@@ -117,7 +118,15 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
   const workspaceLocalNames = new Set<string>();
 
   const lockfileVersion = parsed.lockfileVersion;
-  const versionNumber = typeof lockfileVersion === 'number' ? lockfileVersion : undefined;
+  // A string of digits ("3") is read as that number, so a version that
+  // promises a packages map cannot dodge the missing-map refusal below by
+  // being quoted.
+  const versionNumber =
+    typeof lockfileVersion === 'number'
+      ? lockfileVersion
+      : typeof lockfileVersion === 'string' && /^[0-9]+$/.test(lockfileVersion)
+        ? Number(lockfileVersion)
+        : undefined;
   const versionLabel = lockfileVersion === undefined ? '(absent)' : JSON.stringify(lockfileVersion);
 
   // The packages map decides what is parsed, never the lockfileVersion
@@ -139,7 +148,8 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
       // lockfile-backed check downstream would silently stop firing.
       // Throw instead so a corrupt v2/v3 lockfile is loud, not silent.
       throw new DepGuardError(
-        `${path}: lockfileVersion ${versionNumber} declared but "packages" is missing or not an object`,
+        `${path}: lockfileVersion ${versionNumber} declared but "packages" is missing or not an object; ` +
+          'regenerate the lockfile with npm',
         'lockfile-parse'
       );
     }

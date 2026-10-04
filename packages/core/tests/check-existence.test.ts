@@ -331,3 +331,40 @@ describe('existenceCheck', () => {
     expect(existenceCheck(makeContext([]))).toEqual([]);
   });
 });
+
+describe('existenceCheck and .npmrc scope pins', () => {
+  const PRIVATE_NAME = '@corp/internal-lib';
+
+  function withNpmrc(pins: Record<string, string>, defaultRegistry: string | null = null): CheckContext {
+    return {
+      ...makeContext([makeChange({ name: PRIVATE_NAME })]),
+      npmrcRegistryPins: new Map(Object.entries(pins)),
+      npmrcDefaultRegistry: defaultRegistry,
+    };
+  }
+
+  test('a name whose scope is pinned to a private registry is skipped with a diagnostic naming the scope', () => {
+    const context = withNpmrc({ '@corp': 'https://npm.corp.example/' });
+    expect(existenceCheck(context)).toEqual([]);
+    const note = context.diagnostics.find((d) => d.code === 'unknown-package-private-scope-skipped');
+    expect(note?.message).toContain('@corp');
+  });
+
+  test('a name whose scope is pinned to registry.npmjs.org is still reported', () => {
+    const context = withNpmrc({ '@corp': 'https://registry.npmjs.org/' });
+    expect(existenceCheck(context).map((f) => f.ruleId)).toEqual(['unknown-package']);
+  });
+
+  test('an unscoped name under a private default registry is still reported', () => {
+    const context: CheckContext = {
+      ...makeContext([makeChange({ name: UNKNOWN })]),
+      npmrcDefaultRegistry: 'https://artifactory.corp.example/api/npm/npm/',
+    };
+    expect(existenceCheck(context).map((f) => f.ruleId)).toEqual(['unknown-package']);
+  });
+
+  test('a scoped name under a private default registry with no pin for its scope is still reported', () => {
+    const context = withNpmrc({}, 'https://artifactory.corp.example/api/npm/npm/');
+    expect(existenceCheck(context).map((f) => f.ruleId)).toEqual(['unknown-package']);
+  });
+});

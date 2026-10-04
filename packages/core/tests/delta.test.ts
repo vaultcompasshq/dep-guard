@@ -1311,6 +1311,40 @@ describe('computeDelta name safety', () => {
   });
 });
 
+describe('computeDelta lockfiles below the repository root', () => {
+  const NESTED = 'apps/web/package-lock.json';
+  const before = state([manifest(ROOT, [])], {
+    lockfileInventory: [{ path: NESTED, read: false, blobId: 'aaaa' }],
+  });
+  const after = state([manifest(ROOT, [])], {
+    lockfileInventory: [{ path: NESTED, read: false, blobId: 'bbbb' }],
+  });
+
+  test('by default a changed one is the lockfile-nested-changed diagnostic and nothing is thrown', () => {
+    const delta = computeDelta(before, after);
+    expect(delta.diagnostics.find((d) => d.code === 'lockfile-nested-changed')?.message).toContain(NESTED);
+  });
+
+  test('the refusing setting of the switch stops the scan with lockfile-downgrade (exit 2)', () => {
+    expect(() => computeDelta(before, after, { nestedLockfileChangeRefuses: true })).toThrow(
+      expect.objectContaining({ code: 'lockfile-downgrade' })
+    );
+  });
+
+  test('an unknown identity on the head counts as changed', () => {
+    const unknown = state([manifest(ROOT, [])], {
+      lockfileInventory: [{ path: NESTED, read: false, blobId: null }],
+    });
+    const delta = computeDelta(before, unknown);
+    expect(delta.diagnostics.map((d) => d.code)).toContain('lockfile-nested-changed');
+  });
+
+  test('an unchanged one raises no lockfile-nested-changed diagnostic', () => {
+    const delta = computeDelta(before, before);
+    expect(delta.diagnostics.map((d) => d.code)).not.toContain('lockfile-nested-changed');
+  });
+});
+
 describe('parseNpmrcPins', () => {
   test('null content yields no pins', () => {
     expect(parseNpmrcPins(null).size).toBe(0);

@@ -1,7 +1,8 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { loadConfig } from '../src/config.js';
+import { ACKNOWLEDGEABLE_LOCKFILE_NAMES, loadConfig } from '../src/config.js';
+import { LOCKFILE_FILE_NAMES } from '../src/git-source.js';
 import { DepGuardError } from '../src/types.js';
 
 function makeRepo(files: Record<string, string> = {}): string {
@@ -25,6 +26,7 @@ describe('loadConfig', () => {
       online: false,
       minAgeDays: 7,
       minAgeAllow: [],
+      acknowledgedLockfiles: [],
     });
   });
 
@@ -66,6 +68,7 @@ describe('loadConfig', () => {
       online: false,
       minAgeDays: 7,
       minAgeAllow: [],
+      acknowledgedLockfiles: [],
     });
   });
 
@@ -436,6 +439,38 @@ describe('loadConfig', () => {
       online: false,
       minAgeDays: 7,
       minAgeAllow: [],
+      acknowledgedLockfiles: [],
     });
+  });
+});
+
+describe('loadConfig acknowledgedLockfiles', () => {
+  const SHA1 = 'a'.repeat(40);
+  const SHA256 = 'b'.repeat(64);
+
+  test('a root lockfile name and a full lowercase blob id are accepted, split on the last colon', () => {
+    const repoRoot = makeRepo({
+      '.dep-guard.json': JSON.stringify({ acknowledgedLockfiles: [`yarn.lock:${SHA1}`, `bun.lockb:${SHA256}`] }),
+    });
+    expect(loadConfig(repoRoot).acknowledgedLockfiles).toEqual([`yarn.lock:${SHA1}`, `bun.lockb:${SHA256}`]);
+  });
+
+  const malformed: Array<[string, unknown]> = [
+    ['a path that is not a root lockfile name', `apps/web/yarn.lock:${SHA1}`],
+    ['an uppercase blob id', `yarn.lock:${'A'.repeat(40)}`],
+    ['a short blob id', 'yarn.lock:abc123'],
+    ['no colon', 'yarn.lock'],
+    ['an empty path', `:${SHA1}`],
+    ['a non-string entry', 7],
+  ];
+  for (const [label, entry] of malformed) {
+    test(`${label} is invalid config`, () => {
+      const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ acknowledgedLockfiles: [entry] }) });
+      expect(() => loadConfig(repoRoot)).toThrow(expect.objectContaining({ code: 'config-invalid' }));
+    });
+  }
+
+  test('the acknowledgeable names are exactly the lockfile names the loader inventories', () => {
+    expect([...ACKNOWLEDGEABLE_LOCKFILE_NAMES].sort()).toEqual([...LOCKFILE_FILE_NAMES].sort());
   });
 });

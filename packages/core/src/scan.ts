@@ -17,13 +17,15 @@ import { fingerprintFinding } from './fingerprint.js';
 import { evaluateGate, severityAtLeast } from './gate.js';
 import {
   assertScannablePath,
+  loadRefState,
   loadStates,
+  refsNameSameTree,
   matchGlobPath,
   probeManifestOnDisk,
   resolveScanRoot,
 } from './git-source.js';
 import type { ScanMode } from './git-source.js';
-import { assertBaseNotHeadUnderTrustBase, loadTrustedControls } from './trust-base.js';
+import { assertBaseNotHeadUnderTrustBase, loadConfigAtRef, loadTrustedControls } from './trust-base.js';
 import type { ControlShapeChange, TrustedControls } from './trust-base.js';
 import { DepGuardError } from './types.js';
 import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
@@ -228,7 +230,8 @@ function runChecks(
   config: ResolvedConfig,
   delta: DependencyDelta,
   npmrcRegistryPins: Map<string, string>,
-  npmrcDefaultRegistry: string | null
+  npmrcDefaultRegistry: string | null,
+  npmrcChanged: boolean
 ): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
   const ctx: CheckContext = {
     corpus,
@@ -236,6 +239,7 @@ function runChecks(
     delta,
     npmrcRegistryPins,
     npmrcDefaultRegistry,
+    npmrcChanged,
     diagnostics: [],
     allowed: [],
   };
@@ -703,12 +707,13 @@ function applyPathFilters(
   rawFindings: Omit<Finding, 'fingerprint'>[],
   config: ResolvedConfig,
   baseline: Set<string>,
-  diagnostics: Diagnostic[]
+  diagnostics: Diagnostic[],
+  alreadyMatched: ReadonlySet<string> = new Set()
 ): { findings: Finding[]; suppressed: number; ignored: number } {
   const findings: Finding[] = [];
   let suppressed = 0;
   let ignored = 0;
-  const matchedEntries = new Set<string>();
+  const matchedEntries = new Set<string>(alreadyMatched);
   let droppedSeverity: Severity | null = null;
 
   for (const raw of rawFindings) {
@@ -940,7 +945,63 @@ export async function scan(opts: {
     }
   }
 
-  const delta = computeDelta(statePair.before, statePair.after);
+  // ignorePaths comes from the same effective config as the findings
+  // filter below: the trust base's on a --trust-base run.
+  // An entry that covers only a lockfile below the root did match
+  // something, so it must not be reported as unmatched later.
+  const lockfileIgnoreMatches = new Set<string>();
+  // The comparison sides for the lockfile downgrade rule. With --base, both
+  // the --base side and the trust base, so a run cannot choose the weaker
+  // one. With --trust-base alone, the trust base, while the run stays an
+  // audit of findings. With --staged, HEAD only: comparing every commit on
+  // a migration branch with the trust base would refuse each one of them.
+  // When the trust base is the same tree as the --base side (the usual
+  // pull-request shape), that side is reused rather than read twice.
+  const trustState =
+    controls === null || opts.mode.kind === 'staged'
+      ? null
+      : opts.mode.kind === 'base' &&
+          statePair.before !== null &&
+          (await refsNameSameTree(root, opts.mode.ref, controls.ref))
+        ? statePair.before
+        : await loadRefState(root, controls.ref, statePair.diagnostics);
+  const deltaWith = (acknowledgedLockfiles: readonly string[]): DependencyDelta =>
+    computeDelta(statePair.before, statePair.after, {
+      extraComparisonSides: trustState === null ? [] : [trustState],
+      acknowledgedLockfiles,
+      acknowledgementSource:
+        controls !== null ? 'trust-base' : opts.mode.kind === 'staged' ? 'head-commit' : 'base-ref',
+      isIgnoredPath: (repoPath) => {
+        const matches = matchingIgnoreEntries(repoPath, config.ignorePaths);
+        for (const matched of matches) {
+          lockfileIgnoreMatches.add(matched);
+        }
+        return matches.length > 0;
+      },
+    });
+  // Lockfile acknowledgements come from the comparison side's config, never
+  // from the tree being judged: the trust base's when there is one;
+  // otherwise the --base ref's, or HEAD's for a staged scan. Without a
+  // trust base that config is read only once the downgrade rule has
+  // actually refused, so a run the rule does not touch reads nothing new.
+  let delta: DependencyDelta;
+  if (controls !== null) {
+    delta = deltaWith(controls.config.acknowledgedLockfiles ?? []);
+  } else {
+    try {
+      delta = deltaWith([]);
+    } catch (err) {
+      if (!(err instanceof DepGuardError) || err.code !== 'lockfile-downgrade' || opts.mode.kind === 'audit') {
+        throw err;
+      }
+      const ref = opts.mode.kind === 'base' ? opts.mode.ref : 'HEAD';
+      const acknowledged = (await loadConfigAtRef(root, ref)).acknowledgedLockfiles ?? [];
+      if (acknowledged.length === 0) {
+        throw err;
+      }
+      delta = deltaWith(acknowledged);
+    }
+  }
   // Left at this point in the sequence deliberately for the no-flag case:
   // moving the on-disk read earlier would change which error a repository
   // with BOTH a malformed baseline and an unreadable base ref reports, and
@@ -969,7 +1030,12 @@ export async function scan(opts: {
     config,
     delta,
     controls === null ? statePair.after.npmrcRegistryPins : controls.npmrcPins,
-    controls === null ? statePair.after.npmrcDefaultRegistry : controls.npmrcDefaultRegistry
+    controls === null ? statePair.after.npmrcDefaultRegistry : controls.npmrcDefaultRegistry,
+    // The judged side's .npmrc against every comparison side: the --base
+    // or HEAD side by bytes, and the trust base by its own comparison.
+    [statePair.before, trustState].some(
+      (side) => side !== null && (side.npmrcContent ?? null) !== (statePair.after.npmrcContent ?? null)
+    ) || (controls?.npmrcChanged ?? false)
   );
   // A --base or --trust-base run is the pull-request/CI shape (issue #75):
   // never a commit hook, so the online budget's default is minutes rather
@@ -989,7 +1055,13 @@ export async function scan(opts: {
   }
 
   const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
-  const { findings, suppressed, ignored } = applyPathFilters(rawFindings, config, baseline, diagnostics);
+  const { findings, suppressed, ignored } = applyPathFilters(
+    rawFindings,
+    config,
+    baseline,
+    diagnostics,
+    lockfileIgnoreMatches
+  );
 
   return buildResult(
     findings,
@@ -1136,7 +1208,7 @@ export async function checkSingle(opts: {
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const delta = syntheticDelta(opts.name);
 
-  const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map(), null);
+  const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map(), null, false);
   // checkSingle has no --base concept -- only --trust-base -- so the
   // pull-request/CI shape here is exactly "a trust base was given".
   const isPullRequestRun = controls !== null;
