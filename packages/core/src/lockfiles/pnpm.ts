@@ -1,4 +1,5 @@
 import { parse as parseYaml, Composer, Parser, type Document } from 'yaml';
+import { withoutByteOrderMark } from '../text.js';
 import { DepGuardError, type Diagnostic } from '../types.js';
 import type { LockEntry, ParsedLockfile } from './types.js';
 import type { ParsedManifest } from '../manifest.js';
@@ -29,7 +30,7 @@ function isStringArray(value: unknown): value is string[] {
 
 function parseYamlDocument(path: string, content: string): unknown {
   try {
-    return parseYaml(content);
+    return parseYaml(withoutByteOrderMark(content));
   } catch {
     throw new DepGuardError(`${path}: not valid YAML`, 'lockfile-parse');
   }
@@ -74,7 +75,10 @@ function parseYamlDocument(path: string, content: string): unknown {
 // rethrown.
 const MAX_LOCKFILE_DOCUMENTS = 4;
 
-function parseYamlStream(path: string, content: string): unknown[] {
+function parseYamlStream(
+  path: string,
+  content: string
+): { values: unknown[]; ranges: Array<[number, number] | null> } {
   const documents: Document[] = [];
   try {
     const composer = new Composer();
@@ -101,17 +105,22 @@ function parseYamlStream(path: string, content: string): unknown[] {
     throw new DepGuardError(`${path}: not valid YAML`, 'lockfile-parse');
   }
   const values: unknown[] = [];
+  // Where each document sits in the file, so everything outside the one
+  // that is read can be compared byte for byte with the other side.
+  const ranges: Array<[number, number] | null> = [];
   for (const document of documents) {
     if (document.errors.length > 0) {
       throw new DepGuardError(`${path}: not valid YAML`, 'lockfile-parse');
     }
     values.push(document.toJS());
+    const range = document.range;
+    ranges.push(range === undefined ? null : [range[0], range[2]]);
   }
   // An empty stream (an empty or comment-only file) yields no documents at
   // all. parse() returns null for the same input, and the caller's
   // "not a YAML mapping" throw is what handled that before, so one null
   // document keeps that path exactly as it was.
-  return values.length === 0 ? [null] : values;
+  return values.length === 0 ? { values: [null], ranges: [null] } : { values, ranges };
 }
 
 // The importer sections that mean "a real project declared a dependency
@@ -170,13 +179,10 @@ function isSelfManagementDocument(document: Record<string, unknown>): boolean {
 //     ambiguity. Guessing here would mean scanning part of a dependency
 //     tree and reporting the result as if it were the whole one.
 //
-// The self-management document's own packages are deliberately NOT
-// scanned, and the caller says so in a diagnostic. They are real installed
-// dependencies and reading them would be a coverage improvement, but it is
-// a coverage improvement -- new findings on packages no previous release
-// looked at -- and this fix ships in a patch, which fixes wrong verdicts
-// and never adds coverage. The diagnostic is what keeps the omission from
-// reading as a clean scan of the whole file.
+// The selected document is the project lockfile the manifest walk reads.
+// The self-management document, and any other document shaped like a
+// lockfile, is read as well, into a lockfile of its own (see
+// parsePnpmLockfile).
 function selectProjectDocument(
   path: string,
   documents: Record<string, unknown>[]
@@ -245,7 +251,21 @@ function selectProjectDocument(
 // a garbage name ("mypkg@git+ssh://git"). The caller validates the
 // extracted name against PNPM_NAME_GRAMMAR and skips the entry (with a
 // diagnostic) when that happens, rather than silently mis-keying it.
+// lockfileVersion 5.x writes "/name/version" and "/@scope/name/version",
+// with any peer set appended to the version after an underscore
+// ("/react-dom/17.0.2_react@17.0.2"). The version segment has to start with
+// a digit, which keeps a v6 key ("/name@1.0.0", "/@scope/name@1.0.0") from
+// ever reading this way.
+const V5_PACKAGE_KEY = /^\/(@[^/@]+\/[^/@]+|[^/@][^/@]*)\/([0-9][^/]*)$/;
+
 function parsePackageKey(key: string): { name: string; version: string } | undefined {
+  if (!key.includes('(')) {
+    const v5 = V5_PACKAGE_KEY.exec(key);
+    if (v5 !== null) {
+      const version = v5[2].split('_')[0];
+      return version === '' ? undefined : { name: v5[1], version };
+    }
+  }
   let rest = key.startsWith('/') ? key.slice(1) : key;
   const parenIdx = rest.indexOf('(');
   if (parenIdx !== -1) {
@@ -319,9 +339,12 @@ function entryFromPackageValue(value: Record<string, unknown>, keyVersion: strin
       }
     }
   }
-  // hasInstallScript is intentionally never set here: pnpm v9 dropped that
-  // flag from the lockfile, so there is no field to read it from. See the
-  // standing pnpm-no-install-script-flag diagnostic below.
+  // Lockfile versions before 9 record "requiresBuild: true" on a package
+  // that runs a build or install script; v9 dropped the field, which is
+  // what the standing pnpm-no-install-script-flag diagnostic below is for.
+  if (value.requiresBuild === true) {
+    entry.hasInstallScript = true;
+  }
   return entry;
 }
 
@@ -342,8 +365,9 @@ function lockEntriesEqual(a: LockEntry, b: LockEntry): boolean {
   );
 }
 
-export function parsePnpmLockfile(path: string, content: string): ParsedLockfile {
-  const documents = parseYamlStream(path, content);
+export function parsePnpmLockfile(path: string, rawContent: string): ParsedLockfile {
+  const content = withoutByteOrderMark(rawContent);
+  const { values: documents, ranges } = parseYamlStream(path, content);
   // Every document in the stream has to be a mapping, not only the one
   // that gets selected: a stream carrying a scalar or a sequence document
   // is a file this parser does not understand, and understanding half of
@@ -353,61 +377,153 @@ export function parsePnpmLockfile(path: string, content: string): ParsedLockfile
       throw new DepGuardError(`${path}: lockfile is not a YAML mapping`, 'lockfile-parse');
     }
   }
-  const { document: parsed, skipped } = selectProjectDocument(
-    path,
-    documents as Record<string, unknown>[]
-  );
+  const { document: parsed } = selectProjectDocument(path, documents as Record<string, unknown>[]);
 
-  const diagnostics: Diagnostic[] = [
-    // pnpm v9 removed the per-package hasInstallScript flag from the
-    // lockfile entirely, so the install-script check has no lockfile
-    // signal to read for this format. Emitted unconditionally (not only
-    // when an install-script finding would otherwise fire) so the check
-    // can report itself skipped instead of silently going quiet and
-    // looking like a clean scan.
-    {
-      code: 'pnpm-no-install-script-flag',
-      message: `${path}: pnpm lockfiles do not record install-script metadata; the install-script check is skipped for this lockfile`,
-    },
-  ];
+  // Every other document that is shaped like a pnpm lockfile (pnpm writes
+  // one for its own managed version) is read too, into a lockfile of its
+  // own under a labelled path, so its entries go through every check.
+  // computeDelta compares it with the same labelled path on the other side
+  // when there is one, else with the first lockfile of the same format there
+  // (normally the project document). Within one side, entries of different
+  // documents are never merged. A document that is not shaped like a
+  // pnpm lockfile stays unread, and its text is kept for the downgrade rule.
+  const additionalDocuments: ParsedLockfile[] = [];
+  const readIndexes = new Set<number>([documents.indexOf(parsed)]);
+  let selfManagementCount = 0;
+  let otherCount = 0;
+  documents.forEach((document, index) => {
+    if (document === parsed || !isLockfileShaped(document as Record<string, unknown>)) {
+      return;
+    }
+    const record = document as Record<string, unknown>;
+    let label: string;
+    if (isSelfManagementDocument(record)) {
+      selfManagementCount += 1;
+      label = selfManagementCount === 1 ? 'package-manager' : `package-manager-${selfManagementCount}`;
+    } else {
+      otherCount += 1;
+      label = `document-${otherCount}`;
+    }
+    const documentPath = `${path}#${label}`;
+    const documentDiagnostics: Diagnostic[] = [];
+    const documentEntries = readPackages(documentPath, record, documentDiagnostics);
+    if (documentEntries === null) {
+      return;
+    }
+    readIndexes.add(index);
+    additionalDocuments.push({
+      format: 'pnpm',
+      path: documentPath,
+      entries: documentEntries,
+      diagnostics: documentDiagnostics,
+      workspaceLocalNames: new Set(),
+      documentOf: path,
+    });
+  });
+  const unreadCount = documents.length - readIndexes.size;
+
+  // The bytes of the file outside every document that was read: the
+  // unread documents, in order, with the directives and separators around
+  // them. Part of what the package manager installs from, so the downgrade
+  // rule compares them with the same path on the other side (delta.ts).
+  // Recorded only when some document is unread; a read document with no
+  // recorded position makes the whole file count, which can only refuse
+  // more.
+  let unreadText: string | undefined;
+  if (unreadCount > 0) {
+    const readRanges = [...readIndexes].map((index) => ranges[index] ?? null);
+    if (readRanges.some((range) => range === null)) {
+      unreadText = content;
+    } else {
+      const sorted = (readRanges as Array<[number, number]>).sort((a, b) => a[0] - b[0]);
+      let cursor = 0;
+      unreadText = '';
+      for (const [start, end] of sorted) {
+        unreadText += `${content.slice(cursor, start)}\u0000`;
+        cursor = end;
+      }
+      unreadText += content.slice(cursor);
+    }
+  }
+  const skippedField = {
+    ...(unreadText === undefined ? {} : { unreadText }),
+    ...(additionalDocuments.length > 0 ? { additionalDocuments } : {}),
+  };
+  const skipped = unreadCount;
+
+  // pnpm v9 removed the per-package requiresBuild flag from the lockfile
+  // entirely, so the install-script check has no lockfile signal to read
+  // for that format. Emitted for every lockfile that is not provably older
+  // than v9 (not only when an install-script finding would otherwise
+  // fire) so the check can report itself skipped instead of silently going
+  // quiet and looking like a clean scan. An unreadable version gets the
+  // note too.
+  const major = Number.parseInt(String(parsed.lockfileVersion ?? ''), 10);
+  const recordsRequiresBuild = Number.isInteger(major) && major < 9;
+  const diagnostics: Diagnostic[] = recordsRequiresBuild
+    ? []
+    : [
+        {
+          code: 'pnpm-no-install-script-flag',
+          message: `${path}: pnpm lockfiles do not record install-script metadata; the install-script check is skipped for this lockfile`,
+        },
+      ];
   if (skipped > 0) {
     // Coverage the engine did not provide has to say so. The packages in
     // the documents this parser passed over are really installed, and
     // nothing else in the scan will mention them.
     //
-    // The count is every UNSELECTED document, which is not the same set as
-    // "the self-management documents": step 4 of the selection rule can
-    // pick a document on importer count alone, and then a discarded
-    // document was never classified as self-management at all. Calling the
-    // count self-management documents would name a cause the number does
-    // not support, which is the shape of misreport these diagnostics exist
-    // to avoid.
+    // The count is every document that is not shaped like a pnpm lockfile
+    // and so was not read. Every lockfile-shaped document, the selected one
+    // and the others alike, is read and is not counted here.
     diagnostics.push({
       code: 'pnpm-multi-document-lockfile',
       message:
-        `${path}: this lockfile holds ${skipped + 1} YAML documents; the project lockfile document ` +
-        `was read and ${skipped} document(s) other than the project lockfile were not scanned, so ` +
-        'any packages they install are not covered by this scan',
+        `${path}: this lockfile holds ${documents.length} YAML documents; ${skipped} document(s) that ` +
+        'are not shaped like a pnpm lockfile were not scanned, so any packages they install are not ' +
+        'covered by this scan',
     });
   }
-  const entries = new Map<string, LockEntry[]>();
-
-  const packages = parsed.packages;
-  if (packages === undefined) {
-    // Unlike npm's flat "packages" map (always present from
-    // lockfileVersion 2 on), pnpm omits the "packages" key entirely when a
-    // workspace has no external dependencies at all. That is valid-empty,
-    // not corrupt.
-    return { format: 'pnpm', path, entries, diagnostics, workspaceLocalNames: new Set() };
-  }
-  if (!isPlainObject(packages)) {
+  const entries = readPackages(path, parsed, diagnostics);
+  if (entries === null) {
     // A lockfile with a "packages" key that is present but not a mapping
     // -- including a dangling "packages:" line with no value, which YAML
     // parses to null, the same truncated-hand-edit shape as any other
-    // non-mapping value -- must not be treated as the
-    // valid-empty case above; that would fail open, silently disabling
-    // every lockfile-backed check. Throw instead.
+    // non-mapping value -- must not be treated as valid-empty; that would
+    // fail open, silently disabling every lockfile-backed check. Throw
+    // instead.
     throw new DepGuardError(`${path}: "packages" is present but not a mapping`, 'lockfile-parse');
+  }
+  return { format: 'pnpm', path, entries, diagnostics, workspaceLocalNames: new Set(), ...skippedField };
+}
+
+// A document pnpm could have written as a lockfile: a lockfile version,
+// and importers and packages that are mappings when present.
+function isLockfileShaped(document: Record<string, unknown>): boolean {
+  const version = document.lockfileVersion;
+  return (
+    (typeof version === 'string' || typeof version === 'number') &&
+    (document.importers === undefined || isPlainObject(document.importers)) &&
+    (document.packages === undefined || isPlainObject(document.packages))
+  );
+}
+
+// The entries of one document's "packages" map, or null when "packages"
+// is present but not a mapping. A missing "packages" is valid-empty:
+// unlike npm's flat map, pnpm omits the key when there are no external
+// dependencies at all.
+function readPackages(
+  path: string,
+  document: Record<string, unknown>,
+  diagnostics: Diagnostic[]
+): Map<string, LockEntry[]> | null {
+  const entries = new Map<string, LockEntry[]>();
+  const packages = document.packages;
+  if (packages === undefined) {
+    return entries;
+  }
+  if (!isPlainObject(packages)) {
+    return null;
   }
 
   // Object.entries only returns own enumerable properties, so packages
@@ -455,8 +571,7 @@ export function parsePnpmLockfile(path: string, content: string): ParsedLockfile
       existing.push(entry);
     }
   }
-
-  return { format: 'pnpm', path, entries, diagnostics, workspaceLocalNames: new Set() };
+  return entries;
 }
 
 // Merges the onlyBuiltDependencies allowlist from pnpm-workspace.yaml (the

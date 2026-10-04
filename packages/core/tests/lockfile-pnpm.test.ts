@@ -218,6 +218,44 @@ describe('parsePnpmLockfile a transitive alias is already keyed by its real regi
   });
 });
 
+describe('parsePnpmLockfile lockfileVersion 5.x keys and requiresBuild', () => {
+  function parseV5(packagesYaml: string): ReturnType<typeof parsePnpmLockfile> {
+    return parsePnpmLockfile(PATH, `lockfileVersion: 5.4\npackages:\n${packagesYaml}`);
+  }
+
+  test('an unscoped /name/version key is read', () => {
+    const result = parseV5("  /lodash/4.17.21:\n    resolution: {integrity: sha512-abc==}\n");
+    expect(only(result, 'lodash')).toMatchObject({ version: '4.17.21', integrity: 'sha512-abc==' });
+    expect(result.diagnostics.map((d) => d.code)).not.toContain('pnpm-lockfile-invalid-entry');
+  });
+
+  test('a scoped /@scope/name/version key is read', () => {
+    const result = parseV5("  /@scope/name/1.2.3:\n    resolution: {integrity: sha512-abc==}\n");
+    expect(only(result, '@scope/name')?.version).toBe('1.2.3');
+  });
+
+  test('a peer suffix after an underscore is dropped from the version', () => {
+    const result = parseV5("  /react-dom/17.0.2_react@17.0.2:\n    resolution: {integrity: sha512-abc==}\n");
+    expect(only(result, 'react-dom')?.version).toBe('17.0.2');
+  });
+
+  test('requiresBuild: true is read as an install script, and no missing-flag note is raised', () => {
+    const result = parseV5(
+      "  /esbuild/0.15.0:\n    resolution: {integrity: sha512-abc==}\n    requiresBuild: true\n"
+    );
+    expect(only(result, 'esbuild')?.hasInstallScript).toBe(true);
+    expect(result.diagnostics.map((d) => d.code)).not.toContain('pnpm-no-install-script-flag');
+  });
+
+  test('a lockfileVersion 6 /name@version key is still read the v6 way', () => {
+    const result = parsePnpmLockfile(
+      PATH,
+      "lockfileVersion: '6.0'\npackages:\n  /lodash@4.17.21:\n    resolution: {integrity: sha512-abc==}\n"
+    );
+    expect(only(result, 'lodash')?.version).toBe('4.17.21');
+  });
+});
+
 describe('parsePnpmLockfile standing install-script diagnostic', () => {
   test('the pnpm-no-install-script-flag diagnostic is always present', () => {
     const result = parsePnpmLockfile(PATH, FIXTURE_CONTENT);
@@ -615,26 +653,33 @@ describe('parsePnpmLockfile: multi-document lockfiles (pnpm 12 self-management)'
     expect(result.entries.has('pnpm')).toBe(false);
   });
 
-  // Silence about a document that was present and not read is
-  // indistinguishable from a clean read of the whole file.
-  test('the document that was not read is named in a diagnostic', () => {
+  // The self-management document is read too, into a lockfile of its own,
+  // so its entries are checked without ever meeting the project's.
+  test('the self-management document is read into a lockfile of its own', () => {
     const result = parsePnpmLockfile(PATH, MULTIDOC_FIXTURE_CONTENT);
-    const notes = result.diagnostics.filter((d) => d.code === 'pnpm-multi-document-lockfile');
-    expect(notes).toHaveLength(1);
-    expect(notes[0].message).toContain('2 YAML documents');
-    expect(notes[0].message).toContain('not scanned');
+    expect(result.additionalDocuments?.map((document) => document.path)).toEqual([`${PATH}#package-manager`]);
+    expect(result.additionalDocuments?.[0].entries.has('pnpm')).toBe(true);
+    expect(result.additionalDocuments?.[0].documentOf).toBe(PATH);
+    expect(result.diagnostics.map((d) => d.code)).not.toContain('pnpm-multi-document-lockfile');
+    expect(result.unreadText).toBeUndefined();
   });
 
-  // The count is every UNSELECTED document, and step 4 of the selection
-  // rule can discard a document that was never classified as
-  // self-management at all. Calling the count "self-management
-  // document(s)" asserts a cause the number does not carry.
-  test('the diagnostic counts unselected documents without claiming what they were', () => {
-    const note = parsePnpmLockfile(PATH, MULTIDOC_FIXTURE_CONTENT).diagnostics.find(
-      (d) => d.code === 'pnpm-multi-document-lockfile'
-    );
-    expect(note?.message).toContain('1 document(s) other than the project lockfile');
-    expect(note?.message).not.toContain('self-management');
+  // Silence about a document that was present and not read is
+  // indistinguishable from a clean read of the whole file.
+  test('a document not shaped like a pnpm lockfile is not read, is named in a diagnostic, and its text is kept', () => {
+    const result = parsePnpmLockfile(PATH, `${MULTIDOC_FIXTURE_CONTENT}\n---\nnotALockfile: 1\n`);
+    const notes = result.diagnostics.filter((d) => d.code === 'pnpm-multi-document-lockfile');
+    expect(notes).toHaveLength(1);
+    expect(notes[0].message).toContain('3 YAML documents');
+    expect(notes[0].message).toContain('1 document(s) that are not shaped like a pnpm lockfile');
+    expect(result.unreadText).toContain('notALockfile: 1');
+  });
+
+  test('the same name and version in two documents stays one entry in each, never merged', () => {
+    const both = `${PROJECT_DOC}\n---\n${SELF_MANAGEMENT_DOC.replace('pnpm@12.2.1:\n    resolution: {integrity: sha512-selfmanagement}', 'lodash@4.17.21:\n    resolution: {integrity: sha512-projectdoc}')}`;
+    const result = parsePnpmLockfile(PATH, both);
+    expect(result.entries.get('lodash')).toHaveLength(1);
+    expect(result.additionalDocuments?.[0].entries.get('lodash')).toHaveLength(1);
   });
 
   test('an ordinary single-document lockfile raises no multi-document diagnostic', () => {

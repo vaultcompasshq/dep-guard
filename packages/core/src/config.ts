@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { ResolvedConfig } from './checks/types.js';
+import { withoutByteOrderMark } from './text.js';
 import { DepGuardError, type FailOn } from './types.js';
 
 // This file owns the on-disk config format and its validation. The
@@ -28,7 +29,36 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'minAgeDays',
   'minAgeAllow',
   'onlineBudgetMs',
+  'acknowledgedLockfiles',
 ]);
+
+// The lockfile names an acknowledgement may name: the root lockfiles this
+// tool inventories, written out here rather than imported so the config
+// format does not depend on the loader. A test pins the two lists equal.
+export const ACKNOWLEDGEABLE_LOCKFILE_NAMES: readonly string[] = [
+  'npm-shrinkwrap.json',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
+];
+const BLOB_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+// "PATH:BLOBID", split on the LAST colon. PATH has to be one of the root
+// lockfile names exactly, and BLOBID a full lowercase git object id (SHA-1
+// or SHA-256). Anything else is refused as invalid config rather than
+// read as an acknowledgement that matches nothing, or worse, something.
+function isValidLockfileAcknowledgement(entry: string): boolean {
+  const separator = entry.lastIndexOf(':');
+  if (separator <= 0) {
+    return false;
+  }
+  return (
+    ACKNOWLEDGEABLE_LOCKFILE_NAMES.includes(entry.slice(0, separator)) &&
+    BLOB_ID.test(entry.slice(separator + 1))
+  );
+}
 
 // Exported so the CLI can validate --fail-on against the exact same set
 // this file checks a config's "failOn" key against. Two independently
@@ -104,6 +134,7 @@ function defaultConfig(): ResolvedConfig {
     online: false,
     minAgeDays: DEFAULT_MIN_AGE_DAYS,
     minAgeAllow: [],
+    acknowledgedLockfiles: [],
   };
 }
 
@@ -124,7 +155,7 @@ function isStringArray(value: unknown): value is string[] {
 function parseJsonConfig(content: string, label: string): Record<string, unknown> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    parsed = JSON.parse(withoutByteOrderMark(content));
   } catch {
     throw new DepGuardError(`${label}: not valid JSON`, 'config-invalid');
   }
@@ -321,6 +352,23 @@ function validateSection(raw: Record<string, unknown>, label: string): Partial<R
       }
     }
     result.minAgeAllow = raw.minAgeAllow;
+  }
+
+  if (raw.acknowledgedLockfiles !== undefined) {
+    if (!isStringArray(raw.acknowledgedLockfiles)) {
+      throw new DepGuardError(`${label}: "acknowledgedLockfiles" must be an array of strings`, 'config-invalid');
+    }
+    for (const entry of raw.acknowledgedLockfiles) {
+      if (!isValidLockfileAcknowledgement(entry)) {
+        throw new DepGuardError(
+          `${label}: "acknowledgedLockfiles" entry "${entry}" must be "LOCKFILE:BLOBID", where LOCKFILE is a ` +
+            `root lockfile name (${ACKNOWLEDGEABLE_LOCKFILE_NAMES.join(', ')}) and BLOBID is a full lowercase ` +
+            'git blob id',
+          'config-invalid'
+        );
+      }
+    }
+    result.acknowledgedLockfiles = raw.acknowledgedLockfiles;
   }
 
   return result;

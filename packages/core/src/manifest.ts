@@ -1,3 +1,4 @@
+import { withoutByteOrderMark } from './text.js';
 import { DepGuardError } from './types.js';
 
 export type DepType = 'dependencies' | 'devDependencies' | 'optionalDependencies' | 'peerDependencies';
@@ -23,6 +24,11 @@ export interface ManifestDep {
 
 export interface ParsedManifest {
   path: string;
+  // The manifest's own "name" field, when it is a string. Read so a
+  // dependency on a workspace package can be told apart from one a
+  // lockfile would record, from the manifests actually discovered rather
+  // than from anything the lockfile says.
+  name?: string;
   deps: ManifestDep[];
   pnpmOnlyBuilt: string[];
 }
@@ -203,7 +209,7 @@ function extractPnpmOnlyBuilt(path: string, manifestObj: Record<string, unknown>
 export function parseManifest(path: string, content: string): ParsedManifest {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    parsed = JSON.parse(withoutByteOrderMark(content));
   } catch {
     throw new DepGuardError(`${path}: not valid JSON`, 'manifest-parse');
   }
@@ -212,6 +218,7 @@ export function parseManifest(path: string, content: string): ParsedManifest {
   }
   return {
     path,
+    ...(typeof parsed.name === 'string' ? { name: parsed.name } : {}),
     deps: extractDeps(path, parsed),
     pnpmOnlyBuilt: extractPnpmOnlyBuilt(path, parsed),
   };

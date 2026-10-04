@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { withoutByteOrderMark } from './text.js';
 import { DepGuardError } from './types.js';
 
 // .dep-guard.baseline.json holds the fingerprints of findings a human has
@@ -62,7 +63,7 @@ export function loadBaseline(repoRoot: string): Set<string> {
 export function parseBaseline(content: string, label: string): Set<string> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    parsed = JSON.parse(withoutByteOrderMark(content));
   } catch {
     throw new DepGuardError(`${label}: not valid JSON`, 'baseline-invalid');
   }

@@ -559,7 +559,7 @@ describe('scan', () => {
     test('StatePair diagnostics (e.g. an unsupported workspace glob) reach the run block', async () => {
       await write(
         'package.json',
-        JSON.stringify({ name: 'root', workspaces: ['packages/*/inner'] })
+        JSON.stringify({ name: 'root', workspaces: ['packages/./*'] })
       );
       await git('add', '-A');
 

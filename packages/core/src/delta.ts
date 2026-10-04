@@ -1,10 +1,9 @@
 import type { LockEntry, LockfileFormat, ParsedLockfile } from './lockfiles/types.js';
 import type { DepType, ManifestDep, Protocol } from './manifest.js';
 import { originOf } from './resolution.js';
-import type { RepoState } from './state.js';
+import { isReadLockfile, type LockfileInventoryEntry, type RepoState } from './state.js';
 import { comparisonTamperSignalList } from './tamper-signals.js';
 import { DepGuardError, type Diagnostic } from './types.js';
-import { NPM_LOCKFILE_V1_CODE } from './lockfiles/npm.js';
 
 export interface DepChange {
   name: string;
@@ -564,23 +563,30 @@ function onlyBuiltDifference(before: RepoState | null, after: RepoState): string
   return added;
 }
 
-// The npm lockfile parser reads a "packages" map whenever one exists, and
-// reports a v1 diagnostic only for a lockfile that has none (a real v1
-// lockfile, whose nested "dependencies" tree this tool does not read). A
-// base side that HAD a packages map and a head side that does not is
-// therefore not a legacy repository: it is a change that removes the only
-// structure the tamper checks read while the package manager keeps
-// installing from the head file. Treating that as a diagnostic is the
-// silent pass this refuses, so it stops the scan (exit 2) instead.
+// The lockfile downgrade rule. A lockfile is READ when this tool parses its
+// entries (npm with a "packages" map, or pnpm) and UNREAD otherwise (a v1
+// npm file, yarn, bun, a binary one, or a lockfile name that is not a
+// readable file). A side has COVERAGE when a read lockfile on it has at
+// least one entry.
 //
-// Two shapes are refused. Per file: an npm lockfile that had a packages map
-// on the base side and has none now. Per repository: the base had a parsed
-// lockfile (npm with a packages map, or pnpm, with entries) and the head has
-// lockfiles but not one of them is parsed -- only v1 npm files, manifest-only
-// formats (yarn, bun) or a binary one -- so swapping the tampered lockfile
-// for a format this tool cannot read is not a way out. A head with NO
-// lockfile at all is deliberately not this rule's case: that is the
-// lockfile-missing path, handled separately.
+// When the comparison side has coverage, the side being judged must:
+//
+//   (unread bytes) not carry an unread lockfile at the repository root
+//   whose bytes differ from the same path on the comparison side, a path
+//   that is new counting as different; and
+//
+//   (coverage) keep coverage, unless no manifest on it declares a
+//   dependency a lockfile would record.
+//
+// Independently of coverage, an npm lockfile that this tool read on the
+// comparison side may not turn into an unread npm lockfile, under its own
+// name or another npm name. Any violation stops the scan (exit 2), because
+// the run could not judge what the package manager will install. It is
+// never a finding: a finding could be baselined, and baselining a format
+// switch would switch the lockfile checks off for every later change.
+//
+// Identity is the git blob id from the lockfile inventory, never decoded
+// text, so a binary lockfile changed in an invalid byte still differs.
 // Why the scan stops, and what a maintainer with a genuine migration (npm to
 // yarn or bun, say) does about it. The refusal is deliberate and cannot be
 // escaped from inside the tree being judged: switching to a format this
@@ -596,52 +602,388 @@ const DOWNGRADE_REMEDY =
   'cannot relax the gate for itself, and an advisory mode does not help: this is a could-not-run ' +
   '(exit 2), not a finding.';
 
-function refuseLockfileDowngrade(before: RepoState | null, after: RepoState): void {
+// Coverage comes from lockfile files. A further document of a pnpm
+// lockfile (the one pnpm writes for its own version) is read and checked,
+// but its entries do not stand in for the project's.
+function coveringLockfiles(state: RepoState): ParsedLockfile[] {
+  return lockfilesOf(state).filter(
+    (lockfile) => lockfile.documentOf === undefined && isReadLockfile(lockfile) && lockfile.entries.size > 0
+  );
+}
+
+// Dependencies a lockfile would record: every non-exempt dependency of
+// every manifest on this side, in any section (peerDependencies included:
+// npm 7 and later installs and locks them), minus names of workspace
+// packages this side actually discovered as manifests. The workspace
+// exemption comes from the manifests, never from the lockfile's own
+// "link" entries, which the lockfile author controls.
+function declaredLockableDeps(state: RepoState): { manifests: string[]; count: number } {
+  const workspaceNames = new Set(
+    state.manifests.map((manifest) => manifest.name).filter((name): name is string => name !== undefined)
+  );
+  const manifestPaths = new Set<string>();
+  let count = 0;
+  for (const manifest of state.manifests) {
+    for (const dep of manifest.deps) {
+      if (EXEMPT_PROTOCOLS.has(dep.protocol) || workspaceNames.has(dep.registryName)) {
+        continue;
+      }
+      count += 1;
+      manifestPaths.add(manifest.path);
+    }
+  }
+  return { manifests: [...manifestPaths], count };
+}
+
+// Root lockfiles that are unread on `after` and whose bytes differ from the
+// same path on `before`. A path new on `after`, a path read on `before`,
+// and an unknown identity on either side all count as different.
+function changedUnreadRootLockfiles(before: RepoState, after: RepoState): string[] {
+  const beforeRoot = new Map(
+    inventoryOf(before)
+      .filter((entry) => !isBelowRoot(entry))
+      .map((entry) => [entry.path, entry])
+  );
+  return inventoryOf(after)
+    .filter((entry) => !isBelowRoot(entry) && !entry.read)
+    .filter((entry) => {
+      const previous = beforeRoot.get(entry.path);
+      return (
+        previous === undefined ||
+        previous.read ||
+        previous.blobId === null ||
+        entry.blobId === null ||
+        previous.blobId !== entry.blobId
+      );
+    })
+    .map((entry) => entry.path);
+}
+
+// A read lockfile can still carry content this tool does not read: in a
+// multi-document pnpm lockfile, everything outside the project document.
+// Those bytes count as unread bytes of the file, compared in order with
+// the same path on `before` (absent there counts as different), so any
+// change to them is the same violation as a changed unread file. Returns
+// plain lockfile paths.
+function changedSkippedDocuments(before: RepoState, after: RepoState): string[] {
+  const beforeByPath = new Map(lockfilesOf(before).map((lockfile) => [lockfile.path, lockfile]));
+  const changed: string[] = [];
+  for (const lockfile of lockfilesOf(after)) {
+    // Either side holding several documents is enough to compare: a file
+    // that drops its other documents changes them too.
+    const previous = beforeByPath.get(lockfile.path)?.unreadText;
+    if (lockfile.unreadText === undefined && previous === undefined) {
+      continue;
+    }
+    if (previous !== lockfile.unreadText) {
+      changed.push(lockfile.path);
+    }
+  }
+  return changed;
+}
+
+// One acknowledgement entry, "PATH:BLOBID", or null when the bytes have no
+// known identity and so cannot be acknowledged at all.
+function acknowledgementFor(entryPath: string, blobId: string | null | undefined): string | null {
+  return blobId === null || blobId === undefined ? null : `${entryPath}:${blobId}`;
+}
+
+function rootBlobId(state: RepoState, entryPath: string): string | null {
+  return inventoryOf(state).find((entry) => entry.path === entryPath)?.blobId ?? null;
+}
+
+// `acknowledged` holds the acknowledgedLockfiles entries read from the
+// comparison side's config (never the judged side's). An acknowledgement
+// clears this rule for exactly the bytes it names and for nothing else: it
+// is not a finding filter, and every check still runs on the lockfiles
+// this tool reads. Each use is announced in `notes`.
+function refuseLockfileDowngrade(
+  before: RepoState | null,
+  after: RepoState,
+  acknowledged: ReadonlySet<string>,
+  notes: Diagnostic[],
+  source: AcknowledgementSource
+): void {
   if (before === null) {
     return;
   }
-  const isParsed = (lockfile: ParsedLockfile): boolean =>
-    (lockfile.format === 'npm' && !hasV1Diagnostic(lockfile)) || lockfile.format === 'pnpm';
-  const beforeParsed = lockfilesOf(before).filter(
-    (lockfile) => isParsed(lockfile) && (lockfile.format === 'npm' || lockfile.entries.size > 0)
+  const baseCovering = coveringLockfiles(before);
+  // file path -> how the message names it
+  const unreadChanged = new Map<string, string>();
+
+  // An npm lockfile read on the comparison side that is now an unread npm
+  // lockfile, at the same path or under the other npm name.
+  const beforeReadNpm = lockfilesOf(before).filter(
+    (lockfile) => lockfile.format === 'npm' && isReadLockfile(lockfile)
   );
-  const afterAll = lockfilesOf(after);
-  if (beforeParsed.length > 0 && afterAll.length > 0 && !afterAll.some(isParsed)) {
-    throw new DepGuardError(
-      `${afterAll.map((lockfile) => lockfile.path).join(', ')}: the base side of this scan had a ` +
-        `lockfile this tool reads (${beforeParsed[0].path}) and this side has only lockfiles it cannot ` +
-        'read (a v1 npm lockfile, or a yarn, bun or binary one), so the lockfile-backed checks would ' +
-        'silently stop while the package manager keeps installing; refusing to report a clean pass. ' +
-        DOWNGRADE_REMEDY,
-      'lockfile-downgrade'
-    );
+  if (beforeReadNpm.length > 0) {
+    for (const lockfile of lockfilesOf(after)) {
+      if (lockfile.format === 'npm' && !isReadLockfile(lockfile)) {
+        unreadChanged.set(lockfile.path, lockfile.path);
+      }
+    }
   }
-  const beforeNpm = lockfilesOf(before).filter(
-    (lockfile) => lockfile.format === 'npm' && !hasV1Diagnostic(lockfile)
-  );
-  if (beforeNpm.length === 0) {
+
+  let coverageLost = false;
+  let declared = { manifests: [] as string[], count: 0 };
+  if (baseCovering.length > 0) {
+    for (const entryPath of changedUnreadRootLockfiles(before, after)) {
+      unreadChanged.set(entryPath, entryPath);
+    }
+    for (const entryPath of changedSkippedDocuments(before, after)) {
+      unreadChanged.set(entryPath, `${entryPath} (a YAML document in it other than the project lockfile)`);
+    }
+    if (coveringLockfiles(after).length === 0) {
+      declared = declaredLockableDeps(after);
+      coverageLost = declared.count > 0;
+    }
+  }
+
+  if (unreadChanged.size === 0 && !coverageLost) {
     return;
   }
-  for (const lockfile of lockfilesOf(after)) {
-    if (lockfile.format !== 'npm' || !hasV1Diagnostic(lockfile)) {
-      continue;
+
+  // The unread-bytes half: each changed file is cleared by an entry naming
+  // its path and the blob id it has on the judged side.
+  const usedAcknowledgements: string[] = [];
+  const neededAcknowledgements: Array<string | null> = [];
+  const blockingPaths: string[] = [];
+  for (const [entryPath, label] of unreadChanged) {
+    const entry = acknowledgementFor(entryPath, rootBlobId(after, entryPath));
+    if (entry !== null && acknowledged.has(entry)) {
+      usedAcknowledgements.push(entry);
+    } else {
+      blockingPaths.push(label);
+      neededAcknowledgements.push(entry);
     }
-    // Same path first, then any parsed npm lockfile on the base side: a
-    // package-lock.json replaced by an npm-shrinkwrap.json is the same
-    // downgrade under a different name.
-    const counterpart = beforeNpm.find((candidate) => candidate.path === lockfile.path) ?? beforeNpm[0];
-    throw new DepGuardError(
-      `${lockfile.path}: the base side of this scan has a "packages" map (${counterpart.path}) and this ` +
-        'side has none, so the lockfile-backed checks would silently stop reading it while npm ' +
-        'still installs from it; refusing to report a clean pass. ' +
-        DOWNGRADE_REMEDY,
-      'lockfile-downgrade'
+  }
+
+  // The coverage half: cleared when every root lockfile on the judged side
+  // is acknowledged with its blob id there, or, when the judged side has no
+  // root lockfile at all, when every lockfile that gave the comparison side
+  // its coverage is acknowledged with the blob id it had there (a removal
+  // of exactly those bytes). A partial set clears nothing.
+  let coverageBlocks = false;
+  if (coverageLost) {
+    const headRoot = inventoryOf(after).filter((entry) => !isBelowRoot(entry));
+    const required =
+      headRoot.length > 0
+        ? headRoot.map((entry) => acknowledgementFor(entry.path, entry.blobId))
+        : baseCovering.map((lockfile) => acknowledgementFor(lockfile.path, rootBlobId(before, lockfile.path)));
+    const cleared =
+      required.length > 0 && required.every((entry) => entry !== null && acknowledged.has(entry));
+    if (cleared) {
+      usedAcknowledgements.push(...(required as string[]));
+    } else {
+      coverageBlocks = true;
+      neededAcknowledgements.push(...required.filter((entry) => entry === null || !acknowledged.has(entry)));
+    }
+  }
+
+  if (blockingPaths.length === 0 && !coverageBlocks) {
+    const unique = [...new Set(usedAcknowledgements)].sort();
+    notes.push({
+      code: DOWNGRADE_ACKNOWLEDGED,
+      message:
+        `${listPaths(unique)}: acknowledged in acknowledgedLockfiles on the comparison side, so these exact ` +
+        'lockfile bytes were let through the lockfile downgrade rule; this tool still did not read what ' +
+        'they install',
+    });
+    return;
+  }
+
+  const basePaths = (baseCovering.length > 0 ? baseCovering : beforeReadNpm).map((lockfile) => lockfile.path);
+  const reasons: string[] = [];
+  if (blockingPaths.length > 0) {
+    const paths = [...blockingPaths].sort();
+    reasons.push(
+      `${listPaths(paths)}: ${
+        paths.length === 1
+          ? 'a lockfile at the repository root that this tool does not read is'
+          : 'lockfiles at the repository root that this tool does not read are'
+      } new or changed in this change, while the base side has a lockfile this tool reads ` +
+        `(${listPaths(basePaths)})`
     );
   }
+  if (coverageBlocks) {
+    const headLockfiles = inventoryOf(after)
+      .filter((entry) => !isBelowRoot(entry))
+      .map((entry) => entry.path);
+    reasons.push(
+      `no lockfile this tool reads has an entry on this side (the base side had ${listPaths(basePaths)}; ` +
+        `this side has ${headLockfiles.length === 0 ? 'no lockfile at the repository root' : listPaths(headLockfiles)}), ` +
+        `while ${listPaths(declared.manifests)} still declare${declared.manifests.length === 1 ? 's' : ''} ` +
+        'dependencies a lockfile would record'
+    );
+  }
+  const entries = [...new Set(neededAcknowledgements.filter((entry): entry is string => entry !== null))].sort();
+  const unidentifiable = neededAcknowledgements.some((entry) => entry === null);
+  const listed = entries.map((entry) => JSON.stringify(entry)).join(', ');
+  const where =
+    source === 'head-commit'
+      ? `commit these entries to "acknowledgedLockfiles" in .dep-guard.json first, in a commit of their own: ${listed}. ` +
+        'A staged scan reads them from HEAD, so staging them together with this change does not clear it.'
+      : source === 'base-ref'
+        ? `add these entries to "acknowledgedLockfiles" in .dep-guard.json on the --base ref first: ${listed}. ` +
+          'They are read from that ref, not from the working tree, so this change cannot add them for itself.'
+        : `add these entries to "acknowledgedLockfiles" in .dep-guard.json on the base branch first, in their own ` +
+          `reviewed pull request: ${listed}. They are read from the trust base only, so this pull request ` +
+          'cannot add them for itself.';
+  const acknowledgeHint =
+    (entries.length > 0
+      ? ` The narrowest way to land a reviewed migration: ${where} Each entry covers exactly those bytes ` +
+        'and nothing else.'
+      : '') +
+    (unidentifiable
+      ? ' A lockfile name that is a symlink or is not a regular file has no identity to acknowledge; ' +
+        'replace it with the regular file it stands for.'
+      : '');
+  throw new DepGuardError(
+    `${reasons.join('; and ')}. The lockfile-backed checks would silently stop while the package ` +
+      'manager keeps installing; refusing to report a clean pass. ' +
+      DOWNGRADE_REMEDY +
+      acknowledgeHint,
+    'lockfile-downgrade'
+  );
 }
 
-function hasV1Diagnostic(lockfile: ParsedLockfile): boolean {
-  return lockfile.diagnostics.some((diagnostic) => diagnostic.code === NPM_LOCKFILE_V1_CODE);
+// A root lockfile this tool does not read, sitting beside one it does. Not
+// a refusal when it is unchanged, but the reader has to know the checks
+// judged only the other file.
+function unreadSiblingNote(after: RepoState): Diagnostic[] {
+  if (after.lockfile === null || !isReadLockfile(after.lockfile)) {
+    return [];
+  }
+  const unread = inventoryOf(after)
+    .filter((entry) => !isBelowRoot(entry) && !entry.read)
+    .map((entry) => entry.path);
+  if (unread.length === 0) {
+    return [];
+  }
+  const readPaths = lockfilesOf(after)
+    .filter(isReadLockfile)
+    .map((lockfile) => lockfile.path);
+  return [
+    {
+      code: UNREAD_SIBLING,
+      message:
+        `${listPaths(unread)}: present at the repository root beside ${listPaths(readPaths)} and not read ` +
+        `by this tool; the lockfile checks judged ${listPaths(readPaths)} only`,
+    },
+  ];
+}
+
+// What computeDelta needs from the effective configuration. Read from the
+// comparison side's config on a --trust-base run, exactly as the findings
+// filter reads it, so the tree being judged cannot clear its own refusal.
+export interface DeltaOptions {
+  // True when a repository path is covered by an ignorePaths entry.
+  isIgnoredPath?: (repoPath: string) => boolean;
+  // Overrides NESTED_LOCKFILE_CHANGE_REFUSES. For the test that keeps the
+  // refusing branch of that switch working; scan() never sets it.
+  nestedLockfileChangeRefuses?: boolean;
+  // Further sides the lockfile set is judged against, beside `before`: the
+  // trust base on a --trust-base run that is not --staged. The downgrade
+  // rule must hold against every one of them, so a run cannot pick the
+  // weaker side. They never change what the delta itself compares.
+  extraComparisonSides?: RepoState[];
+  // The acknowledgedLockfiles entries from the comparison side's config:
+  // the trust base's when there is one, else the --base ref's, else HEAD's
+  // for a staged scan. Never the judged side's.
+  acknowledgedLockfiles?: readonly string[];
+  // Where those entries are read from on this run, so a refusal tells the
+  // reader the one place an entry would actually be read.
+  acknowledgementSource?: AcknowledgementSource;
+}
+
+export type AcknowledgementSource = 'trust-base' | 'base-ref' | 'head-commit';
+
+// Whether a changed lockfile below the repository root stops the scan
+// (exit 2) or is reported as the lockfile-nested-changed diagnostic while
+// the run continues. One switch, so the severity of this rule is a
+// one-line decision.
+const NESTED_LOCKFILE_CHANGE_REFUSES = false;
+
+const NESTED_LOCKFILE_CHANGED = 'lockfile-nested-changed';
+const NESTED_LOCKFILE_IGNORED = 'lockfile-nested-ignored';
+const LOCKFILE_NOT_READ = 'lockfile-not-read';
+const UNREAD_SIBLING = 'lockfile-unread-sibling';
+const DOWNGRADE_ACKNOWLEDGED = 'lockfile-downgrade-acknowledged';
+const MAX_LISTED_PATHS = 10;
+
+function listPaths(paths: string[]): string {
+  if (paths.length <= MAX_LISTED_PATHS) {
+    return paths.join(', ');
+  }
+  return `${paths.slice(0, MAX_LISTED_PATHS).join(', ')} and ${paths.length - MAX_LISTED_PATHS} more`;
+}
+
+function inventoryOf(state: RepoState): LockfileInventoryEntry[] {
+  return state.lockfileInventory ?? [];
+}
+
+function isBelowRoot(entry: LockfileInventoryEntry): boolean {
+  return entry.path.includes('/');
+}
+
+// A lockfile below the repository root is never read by this tool, and a
+// package manager run in that directory installs from it. So a change to
+// its bytes (including a file that is new on this side) is something the
+// run cannot judge. An unknown identity on either side counts as a change.
+// The way out for a file nothing installs from (a test fixture, an
+// example) is ignorePaths, read from the comparison side.
+function checkNestedLockfiles(
+  before: RepoState,
+  after: RepoState,
+  options: DeltaOptions
+): Diagnostic[] {
+  const beforeIds = new Map(inventoryOf(before).map((entry) => [entry.path, entry.blobId]));
+  const changed = inventoryOf(after)
+    .filter(isBelowRoot)
+    .filter((entry) => {
+      const beforeId = beforeIds.get(entry.path);
+      return entry.blobId === null || beforeId === undefined || beforeId === null || beforeId !== entry.blobId;
+    })
+    .map((entry) => entry.path);
+  const isIgnored = options.isIgnoredPath ?? (() => false);
+  const ignored = changed.filter((entryPath) => isIgnored(entryPath));
+  const blocking = changed.filter((entryPath) => !isIgnored(entryPath));
+
+  const diagnostics: Diagnostic[] = [];
+  if (ignored.length > 0) {
+    diagnostics.push({
+      code: NESTED_LOCKFILE_IGNORED,
+      message:
+        `${listPaths(ignored)}: changed below the repository root and covered by ignorePaths, so ` +
+        'it was not judged',
+    });
+  }
+  if (blocking.length === 0) {
+    return diagnostics;
+  }
+  const one = blocking.length === 1;
+  const refuses = options.nestedLockfileChangeRefuses ?? NESTED_LOCKFILE_CHANGE_REFUSES;
+  const ignoreHint =
+    `If nothing this repository ships installs from ${one ? 'it' : 'them'} (a test fixture or an ` +
+    'example), add the path or its directory to ignorePaths in .dep-guard.json on the base branch; ' +
+    'on a --trust-base run that entry is read from the trust base, so a pull request cannot add it ' +
+    'for itself.';
+  const message = refuses
+    ? `${listPaths(blocking)}: ${one ? 'a lockfile' : 'lockfiles'} below the repository root changed. ` +
+      'This tool reads only the lockfiles at the repository root, so it cannot judge what a package ' +
+      `manager would install from ${one ? 'it' : 'them'}; refusing to report a clean pass. ` +
+      ignoreHint +
+      ' Otherwise review the file by hand and merge with an admin override of the failing check. ' +
+      'This is a could-not-run (exit 2), not a finding.'
+    : `${listPaths(blocking)}: ${one ? 'this lockfile' : 'these lockfiles'} below the repository root ` +
+      `changed. This tool did not read ${one ? 'it' : 'them'}, so this run says nothing about what a ` +
+      `package manager would install from ${one ? 'it' : 'them'}; review the change by hand. ` +
+      ignoreHint;
+  if (refuses) {
+    throw new DepGuardError(message, 'lockfile-downgrade');
+  }
+  diagnostics.push({ code: NESTED_LOCKFILE_CHANGED, message });
+  return diagnostics;
 }
 
 function lockfilesOf(state: RepoState): ParsedLockfile[] {
@@ -664,10 +1006,32 @@ function lockfilesOf(state: RepoState): ParsedLockfile[] {
 // answer from the first is the composition failure that let a tampered
 // transitive entry, and a tampered entry hidden behind a same-version
 // decoy, both scan clean.
-export function computeDelta(before: RepoState | null, after: RepoState): DependencyDelta {
-  refuseLockfileDowngrade(before, after);
+export function computeDelta(
+  before: RepoState | null,
+  after: RepoState,
+  options: DeltaOptions = {}
+): DependencyDelta {
+  const comparisonSides = [
+    ...(before === null ? [] : [before]),
+    ...(options.extraComparisonSides ?? []),
+  ];
+  const acknowledged = new Set(options.acknowledgedLockfiles ?? []);
+  const acknowledgementNotes: Diagnostic[] = [];
+  for (const side of comparisonSides) {
+    refuseLockfileDowngrade(
+      side,
+      after,
+      acknowledged,
+      acknowledgementNotes,
+      options.acknowledgementSource ?? 'trust-base'
+    );
+  }
+  const deltaDiagnostics: Diagnostic[] = [
+    ...acknowledgementNotes,
+    ...comparisonSides.flatMap((side) => checkNestedLockfiles(side, after, options)),
+    ...unreadSiblingNote(after),
+  ];
   const beforeDeps = indexDeps(before);
-  const deltaDiagnostics: Diagnostic[] = [];
   const changes: DepChange[] = [];
 
   for (const manifest of after.manifests) {
@@ -734,12 +1098,32 @@ export function computeDelta(before: RepoState | null, after: RepoState): Depend
   // a repository that has no lockfile at all would produce output
   // byte-identical to one whose lockfile checks ran and found nothing --
   // the two most different possible outcomes, spelled the same way.
-  if (after.lockfile === null) {
+  //
+  // A lockfile that IS present but is not read (one below the root, or a
+  // root lockfile name that is not a readable file) is a different
+  // situation from having none, and is said as such.
+  const unreadPresent = inventoryOf(after)
+    .filter((entry) => !entry.read && (isBelowRoot(entry) || after.lockfile === null))
+    .map((entry) => entry.path);
+  if (unreadPresent.length > 0) {
     deltaDiagnostics.push({
-      code: LOCKFILE_MISSING,
+      code: LOCKFILE_NOT_READ,
       message:
-        'no lockfile was found, so the lockfile-tamper and install-script checks had nothing to read and were skipped; the manifest-level checks still ran',
+        `${listPaths(unreadPresent)}: present but not read; this tool reads npm and pnpm lockfiles ` +
+        'at the repository root only' +
+        (after.lockfile === null
+          ? ', so the lockfile-tamper and install-script checks had nothing to read and were skipped; the manifest-level checks still ran'
+          : ''),
     });
+  }
+  if (after.lockfile === null) {
+    if (unreadPresent.length === 0) {
+      deltaDiagnostics.push({
+        code: LOCKFILE_MISSING,
+        message:
+          'no lockfile was found, so the lockfile-tamper and install-script checks had nothing to read and were skipped; the manifest-level checks still ran',
+      });
+    }
   } else if (before === null && (lockfileFormat === 'npm' || lockfileFormat === 'pnpm')) {
     // With no before side, every tamper signal that works by comparing
     // two resolutions is structurally unreachable -- and auditing an

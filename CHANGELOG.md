@@ -10,6 +10,170 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-04
+
+Patch on both published packages. `@vaultcompass/dep-guard` and
+`@vaultcompass/dep-guard-core` move from 0.10.0 to 0.10.1. The action's
+`version` input default and the `DG_TAG_SCANNER` constant move with them, so
+`vaultcompasshq/dep-guard@v0.10.1` installs `@vaultcompass/dep-guard@0.10.1`.
+Scans that exited 0 can now exit 2 or 1. What can newly block, and how to
+clear each:
+
+- `lockfile-downgrade` (exit 2): the head loses lockfile coverage or gains
+  root lockfile bytes dep-guard does not read, against any comparison side.
+  Clear it by adding the entries the message prints to
+  `acknowledgedLockfiles` on the base branch first, by deleting the stale
+  lockfile in the pull request, or by an admin override after review.
+- `workspace-glob-unexpandable` (exit 2): a workspace pattern on the side
+  being judged that dep-guard cannot expand. Clear it by rewriting the
+  pattern in the pull request; a base that still has the old pattern does
+  not block that pull request.
+- `lockfile-parse` (exit 2): an npm lockfile on the side being judged whose
+  `lockfileVersion` (a number or a string of digits, 2 or more) promises a
+  `packages` map it does not have. Clear it by regenerating the lockfile
+  with npm in the pull request; a base that still has the old file does not
+  block that pull request.
+- `symlinked-input` (exit 2): a root lockfile dep-guard parses, the root
+  `package.json` or a workspace member's `package.json` that is a symlink on
+  the side being judged. Clear it by replacing the link with a regular file;
+  a base that still has the link does not block that pull request.
+- `config-invalid` (exit 2): a malformed `acknowledgedLockfiles` entry. Clear
+  it by correcting the entry.
+- New findings (exit 1): from pnpm lockfile documents now read, from
+  `requiresBuild` in pnpm lockfiles older than v9, from the keys of pnpm
+  lockfile versions 5.x and 6.x now read, from wider workspace expansion,
+  and from the comparison changes listed under Changed. Clear them as any
+  finding: an `allow` entry for the rules it covers, `ignorePaths`, or the
+  baseline, each on the base branch for a pull-request run.
+
+With `--base` and a trust base that is a different tree, the trust base's
+dependency state is now also read, as a comparison side for the lockfile set
+rule. What a comparison side cannot read (a symlinked input, a workspace
+pattern dep-guard cannot expand, an npm lockfile missing its `packages` map)
+is treated as absent there and named in a diagnostic, and the judged side is
+compared against what remains.
+
+### Added
+
+- `acknowledgedLockfiles` in `.dep-guard.json`: `LOCKFILE:BLOBID` entries
+  that let exactly those lockfile bytes through the lockfile downgrade rule.
+  Read only from the comparison side (the trust base, else the `--base` ref,
+  else HEAD for `--staged`). It clears that rule and nothing else; a run
+  that uses an entry says so in the new `lockfile-downgrade-acknowledged`
+  diagnostic. A malformed entry is invalid config (exit 2). On a staged scan
+  the entries are read from HEAD, so they are committed in a commit of their
+  own first; the refusal says where they are read for the kind of run it is
+  on. A lockfile path that is a symlink has no identity to acknowledge.
+  dep-guard 0.10.0 and earlier refuse a config containing this key, so it
+  needs 0.10.1 or later. On a `--trust-base` run, additions are named in the
+  config proposal and removals counted.
+- Every YAML document of a `pnpm-lock.yaml` that is shaped like a pnpm
+  lockfile is read, including the document pnpm writes for its own managed
+  version, each as a lockfile of its own (`pnpm-lock.yaml#package-manager`,
+  `pnpm-lock.yaml#document-N`) whose entries go through every check. This
+  can add findings; clear them as any finding.
+- A leading UTF-8 byte order mark is accepted in every JSON and YAML file
+  the scan reads, and in the project `.npmrc`, whose first line after the
+  mark is honoured as npm honours it.
+- Every file with a lockfile name is inventoried at any depth with its git
+  blob id. New diagnostics: `lockfile-nested-changed` names a lockfile below
+  the repository root whose bytes differ from the base (dep-guard does not
+  read it, so the run says nothing about what would be installed from it),
+  `lockfile-nested-ignored` the same for a path covered by `ignorePaths`,
+  `lockfile-not-read` the lockfiles present that dep-guard does not read,
+  and `lockfile-unread-sibling` an unread root lockfile beside a read one on
+  a run that is not refused for it. The `lockfile-missing` note is printed
+  only when no lockfile is present at all.
+- `symlinked-input-comparison-side`, `workspace-pattern-unread-comparison-side`
+  and `lockfile-unread-comparison-side`: what a comparison side could not
+  read and treated as absent there, naming the path or pattern and the side.
+- `unknown-package-private-scope-skipped`: a new dependency whose scope the
+  project `.npmrc` pins to a non-public registry is not checked against the
+  public corpus, and this diagnostic names the scope. On a `--trust-base`
+  run the pins come from the trust base. An unscoped name under a private
+  default registry is still checked.
+- pnpm lockfiles from `lockfileVersion` 5.x on are read, and `requiresBuild`
+  is read as an install script in lockfiles older than v9. Both can add
+  findings; clear them with an `allow` entry for the rules it covers or the
+  baseline.
+- On a `--trust-base` run, a changed `minAgeDays` and added `minAgeAllow`
+  entries are named in the config proposal, and removed `minAgeAllow`
+  entries are counted.
+
+### Changed
+
+- The lockfile downgrade rule now covers every way the lockfile set can
+  lose what dep-guard reads. When the base side has a read lockfile with
+  entries, the head may not carry a root lockfile dep-guard does not read
+  whose blob differs from the base (a new `yarn.lock` beside a
+  `package-lock.json`, a changed one, a v1 npm file, a binary lockfile, or a
+  lockfile name that is a symlink or not a regular file), and may not lose
+  every read lockfile with entries while a manifest declares a dependency a
+  lockfile would record (peerDependencies count; workspace packages
+  discovered as manifests do not). Deleting the only lockfile while
+  dependencies are declared is now exit 2. In a `pnpm-lock.yaml`, the bytes
+  outside the documents that are read count as unread bytes of that file.
+  Clearing path:
+  add the entries the error message prints to `acknowledgedLockfiles` on the
+  base branch first, or delete the stale lockfile, or merge with an admin
+  override after reviewing the lockfile by hand.
+- A root lockfile dep-guard parses, the root `package.json`, or a workspace
+  member's `package.json` that is a symlink is not parsed on any side of a
+  scan. A git side decides from the file mode, the working tree with
+  `lstat`. On the side being judged it is exit 2 (`symlinked-input`); on a
+  comparison side it is treated as absent there and named in the new
+  `symlinked-input-comparison-side` diagnostic. Clearing path: replace the
+  link with a regular file; that pull request passes when the new file is
+  clean. In that pull request the checks that compare a lockfile entry with
+  its earlier resolution have no earlier resolution to compare against for
+  that file, so the note is printed and the lockfile in that pull request
+  should be reviewed by a person.
+- With `--base` and `--trust-base` together the downgrade rule must hold
+  against both sides; with `--trust-base` alone it is evaluated against the
+  trust base; with `--staged` against HEAD only. Pass `--base` and
+  `--trust-base` together on pull requests. Clearing path: as above.
+- Workspace patterns are resolved as npm's workspace mapper resolves them
+  (order, negation, a stripped leading `./` or `/`, backslashes, `*` in any
+  segment, `**` at any depth, names starting with `.`, and, on a git side of
+  a repository whose `core.ignorecase` is true, names in any case), so more
+  workspace manifests are checked. Wider workspace expansion can surface findings in
+  fixture and example workspaces; clearing path: `ignorePaths` on the base
+  branch. On the side being judged, a pattern with a `..` segment or a drive
+  letter, or using glob syntax beyond `*` and `**`, is exit 2
+  (`workspace-glob-unexpandable`), and so is a `**` walk deeper than 32
+  directories. Clearing path: rewrite the pattern inside the repository,
+  without `..`, with `*` or `**`, or list the directories; the pull request
+  that does so passes when it is clean. In that pull request the checks that
+  compare a lockfile entry with its earlier resolution have no earlier
+  resolution to compare against for that file, so the note is printed and the
+  lockfile in that pull request should be reviewed by a person.
+  An exclusion that cannot be applied exactly is not applied and noted,
+  which only widens the scan.
+- The primary lockfile (the one the run summary names and the manifest walk
+  reads) is the first one dep-guard reads, so a legacy v1 npm file beside a
+  pnpm lockfile no longer takes that place. This can add findings in a
+  repository carrying both; clear them as any finding.
+- An npm `lockfileVersion` written as a string of digits is read as that
+  number, so `"2"` or `"3"` with no `packages` map on the side being judged
+  is `lockfile-parse` (exit 2). Clearing path: regenerate the lockfile; the
+  pull request that does so passes when it is clean. In that pull request the
+  checks that compare a lockfile entry with its earlier resolution have no
+  earlier resolution to compare against for that file, so the note is printed
+  and the lockfile in that pull request should be reviewed by a person.
+- Two unreadable resolutions at a held version, with no integrity hash on
+  either side and a moved location, are a high `resolution-unreadable`
+  finding. Clearing path: record an integrity hash for the entry, or the
+  baseline.
+- Where only one side of an entry records a resolved URL, an integrity
+  rewrite to a weaker algorithm is reported as `integrity-downgraded`; every
+  other rewrite there stays `integrity-changed`. A baselined finding of the
+  first kind changes fingerprint and is reported once more. Clearing path:
+  re-baseline after review.
+- When the project `.npmrc` differs between the head and a comparison side,
+  an integrity rewrite at the same URL is reported as `integrity-changed`
+  even when it moves to a stronger algorithm. Clearing path: land the
+  `.npmrc` change in its own pull request first.
+
 ## [0.10.0] - 2026-09-30
 
 Minor on both published packages, per the stability policy: 0.x minors may

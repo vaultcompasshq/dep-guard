@@ -9,7 +9,7 @@ inputs:
   version:
     description: |
       The exact version of `@vaultcompass/dep-guard` to install, such as
-      `0.10.0`. Validated against `^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`,
+      `0.10.1`. Validated against `^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`,
       and the default is the SCANNER version this action tag shipped with,
       which is not always the same number as the tag: an action-only release
       moves the tag and leaves the scanner where it is.
@@ -39,7 +39,7 @@ inputs:
       request is not the place to widen a pattern for the convenience of
       testing one.
     required: false
-    default: 0.10.0
+    default: 0.10.1
   path:
     description: |
       Path to scan, relative to the workspace root. Must be 1..256 characters
@@ -74,6 +74,9 @@ inputs:
       ref instead of from the tree it is judging, so a pull request cannot
       turn the gate off in the same commit that carries what the gate exists
       to catch. A head-side change to any of them is reported and ignored.
+      The ref is also a comparison side for the lockfile set rule: the
+      head may not lose lockfile coverage or gain unread lockfile bytes
+      against it either.
 
       Left at the default, this is decided by the event: on a
       `pull_request` event the action passes `origin/$GITHUB_BASE_REF`, and
@@ -104,7 +107,8 @@ inputs:
       What the change is compared against, passed to the scanner as
       `--base`. Not the same input as `trust-base`, and neither implies
       the other: `base` decides what changed, `trust-base` decides whose
-      config file is trusted. They usually name the same ref in CI, since
+      config file is trusted. Both are comparison sides for the lockfile
+      set rule. They usually name the same ref in CI, since
       the base branch is both the state you diverged from and the state
       whose rules were approved, but either can be set without the other.
 
@@ -238,7 +242,7 @@ runs:
         # file from the HEAD, so the `version:` input is written by the pull
         # request being judged. The shape check above proves the input names a
         # version and says nothing about WHICH one: every published version
-        # clears it, and thirteen are published, 0.1.0 through 0.10.0.
+        # clears it, and fourteen are published, 0.1.0 through 0.10.1.
         #
         # WHAT ALREADY STOPS A BACKWARD PIN TODAY is not the shape check but a
         # FLAG. `--trust-base` arrived in the 0.6.0 scanner, the run step
@@ -252,13 +256,13 @@ runs:
         # explicit instead of leaving it to be discovered.
         #
         # The day a 0.11.0 scanner ships with new rules, a pull request pins
-        # 0.10.0, which knows `--trust-base` and runs cleanly, and is judged by
+        # 0.10.1, which knows `--trust-base` and runs cleanly, and is judged by
         # the older rule set it chose for itself.
         #
         # This is the same class of hole as `trust-base: off`, refused by name a
         # few checks below for exactly this reason. The difference is what a
         # reviewer sees: deleting a security step reads as deleting a security
-        # step, while `version: 0.10.0` reads as ordinary version management.
+        # step, while `version: 0.10.1` reads as ordinary version management.
         #
         # FORWARD STAYS ALLOWED, ON AN ASSUMPTION THIS RULE DOES NOT ENFORCE.
         # The rule assumes a newer scanner is at least as strict as the one this
@@ -275,7 +279,7 @@ runs:
         # DG_TAG_SCANNER is THE TESTED SCANNER THIS TAG SHIPS, which moves with
         # the published packages, and it is the `version` input's default. It is
         # compared against as a hardcoded constant because `inputs.version` looks
-        # identical whether the consumer wrote 0.10.0 or the default supplied it,
+        # identical whether the consumer wrote 0.10.1 or the default supplied it,
         # so the step cannot tell a pin from a default and the constant is the
         # only source of truth. It is safe to trust because action.yml comes
         # from the ref the consumer's workflow names, not from the pull
@@ -294,7 +298,7 @@ runs:
         # prose from a step.)
         DG_TAG_SCANNER_MAJOR=0
         DG_TAG_SCANNER_MINOR=10
-        DG_TAG_SCANNER_PATCH=0
+        DG_TAG_SCANNER_PATCH=1
         DG_TAG_SCANNER="${DG_TAG_SCANNER_MAJOR}.${DG_TAG_SCANNER_MINOR}.${DG_TAG_SCANNER_PATCH}"
 
         # GITHUB_BASE_REF being non-empty IS the pull-request test, and it is the
@@ -951,7 +955,7 @@ runs:
             exit 1
             ;;
           2)
-            printf '::error::dep-guard could not complete its checks (exit 2): an unresolvable trust base, a missing corpus, or a scan path that is not a repository. This is not a clean scan.\n'
+            printf '::error::dep-guard could not complete its checks (exit 2): for example an unresolvable trust base, a missing corpus, a scan path that is not a repository, invalid config, a lockfile or manifest it cannot parse or that is a symlink, a workspace pattern it cannot expand, or a lockfile set change it refuses (lockfile-downgrade). The reason is on the log above. This is not a clean scan.\n'
             exit 2
             ;;
           *)

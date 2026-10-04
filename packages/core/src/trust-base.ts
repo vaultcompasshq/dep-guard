@@ -56,6 +56,7 @@ import type { ResolvedConfig } from './checks/types.js';
 import { CONFIG_FILE, LOCAL_CONFIG_FILE, loadConfigFromTexts } from './config.js';
 import { NPMRC, isUsableRef } from './git-source.js';
 import { parseNpmrcDefaultRegistry, parseNpmrcPins } from './state.js';
+import { withoutByteOrderMark } from './text.js';
 import { DepGuardError } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -467,7 +468,10 @@ function documentsDiffer(base: string | null, head: string | null): boolean {
     return true;
   }
   try {
-    return JSON.stringify(JSON.parse(base) ?? null) !== JSON.stringify(JSON.parse(head) ?? null);
+    return (
+      JSON.stringify(JSON.parse(withoutByteOrderMark(base)) ?? null) !==
+      JSON.stringify(JSON.parse(withoutByteOrderMark(head)) ?? null)
+    );
   } catch {
     return base !== head;
   }
@@ -605,6 +609,21 @@ function describeConfigChange(base: ResolvedConfig, head: ResolvedConfig | null)
     parts.push(`online set to ${head.online}`);
   }
 
+  const acknowledged = addedEntries(base.acknowledgedLockfiles ?? [], head.acknowledgedLockfiles ?? []);
+  if (acknowledged.length > 0) {
+    parts.push(`proposed: acknowledgedLockfiles ${nameList(acknowledged)}`);
+  }
+
+  const minAgeAllow = addedEntries(base.minAgeAllow, head.minAgeAllow);
+  if (minAgeAllow.length > 0) {
+    parts.push(`proposed: minAgeAllow ${nameList(minAgeAllow)}`);
+  }
+
+  if (base.minAgeDays !== head.minAgeDays) {
+    const direction = head.minAgeDays < base.minAgeDays ? 'lowered' : 'raised';
+    parts.push(`minAgeDays ${direction} to ${head.minAgeDays}`);
+  }
+
   if (base.onlineBudgetMs !== head.onlineBudgetMs) {
     const value = head.onlineBudgetMs === undefined ? 'the default' : `${head.onlineBudgetMs}`;
     parts.push(`onlineBudgetMs set to ${value}`);
@@ -614,7 +633,7 @@ function describeConfigChange(base: ResolvedConfig, head: ResolvedConfig | null)
     parts.push('extraAliases changed');
   }
 
-  // Removals, counted across the four list keys rather than named. A pull
+  // Removals, counted across the six list keys rather than named. A pull
   // request that only removes entries is TIGHTENING the gate, which is not
   // a warning, but it still has to be distinguishable from a change this
   // function could not describe at all.
@@ -622,7 +641,9 @@ function describeConfigChange(base: ResolvedConfig, head: ResolvedConfig | null)
     addedEntries(head.allow, base.allow).length +
     addedEntries(head.ignorePaths, base.ignorePaths).length +
     addedEntries(head.internalScopes, base.internalScopes).length +
-    addedEntries(head.internalPrefixes, base.internalPrefixes).length;
+    addedEntries(head.internalPrefixes, base.internalPrefixes).length +
+    addedEntries(head.minAgeAllow, base.minAgeAllow).length +
+    addedEntries(head.acknowledgedLockfiles ?? [], base.acknowledgedLockfiles ?? []).length;
   if (removed > 0) {
     parts.push(`${removed} entries removed`);
   }
@@ -790,6 +811,22 @@ function tryBaseline(text: string | null): Set<string> | null {
  * request proposes, and reporting it as such would make every dirty
  * working tree look like an attempted mute.
  */
+/**
+ * The config committed at a ref (.dep-guard.json with its local overlay),
+ * validated exactly as the trust base's is. Used to read the lockfile
+ * acknowledgements from the comparison side of a run that has no trust
+ * base: the --base ref, or HEAD for a staged scan.
+ */
+export async function loadConfigAtRef(root: string, ref: string): Promise<ResolvedConfig> {
+  const [config, local] = await Promise.all([
+    readControlFileAtRef(root, ref, CONFIG_FILE),
+    readControlFileAtRef(root, ref, LOCAL_CONFIG_FILE),
+  ]);
+  assertBaseIsRegularFile(config, ref, 'config-invalid');
+  assertBaseIsRegularFile(local, ref, 'config-invalid');
+  return loadConfigFromTexts(config === null ? null : config.text, local === null ? null : local.text, ref);
+}
+
 export async function loadTrustedControls(root: string, ref: string): Promise<TrustedControls> {
   await assertTrustBaseUsable(root, ref);
 

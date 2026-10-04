@@ -68,6 +68,7 @@ interface ContextOptions {
   lockEntryChanges?: LockEntryChange[];
   lockfilePath?: string;
   hasComparisonBase?: boolean;
+  npmrcChanged?: boolean;
 }
 
 function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckContext {
@@ -89,6 +90,7 @@ function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckC
     config: { ...BASE_CONFIG, ...options.config },
     delta,
     npmrcRegistryPins: new Map<string, string>(),
+    ...(options.npmrcChanged === undefined ? {} : { npmrcChanged: options.npmrcChanged }),
     diagnostics: [] as Diagnostic[],
     allowed: [] as string[],
   };
@@ -184,7 +186,7 @@ describe('tamperCheck: resolved host repointed', () => {
     expect(tamperCheck(makeContext(changes))).toEqual([]);
   });
 
-  test('an unparseable resolvedUrl does not throw and produces no finding for that rule', () => {
+  test('an unparseable resolvedUrl does not throw and produces no host finding; a held hashless move is resolution-unreadable', () => {
     const changes = [
       makeChange({
         name: 'lodash',
@@ -194,7 +196,8 @@ describe('tamperCheck: resolved host repointed', () => {
       }),
     ];
     expect(() => tamperCheck(makeContext(changes))).not.toThrow();
-    expect(tamperCheck(makeContext(changes))).toEqual([]);
+    const signals = tamperCheck(makeContext(changes)).map((finding) => String(finding.details?.signal));
+    expect(signals).toEqual(['resolution-unreadable']);
   });
 
   // file: URLs have an empty host by construction, and the
@@ -433,6 +436,63 @@ describe('tamperCheck: integrity forged in place', () => {
       }),
     ];
     expect(tamperCheck(makeContext(changes))[0].details?.signal).toBe('integrity-changed');
+  });
+
+  test('sha512 to sha1 while resolved is dropped is integrity-downgraded', () => {
+    const changes = [
+      makeChange({
+        name: 'lodash',
+        kind: 'changed',
+        before: { version: '4.17.21', resolvedUrl: URL, integrity: 'sha512-real' },
+        after: { version: '4.17.21', integrity: 'sha1-weaker' },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('critical');
+    expect(findings[0].details?.signal).toBe('integrity-downgraded');
+  });
+
+  test('sha1 to sha512 while resolved is dropped is still integrity-changed and critical', () => {
+    const changes = [
+      makeChange({
+        name: 'lodash',
+        kind: 'changed',
+        before: { version: '4.17.21', resolvedUrl: URL, integrity: 'sha1-old' },
+        after: { version: '4.17.21', integrity: 'sha512-forged' },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('critical');
+    expect(findings[0].details?.signal).toBe('integrity-changed');
+  });
+
+  test('an upward rehash at the same URL is reported as integrity-changed when .npmrc changed in this change', () => {
+    const changes = [
+      makeChange({
+        name: 'lodash',
+        kind: 'changed',
+        before: { version: '4.17.21', resolvedUrl: URL, integrity: 'sha1-old' },
+        after: { version: '4.17.21', resolvedUrl: URL, integrity: 'sha512-new' },
+      }),
+    ];
+    const findings = tamperCheck(makeContext(changes, { npmrcChanged: true }));
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('critical');
+    expect(findings[0].details?.signal).toBe('integrity-changed');
+  });
+
+  test('control: an upward rehash at the same URL with .npmrc unchanged is not a finding', () => {
+    const changes = [
+      makeChange({
+        name: 'lodash',
+        kind: 'changed',
+        before: { version: '4.17.21', resolvedUrl: URL, integrity: 'sha1-old' },
+        after: { version: '4.17.21', resolvedUrl: URL, integrity: 'sha512-new' },
+      }),
+    ];
+    expect(tamperCheck(makeContext(changes, { npmrcChanged: false }))).toEqual([]);
   });
 
   test('a legitimate version bump, which moves version URL and hash together, does not fire', () => {
@@ -1235,13 +1295,25 @@ describe('tamperCheck: a resolution the engine cannot read', () => {
     expect(context.diagnostics.map((d) => d.code)).toContain('tamper-resolution-unreadable');
   });
 
-  test('two unreadable resolutions with nothing else to go on are noted, not reported', () => {
+  test('two unreadable resolutions where the version moved, with no hash on either side, are noted, not reported', () => {
     const context = contextFor(
       { version: '4.17.21', resolvedUrl: 'not a url' },
       { version: '4.17.22', resolvedUrl: 'also not a url' }
     );
     expect(tamperCheck(context)).toEqual([]);
     expect(context.diagnostics.map((d) => d.code)).toContain('tamper-resolution-unreadable');
+  });
+
+  test('two unreadable resolutions at a held version, with no hash on either side, are one high resolution-unreadable', () => {
+    const context = contextFor(
+      { version: '4.17.21', resolvedUrl: 'vendor/lodash-a.tgz' },
+      { version: '4.17.21', resolvedUrl: 'vendor/evil.tgz' }
+    );
+    const findings = tamperCheck(context);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('high');
+    expect(findings[0].details?.signal).toBe('resolution-unreadable');
+    expect(findings[0].message).not.toContain('evil.tgz');
   });
 
   test('one package produces one diagnostic however many entries carry it', () => {

@@ -42,6 +42,11 @@ export interface ResolvedConfig {
   // one budget covers every online step in a run rather than one per
   // request.
   onlineBudgetMs?: number;
+  // "PATH:BLOBID" entries, each acknowledging one exact set of bytes for
+  // one root lockfile so the lockfile downgrade rule lets it through (see
+  // delta.ts). Read from the comparison side's config only. Optional so a
+  // hand-built config in a test need not name it; loadConfig always sets it.
+  acknowledgedLockfiles?: string[];
 }
 
 // Everything a check may read, plus one thing it may write.
@@ -67,6 +72,12 @@ export interface CheckContext {
   // every real caller (scan.ts's runChecks) sets it. See RepoState's own
   // field of the same name in state.ts for why this exists at all.
   npmrcDefaultRegistry?: string | null;
+  // True when the project .npmrc on the side being judged differs from the
+  // one on any comparison side (added, removed or changed). The install
+  // reads the judged side's .npmrc, so the same resolved URL is no longer
+  // evidence of the same bytes, and the tamper check stops forgiving an
+  // upward rehash. Absent reads as false; scan.ts always sets it.
+  npmrcChanged?: boolean;
   diagnostics: Diagnostic[];
   // A second write-only sink, alongside `diagnostics`. A check that drops a
   // would-be finding because an `allow` entry covers the package pushes the

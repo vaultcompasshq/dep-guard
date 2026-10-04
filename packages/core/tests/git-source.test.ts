@@ -400,45 +400,207 @@ describe('manifest discovery', () => {
     expect(manifestPaths(after)).toEqual(['package.json', 'packages/a/package.json']);
   });
 
-  test('a workspace glob that escapes the repository root is ignored and reported', async () => {
-    await write('package.json', manifestJson({}, { workspaces: ['../*', '/etc/*'] }));
+  test('a workspace pattern reaching outside the repository root is could-not-run', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['../*'] }));
 
-    const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
-
-    expect(manifestPaths(after)).toEqual(['package.json']);
-    expect(diagnostics.filter((d) => d.code === 'workspace-glob-unsupported')).toHaveLength(2);
+    await expect(loadStates(repo, { kind: 'audit' })).rejects.toMatchObject({
+      code: 'workspace-glob-unexpandable',
+    });
   });
 
-  test('a workspace glob containing a backslash is ignored and reported', async () => {
-    // path.join treats a backslash as a separator on win32, so a pattern
-    // this shape would escape a containment check that only splits on "/".
+  test('a backslash in a workspace pattern reads as a separator, so "..\\evil" is could-not-run', async () => {
     await write('package.json', manifestJson({}, { workspaces: ['..\\evil'] }));
 
-    const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
-
-    expect(manifestPaths(after)).toEqual(['package.json']);
-    expect(diagnostics.map((d) => d.code)).toContain('workspace-glob-unsupported');
+    await expect(loadStates(repo, { kind: 'audit' })).rejects.toMatchObject({
+      code: 'workspace-glob-unexpandable',
+    });
   });
 
-  test('a wildcard outside the final segment discovers nothing and says so', async () => {
+  test('a workspace pattern naming a drive is could-not-run', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['C:/packages/*'] }));
+
+    await expect(loadStates(repo, { kind: 'audit' })).rejects.toMatchObject({
+      code: 'workspace-glob-unexpandable',
+    });
+  });
+
+  // The expected directories are what npm 10.9.8's own workspace mapper
+  // (@npmcli/map-workspaces) returns for the same tree and the same
+  // "workspaces" list.
+  describe('package.json workspaces resolve to the directories npm maps', () => {
+    const TREE = ['packages/a', 'packages/b', 'packages/b/a', 'packages/b/c', 'packages/c', 'apps/web', 'packages/.hidden'];
+    const NPM_MAPS: Array<[string[], string[]]> = [
+      [['packages/*'], ['packages/a', 'packages/b', 'packages/c']],
+      [['/packages/a'], ['packages/a']],
+      [['//packages/a'], ['packages/a']],
+      [['./packages/a'], ['packages/a']],
+      [['././packages/a'], []],
+      [['packages\\a'], ['packages/a']],
+      [['!!packages/a'], ['packages/a']],
+      [['packages/*', '!packages/b'], ['packages/a', 'packages/c']],
+      [['packages/**', '!packages/b/**'], ['packages/a', 'packages/c']],
+      [['packages/**', '!packages/b/**', 'packages/b/a'], ['packages/a', 'packages/b', 'packages/b/a', 'packages/b/c', 'packages/c']],
+      [['packages/b/a', 'packages/**', '!packages/b/**'], ['packages/a', 'packages/c']],
+      [['packages/*', '!packages/b', 'packages/b'], ['packages/a', 'packages/b', 'packages/c']],
+      [['packages/*', '!!!packages/b'], ['packages/a', 'packages/c']],
+      [['packages/**'], ['packages/a', 'packages/b', 'packages/b/a', 'packages/b/c', 'packages/c']],
+      [['**'], ['apps/web', 'packages/a', 'packages/b', 'packages/b/a', 'packages/b/c', 'packages/c']],
+      [['packages/*/'], ['packages/a', 'packages/b', 'packages/c']],
+      [['packages/./*'], []],
+      [['packages//a'], ['packages/a']],
+      [['packages/*/a'], ['packages/b/a']],
+      [['packages/*', '!packages\\b'], ['packages/a', 'packages/b', 'packages/c']],
+      [['packages/*', '!/packages/b'], ['packages/a', 'packages/c']],
+      [['.'], []],
+      [['packages/**', '!packages/b'], ['packages/a', 'packages/b/a', 'packages/b/c', 'packages/c']],
+      [['packages/**', '!packages/b/'], ['packages/a', 'packages/b/a', 'packages/b/c', 'packages/c']],
+      [['packages/**', '!packages/*'], []],
+      [['packages/**', '!**/a'], ['packages/b', 'packages/b/c', 'packages/c']],
+      [['packages/**', '!packages/b/*'], ['packages/a', 'packages/b', 'packages/c']],
+      [['packages/*', '!packages/b/**'], ['packages/a', 'packages/c']],
+      [['packages/**', '!packages/**', 'packages/b/c'], ['packages/a', 'packages/b', 'packages/b/a', 'packages/b/c', 'packages/c']],
+      [['packages/.*'], ['packages/.hidden']],
+      [['packages/.hidden'], ['packages/.hidden']],
+      [['packages/*', 'packages/a'], ['packages/a', 'packages/b', 'packages/c']],
+      [['apps/web', '!apps/**', 'apps/web'], ['apps/web']],
+    ];
+
+    for (const [workspaces, dirs] of NPM_MAPS) {
+      test(`${JSON.stringify(workspaces)} maps to ${JSON.stringify(dirs)}`, async () => {
+        await write('package.json', manifestJson({}, { workspaces }));
+        for (const dir of TREE) {
+          await write(`${dir}/package.json`, JSON.stringify({ name: dir.replace(/\//g, '-') }));
+        }
+        await git('add', '-A');
+
+        for (const mode of [{ kind: 'audit' as const }, { kind: 'staged' as const }]) {
+          const { after } = await loadStates(repo, mode);
+          expect(manifestPaths(after)).toEqual(
+            ['package.json', ...dirs.map((dir) => `${dir}/package.json`)].sort()
+          );
+        }
+      });
+    }
+  });
+
+  test('a wildcard outside the final segment is expanded', async () => {
     await write('package.json', manifestJson({}, { workspaces: ['packages/*/inner'] }));
     await write('packages/a/inner/package.json', JSON.stringify({ name: 'inner' }));
 
     const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
 
-    expect(manifestPaths(after)).toEqual(['package.json']);
-    expect(diagnostics.map((d) => d.code)).toContain('workspace-glob-unsupported');
+    expect(manifestPaths(after)).toEqual(['package.json', 'packages/a/inner/package.json']);
+    expect(diagnostics.map((d) => d.code)).not.toContain('workspace-glob-unsupported');
   });
 
-  test('a trailing double star expands one level and reports the deeper miss', async () => {
+  test('a wildcard in two segments is expanded, on a git side as well as the working tree', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['packages/*/*'] }));
+    await write('packages/group/app/package.json', JSON.stringify({ name: 'app' }));
+    await git('add', '-A');
+
+    const { after } = await loadStates(repo, { kind: 'staged' });
+    expect(manifestPaths(after)).toEqual(['package.json', 'packages/group/app/package.json']);
+    const audit = await loadStates(repo, { kind: 'audit' });
+    expect(manifestPaths(audit.after)).toEqual(['package.json', 'packages/group/app/package.json']);
+  });
+
+  test('a double star expands to every depth', async () => {
     await write('package.json', manifestJson({}, { workspaces: ['packages/**'] }));
     await write('packages/a/package.json', JSON.stringify({ name: 'a' }));
     await write('packages/deep/nested/package.json', JSON.stringify({ name: 'nested' }));
 
     const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
 
-    expect(manifestPaths(after)).toEqual(['package.json', 'packages/a/package.json']);
+    expect(manifestPaths(after)).toEqual([
+      'package.json',
+      'packages/a/package.json',
+      'packages/deep/nested/package.json',
+    ]);
+    expect(diagnostics.map((d) => d.code)).not.toContain('workspace-glob-unsupported');
+  });
+
+  test('a double star walk ends at a symlink cycle', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['packages/**'] }));
+    await write('packages/a/package.json', JSON.stringify({ name: 'a' }));
+    await symlink('..', path.join(repo, 'packages', 'a', 'loop'));
+
+    const { after } = await loadStates(repo, { kind: 'audit' });
+
+    expect(manifestPaths(after)).toContain('packages/a/package.json');
+  });
+
+  test('a doubled slash in a workspace pattern is normalised', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['packages//app'] }));
+    await write('packages/app/package.json', JSON.stringify({ name: 'app' }));
+
+    const { after } = await loadStates(repo, { kind: 'audit' });
+
+    expect(manifestPaths(after)).toEqual(['package.json', 'packages/app/package.json']);
+  });
+
+  test('a "." segment inside a pattern stays ignored with a note', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['packages/./*'] }));
+    await write('packages/app/package.json', JSON.stringify({ name: 'app' }));
+
+    const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
+
+    expect(manifestPaths(after)).toEqual(['package.json']);
     expect(diagnostics.map((d) => d.code)).toContain('workspace-glob-unsupported');
+  });
+
+  test('the pattern "." is noted as the repository root, which is scanned anyway', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['.'] }));
+
+    const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
+
+    expect(manifestPaths(after)).toEqual(['package.json']);
+    const note = diagnostics.find((d) => d.code === 'workspace-glob-unsupported');
+    expect(note?.message).toContain('npm maps it to the repository root');
+    expect(note?.message).not.toContain('no workspace');
+  });
+
+  test('a pattern with a parent segment that resolves inside the repository is refused for the segment', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['packages/a/../b'] }));
+    await write('packages/b/package.json', JSON.stringify({ name: 'b' }));
+
+    const err = await loadStates(repo, { kind: 'audit' }).then(
+      () => null,
+      (e: unknown) => e as { code?: string; message: string }
+    );
+    expect(err?.code).toBe('workspace-glob-unexpandable');
+    expect(err?.message).toContain('contains a ".." parent segment');
+    expect(err?.message).toContain('without it');
+    expect(err?.message).not.toContain('outside the repository');
+  });
+
+  test('an exclusion this tool cannot apply only ever makes the scan cover more', async () => {
+    await write(
+      'pnpm-workspace.yaml',
+      ['packages:', '  - "packages/*"', '  - "!packages/{a,b}"', ''].join('\n')
+    );
+    await write('package.json', manifestJson({}));
+    await write('packages/a/package.json', JSON.stringify({ name: 'a' }));
+    await write('packages/b/package.json', JSON.stringify({ name: 'b' }));
+    await write('packages/c/package.json', JSON.stringify({ name: 'c' }));
+
+    const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
+
+    expect(manifestPaths(after)).toEqual([
+      'package.json',
+      'packages/a/package.json',
+      'packages/b/package.json',
+      'packages/c/package.json',
+    ]);
+    expect(diagnostics.map((d) => d.code)).toContain('workspace-glob-unsupported');
+  });
+
+  test('a pattern using glob syntax this tool cannot expand is could-not-run', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['packages/{a,b}'] }));
+    await write('packages/a/package.json', JSON.stringify({ name: 'a' }));
+
+    await expect(loadStates(repo, { kind: 'audit' })).rejects.toMatchObject({
+      code: 'workspace-glob-unexpandable',
+    });
   });
 
   test('node_modules is never expanded into a workspace package', async () => {
@@ -654,7 +816,7 @@ describe('symlink containment on the working-tree side', () => {
     expect(diagnostics.map((d) => d.code)).toContain('path-outside-root');
   });
 
-  test('a root manifest that is a symlink out of the root is skipped', async () => {
+  test('a root manifest that is a symlink out of the root is refused, never read', async () => {
     const outside = await makeTempDir('dep-guard-outside-root-');
     await writeFile(
       path.join(outside, 'package.json'),
@@ -663,10 +825,7 @@ describe('symlink containment on the working-tree side', () => {
     );
     await symlink(path.join(outside, 'package.json'), path.join(repo, 'package.json'), 'file');
 
-    const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
-
-    expect(after.manifests).toEqual([]);
-    expect(diagnostics.map((d) => d.code)).toContain('path-outside-root');
+    await expect(loadStates(repo, { kind: 'audit' })).rejects.toMatchObject({ code: 'symlinked-input' });
   });
 
   test('a workspace directory symlinked inside the root is still discovered', async () => {

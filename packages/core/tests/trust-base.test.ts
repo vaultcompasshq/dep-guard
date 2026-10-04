@@ -182,6 +182,43 @@ describe('pull-request mode: a head-side config never takes effect', () => {
   // that the head's onlineBudgetMs did not take effect is that the run's
   // JSON online.budgetMs still reports the BASE value, not the (much
   // smaller) one the pull request tried to set.
+  test('an acknowledgedLockfiles entry the pull request adds is named in the proposal', async () => {
+    const entry = `yarn.lock:${'c'.repeat(40)}`;
+    await makeBase({ failOn: 'medium' });
+    await write('.dep-guard.json', JSON.stringify({ failOn: 'medium', acknowledgedLockfiles: [entry] }));
+    await commitAll('acknowledge a lockfile');
+
+    const result = await scanPullRequest();
+
+    expect(result.trustBase?.proposals).toEqual([
+      `config changed in this pull request (proposed: acknowledgedLockfiles ${entry})`,
+    ]);
+  });
+
+  test('a minAgeDays the pull request lowers is named in the proposal', async () => {
+    await makeBase({ failOn: 'medium', minAgeDays: 7 });
+    await write('.dep-guard.json', JSON.stringify({ failOn: 'medium', minAgeDays: 1 }));
+    await commitAll('lower the minimum age');
+
+    const result = await scanPullRequest();
+
+    expect(result.trustBase?.proposals).toEqual([
+      'config changed in this pull request (minAgeDays lowered to 1)',
+    ]);
+  });
+
+  test('a minAgeAllow entry the pull request adds is named in the proposal, and one it removes is counted', async () => {
+    await makeBase({ failOn: 'medium', minAgeAllow: ['left-pad@1.3.0'] });
+    await write('.dep-guard.json', JSON.stringify({ failOn: 'medium', minAgeAllow: ['lodash@4.17.21'] }));
+    await commitAll('swap the minimum age exemption');
+
+    const result = await scanPullRequest();
+
+    expect(result.trustBase?.proposals).toEqual([
+      'config changed in this pull request (proposed: minAgeAllow lodash@4.17.21; 1 entries removed)',
+    ]);
+  });
+
   test('an onlineBudgetMs the pull request changes is reported as a proposal and does not take effect', async () => {
     await makeBase({ failOn: 'medium', online: true, onlineBudgetMs: 5000 });
     await write('.dep-guard.json', JSON.stringify({ failOn: 'medium', online: true, onlineBudgetMs: 1 }));

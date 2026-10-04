@@ -1,5 +1,41 @@
+import { NPM_LOCKFILE_V1_CODE } from './lockfiles/npm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
 import type { ParsedManifest } from './manifest.js';
+import { withoutByteOrderMark } from './text.js';
+
+// A root lockfile whose entries this tool parses: npm with a "packages"
+// map, or pnpm. Everything else (a v1 npm file, yarn, bun) is present but
+// unread.
+export function isReadLockfile(lockfile: ParsedLockfile): boolean {
+  if (lockfile.notRead === true) {
+    return false;
+  }
+  if (lockfile.format === 'pnpm') {
+    return true;
+  }
+  return (
+    lockfile.format === 'npm' &&
+    !lockfile.diagnostics.some((diagnostic) => diagnostic.code === NPM_LOCKFILE_V1_CODE)
+  );
+}
+
+// One file carrying a known lockfile name, anywhere in the tree, on one
+// side of a scan. The inventory lists every such file whether or not this
+// tool reads it, because a lockfile the scan does not read is still one a
+// package manager may install from: what the scan cannot judge has to be
+// visible, and a change to it has to be noticed.
+export interface LockfileInventoryEntry {
+  // Repository path, "/"-separated. A root lockfile has no "/" in it.
+  path: string;
+  // True only for a root lockfile whose entries this tool parses: an npm
+  // lockfile with a "packages" map, or a pnpm lockfile.
+  read: boolean;
+  // The git blob id of the file's bytes on this side, or null when it
+  // could not be computed (a directory or other non-file under a lockfile
+  // name, a failed git call). Null never compares equal to anything, so a
+  // file whose identity is unknown always counts as changed.
+  blobId: string | null;
+}
 
 // One fully parsed side of a scan (the "before" or the "after").
 // git-source.ts builds these from git blobs or the working tree; the
@@ -17,7 +53,15 @@ export interface RepoState {
   // one: computeDelta diffs each of these too. Absent on a state built by
   // hand with one lockfile.
   extraLockfiles?: ParsedLockfile[];
+  // Every file with a known lockfile name on this side, at any depth, read
+  // or not (see LockfileInventoryEntry). Absent on a state built by hand,
+  // which then reads as an empty inventory.
+  lockfileInventory?: LockfileInventoryEntry[];
   onlyBuilt: string[];
+  // The raw project .npmrc on this side, or null when there is none. Only
+  // compared for equality between sides, never parsed from here. Absent on
+  // a state built by hand.
+  npmrcContent?: string | null;
   npmrcRegistryPins: Map<string, string>;
   // The project .npmrc's unscoped default registry ("registry=..."), or
   // null when the file has none or does not exist. pnpm does not record
@@ -177,7 +221,9 @@ export function parseNpmrcPins(content: string | null): Map<string, string> {
   if (content === null) {
     return pins;
   }
-  for (const rawLine of content.split('\n')) {
+  // npm's ini parser honours the first line after a byte order mark, so
+  // the mark is dropped and that line read like any other.
+  for (const rawLine of withoutByteOrderMark(content).split('\n')) {
     const line = rawLine.trim();
     if (line === '' || line.startsWith('#') || line.startsWith(';')) {
       continue;
@@ -227,7 +273,7 @@ export function parseNpmrcDefaultRegistry(content: string | null): string | null
     return null;
   }
   let registry: string | null = null;
-  for (const rawLine of content.split('\n')) {
+  for (const rawLine of withoutByteOrderMark(content).split('\n')) {
     const line = rawLine.trim();
     if (line === '' || line.startsWith('#') || line.startsWith(';')) {
       continue;

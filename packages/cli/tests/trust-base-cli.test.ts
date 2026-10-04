@@ -309,6 +309,37 @@ describe('dep-guard scan --trust-base', () => {
   }, CLI_TIMEOUT_MS);
 });
 
+describe('dep-guard scan: a lockfile downgrade is could-not-run at the CLI', () => {
+  async function makeYarnSwitchPullRequest(): Promise<void> {
+    await write('package.json', manifestJson({ lodash: '1.0.0' }));
+    await write('package-lock.json', lockJson({ lodash: '1.0.0' }));
+    await commitAll('base state');
+    await git('checkout', '-q', '-b', 'feature');
+    await rm(path.join(repo, 'package-lock.json'));
+    await write('yarn.lock', '# yarn lockfile v1\n');
+    await commitAll('switch to yarn');
+  }
+
+  test('--base with --trust-base exits 2 with lockfile-downgrade on stderr', async () => {
+    await makeYarnSwitchPullRequest();
+
+    const run = await runCli(['scan', '--base', 'main', '--trust-base', 'main', '--corpus-dir', FIXTURE_CORPUS]);
+
+    expect(run.exitCode).toBe(2);
+    expect(run.stdout).toBe('');
+    expect(run.stderr).toContain('(lockfile-downgrade)');
+  }, CLI_TIMEOUT_MS);
+
+  test('--trust-base alone compares the lockfile set against the trust base and exits 2', async () => {
+    await makeYarnSwitchPullRequest();
+
+    const run = await runCli(['scan', '--trust-base', 'main', '--corpus-dir', FIXTURE_CORPUS]);
+
+    expect(run.exitCode).toBe(2);
+    expect(run.stderr).toContain('(lockfile-downgrade)');
+  }, CLI_TIMEOUT_MS);
+});
+
 describe('no-flag parity at the CLI', () => {
   test('the text report without the flag has no pull-request block at all', async () => {
     await makeMutingPullRequest();
