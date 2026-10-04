@@ -10,6 +10,12 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-04
+
+Patch on both published packages. `@vaultcompass/dep-guard` and
+`@vaultcompass/dep-guard-core` move from 0.10.0 to 0.10.1. The action's
+`version` input default and the `DG_TAG_SCANNER` constant move with them, so
+`vaultcompasshq/dep-guard@v0.10.1` installs `@vaultcompass/dep-guard@0.10.1`.
 Scans that exited 0 can now exit 2 or 1. What can newly block, and how to
 clear each:
 
