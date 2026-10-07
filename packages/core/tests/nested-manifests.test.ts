@@ -217,3 +217,52 @@ describe('manifests below the scan root', () => {
     expect(trusted.findings.map((entry) => entry.manifestPath)).toEqual(['apps/web/package.json']);
   });
 });
+
+const BROKEN_PYPROJECT = '[project\nname = "demo"\n';
+const POETRY_REV = '0123456789abcdef0123456789abcdef01234567';
+
+describe('pyproject.toml', () => {
+  test('a poetry git dependency produces a git-source finding', async () => {
+    await write(
+      'pyproject.toml',
+      [
+        '[tool.poetry.dependencies]',
+        'python = "^3.11"',
+        `foo = { git = "https://example.com/r.git", rev = "${POETRY_REV}" }`,
+        '',
+      ].join('\n')
+    );
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    const finding = result.findings.find((entry) => entry.packageName === 'foo');
+    expect(String(finding?.details?.signal ?? '')).toContain('git-source');
+  });
+
+  test('an unreadable pyproject on an ignorePaths path does not exit 2', async () => {
+    await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['apps/bad'] }));
+    await write('apps/bad/pyproject.toml', BROKEN_PYPROJECT);
+    await write('package.json', manifestJson({}));
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.exitCode).not.toBe(2);
+    const notice = result.run.diagnostics.find((entry) => entry.message.includes('apps/bad/pyproject.toml'));
+    expect(notice?.message).toMatch(/not parsed/i);
+  });
+
+  test('an unreadable pyproject with no ignore entry exits 2 and names the path', async () => {
+    await write('apps/bad/pyproject.toml', BROKEN_PYPROJECT);
+
+    let caught: unknown;
+    try {
+      await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(DepGuardError);
+    expect((caught as DepGuardError).code).toBe('manifest-parse');
+    expect((caught as DepGuardError).message).toContain('apps/bad/pyproject.toml');
+  });
+});

@@ -914,7 +914,9 @@ export async function scan(opts: {
   }
   const config = applyFailOnOverride(controls?.config ?? loadConfig(root), opts.failOn);
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
-  const statePair = await loadStates(opts.repoRoot, opts.mode);
+  const isIgnoredPath = (repoPath: string): boolean =>
+    matchingIgnoreEntries(repoPath, config.ignorePaths).length > 0;
+  const statePair = await loadStates(opts.repoRoot, opts.mode, { isIgnoredPath });
 
   // Ported from a sibling scanner's whole-tree "examined zero files is
   // could-not-run" invariant, adapted to dep-guard's own unit of work: a
@@ -983,7 +985,7 @@ export async function scan(opts: {
           statePair.before !== null &&
           (await refsNameSameTree(root, opts.mode.ref, controls.ref))
         ? statePair.before
-        : await loadRefState(root, controls.ref, statePair.diagnostics, prefix);
+        : await loadRefState(root, controls.ref, statePair.diagnostics, prefix, isIgnoredPath);
   const deltaWith = (acknowledgedLockfiles: readonly string[]): DependencyDelta =>
     computeDelta(statePair.before, statePair.after, {
       extraComparisonSides: trustState === null ? [] : [trustState],

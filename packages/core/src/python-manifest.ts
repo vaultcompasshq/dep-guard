@@ -1,3 +1,4 @@
+import { parse as parseToml } from 'smol-toml';
 import type { DepType, ManifestDep, ParsedManifest } from './manifest.js';
 import { withoutByteOrderMark } from './text.js';
 import { DepGuardError } from './types.js';
@@ -105,9 +106,9 @@ function requirementToDep(line: string): ManifestDep | null {
     return null;
   }
 
-  const direct = body.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s*@\s*(\S+)$/);
-  if (direct !== null && direct[1] !== undefined && direct[2] !== undefined) {
-    return dep(direct[1], direct[2], protocolOfUrl(direct[2]));
+  const direct = body.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)(\[[^\]]*\])?\s*@\s*(\S+)$/);
+  if (direct !== null && direct[1] !== undefined && direct[3] !== undefined) {
+    return dep(direct[1], direct[3], protocolOfUrl(direct[3]));
   }
 
   if (/^(https?:|git\+|git:|ssh:|svn\+|hg\+|bzr\+)/i.test(body)) {
@@ -155,141 +156,134 @@ export function parseRequirements(filePath: string, content: string): ParsedMani
   return { path: filePath, deps, pnpmOnlyBuilt: [] };
 }
 
-interface TomlSection {
-  name: string;
-  body: string;
+function unreadable(filePath: string): DepGuardError {
+  return new DepGuardError(`${filePath}: could not be read as TOML`, 'manifest-parse');
 }
 
-function tomlSections(content: string): TomlSection[] {
-  const sections: TomlSection[] = [];
-  let name = '';
-  let body: string[] = [];
-  const flush = (): void => {
-    sections.push({ name, body: body.join('\n') });
-    body = [];
-  };
-  for (const raw of withoutByteOrderMark(content).split(/\r?\n/)) {
-    const line = stripRequirementComment(raw).trim();
-    const header = line.match(/^\[([^\]]+)\]$/);
-    if (header !== null && header[1] !== undefined) {
-      flush();
-      name = header[1].trim();
-      continue;
-    }
-    body.push(line);
-  }
-  flush();
-  return sections;
-}
-
-function stringLiterals(value: string): string[] {
-  const found: string[] = [];
-  for (const match of value.matchAll(/"((?:\\.|[^"\\])*)"|'([^']*)'/g)) {
-    const text = match[1] ?? match[2] ?? '';
-    if (text !== '') {
-      found.push(text);
-    }
-  }
-  return found;
-}
-
-function bracketArray(body: string, key: string): string[] | null {
-  const start = body.indexOf(key);
-  if (start === -1) {
-    return null;
-  }
-  const open = body.indexOf('[', start + key.length);
-  if (open === -1) {
-    return null;
-  }
-  let depth = 0;
-  for (let i = open; i < body.length; i += 1) {
-    const char = body[i];
-    if (char === '[') {
-      depth += 1;
-    } else if (char === ']') {
-      depth -= 1;
-      if (depth === 0) {
-        return stringLiterals(body.slice(open + 1, i));
-      }
-    }
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
   }
   return null;
 }
 
-function poetryDeps(body: string, depType: DepType): ManifestDep[] {
-  const deps: ManifestDep[] = [];
-  for (const raw of body.split('\n')) {
-    const line = raw.trim();
-    if (line === '' || line.startsWith('[')) {
-      continue;
+function readToml(filePath: string, content: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = parseToml(withoutByteOrderMark(content));
+    const record = asRecord(parsed);
+    if (record === null) {
+      throw unreadable(filePath);
     }
-    const assigned = line.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s*=\s*(.+)$/);
-    if (assigned === null || assigned[1] === undefined || assigned[2] === undefined) {
-      continue;
+    return record;
+  } catch (err) {
+    if (err instanceof DepGuardError) {
+      throw err;
     }
-    if (assigned[1] === 'python') {
-      continue;
-    }
-    const value = assigned[2].trim();
-    if (value.startsWith('{')) {
-      const version = value.match(/version\s*=\s*"([^"]*)"|version\s*=\s*'([^']*)'/);
-      const specifier = version?.[1] ?? version?.[2] ?? '*';
-      deps.push(dep(assigned[1], specifier, 'pypi', depType));
-      continue;
-    }
-    const quoted = value.match(/^"([^"]*)"|^'([^']*)'/);
-    if (quoted !== null) {
-      deps.push(dep(assigned[1], quoted[1] ?? quoted[2] ?? '*', 'pypi', depType));
-    }
+    throw unreadable(filePath);
   }
-  return deps;
+}
+
+function stringArray(filePath: string, key: string, value: unknown): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new DepGuardError(`${filePath}: [${key}] could not be read`, 'manifest-parse');
+  }
+  return value.filter((item): item is string => item !== '');
 }
 
 function requirementDeps(specs: readonly string[], depType: DepType): ManifestDep[] {
   const deps: ManifestDep[] = [];
   for (const spec of specs) {
     const parsed = requirementToDep(spec);
-    if (parsed === null) {
+    if (parsed !== null) {
+      deps.push({ ...parsed, depType });
+    }
+  }
+  return deps;
+}
+
+function poetrySpecifier(table: Record<string, unknown>): { specifier: string; protocol: ManifestDep['protocol'] } {
+  if (typeof table.git === 'string') {
+    const rev = [table.rev, table.tag, table.branch].find((item) => typeof item === 'string' && item !== '');
+    return {
+      specifier: typeof rev === 'string' ? `${table.git}#${rev}` : table.git,
+      protocol: 'git',
+    };
+  }
+  if (typeof table.url === 'string') {
+    return { specifier: table.url, protocol: 'url' };
+  }
+  if (typeof table.path === 'string') {
+    return { specifier: table.path, protocol: 'file' };
+  }
+  if (typeof table.version === 'string') {
+    return { specifier: table.version, protocol: 'pypi' };
+  }
+  return { specifier: '*', protocol: 'pypi' };
+}
+
+function poetryDeps(filePath: string, table: Record<string, unknown>, depType: DepType): ManifestDep[] {
+  const deps: ManifestDep[] = [];
+  for (const [name, value] of Object.entries(table)) {
+    if (name === 'python') {
       continue;
     }
-    deps.push({ ...parsed, depType });
+    const items = Array.isArray(value) ? value : [value];
+    for (const item of items) {
+      if (typeof item === 'string') {
+        deps.push(dep(name, item, 'pypi', depType));
+        continue;
+      }
+      const record = asRecord(item);
+      if (record === null) {
+        throw new DepGuardError(`${filePath}: [tool.poetry] dependency "${name}" could not be read`, 'manifest-parse');
+      }
+      const parsed = poetrySpecifier(record);
+      deps.push(dep(name, parsed.specifier, parsed.protocol, depType));
+    }
   }
   return deps;
 }
 
 export function parsePyproject(filePath: string, content: string): ParsedManifest {
+  const doc = readToml(filePath, content);
+  const project = asRecord(doc.project);
   let name: string | undefined;
   const deps: ManifestDep[] = [];
-  for (const section of tomlSections(content)) {
-    if (section.name === 'project') {
-      const declared = section.body.match(/name\s*=\s*"([^"]+)"|name\s*=\s*'([^']+)'/);
-      const projectName = declared?.[1] ?? declared?.[2];
-      if (projectName !== undefined && projectName !== '') {
-        name = projectName;
-      }
-      const dependencies = bracketArray(section.body, 'dependencies');
-      if (section.body.includes('dependencies') && dependencies === null && section.body.includes('[')) {
-        throw new DepGuardError(
-          `${filePath}: [project] dependencies could not be read`,
-          'manifest-parse'
-        );
-      }
-      if (dependencies !== null) {
-        deps.push(...requirementDeps(dependencies, 'dependencies'));
-      }
-      continue;
+  if (project !== null) {
+    if (typeof project.name === 'string' && project.name !== '') {
+      name = project.name;
     }
-    if (section.name.startsWith('project.optional-dependencies')) {
-      deps.push(...requirementDeps(stringLiterals(section.body), 'optionalDependencies'));
-      continue;
+    const dependencies = stringArray(filePath, 'project.dependencies', project.dependencies);
+    if (dependencies !== undefined) {
+      deps.push(...requirementDeps(dependencies, 'dependencies'));
     }
-    if (
-      section.name === 'tool.poetry.dependencies' ||
-      /^tool\.poetry\.group\.[^.]+\.dependencies$/.test(section.name)
-    ) {
-      const depType: DepType = section.name.includes('.group.') ? 'devDependencies' : 'dependencies';
-      deps.push(...poetryDeps(section.body, depType));
+    const optional = asRecord(project['optional-dependencies']);
+    if (optional !== null) {
+      for (const [group, value] of Object.entries(optional)) {
+        const specs = stringArray(filePath, `project.optional-dependencies.${group}`, value);
+        if (specs !== undefined) {
+          deps.push(...requirementDeps(specs, 'optionalDependencies'));
+        }
+      }
+    }
+  }
+  const poetry = asRecord(asRecord(doc.tool)?.poetry);
+  if (poetry !== null) {
+    const top = asRecord(poetry.dependencies);
+    if (top !== null) {
+      deps.push(...poetryDeps(filePath, top, 'dependencies'));
+    }
+    const groups = asRecord(poetry.group);
+    if (groups !== null) {
+      for (const group of Object.values(groups)) {
+        const table = asRecord(asRecord(group)?.dependencies);
+        if (table !== null) {
+          deps.push(...poetryDeps(filePath, table, 'devDependencies'));
+        }
+      }
     }
   }
   return {

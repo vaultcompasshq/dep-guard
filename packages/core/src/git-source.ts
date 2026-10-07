@@ -156,6 +156,7 @@ const SKIP_DIR_NAMES: ReadonlySet<string> = new Set([
 const NEVER_WALK_DIR_NAMES: ReadonlySet<string> = new Set(['node_modules', '.git']);
 const SILENT_SKIP_DIR_NAMES: ReadonlySet<string> = new Set(['node_modules', '.git']);
 const MANIFEST_SKIPPED_DIRNAME = 'manifest-skipped-dirname';
+const MANIFEST_UNPARSED = 'manifest-unparsed';
 
 function parentDir(relPath: string): string {
   const slash = relPath.lastIndexOf('/');
@@ -1544,7 +1545,8 @@ async function loadState(
   source: FileSource,
   diagnostics: Diagnostic[],
   role: SideRole,
-  prefix: string
+  prefix: string,
+  isIgnoredPath: (relPath: string) => boolean = () => false
 ): Promise<RepoState> {
   const filesInPrefix = (await source.listFiles()).filter((relPath) => underPrefix(relPath, prefix));
   // Lockfiles are never dropped for a directory name. Stray manifests are.
@@ -1669,6 +1671,13 @@ async function loadState(
   for (const relPath of extraManifestPaths) {
     const content = extraContents.get(relPath) ?? null;
     if (content === null) {
+      continue;
+    }
+    if (isPythonManifestPath(relPath) && isIgnoredPath(relPath)) {
+      diagnostics.push({
+        code: MANIFEST_UNPARSED,
+        message: `${relPath}: not parsed; covered by ignorePaths`,
+      });
       continue;
     }
     manifests.push(parseProjectManifest(relPath, content));
@@ -1939,7 +1948,8 @@ export async function loadRefState(
   repoRoot: string,
   ref: string,
   notes?: Diagnostic[],
-  prefix = ''
+  prefix = '',
+  isIgnoredPath: (relPath: string) => boolean = () => false
 ): Promise<RepoState> {
   if (!isUsableRef(ref)) {
     throw new DepGuardError(`ref "${ref}" is not a usable git ref`, 'git-error');
@@ -1953,7 +1963,8 @@ export async function loadRefState(
       kind: 'comparison',
       label: `the trust base "${ref}"`,
     },
-    prefix
+    prefix,
+    isIgnoredPath
   );
   notes?.push(...diagnostics.filter((d) => COMPARISON_SIDE_CODES.has(d.code)));
   return state;
@@ -1976,7 +1987,12 @@ export async function refsNameSameTree(repoRoot: string, a: string, b: string): 
   return left.ok && right.ok && left.stdout.trim() !== '' && left.stdout.trim() === right.stdout.trim();
 }
 
-export async function loadStates(repoRoot: string, mode: ScanMode): Promise<StatePair> {
+export async function loadStates(
+  repoRoot: string,
+  mode: ScanMode,
+  options: { isIgnoredPath?: (relPath: string) => boolean } = {}
+): Promise<StatePair> {
+  const isIgnoredPath = options.isIgnoredPath ?? (() => false);
   await assertScannablePath(repoRoot);
   const diagnostics: Diagnostic[] = [];
 
@@ -1988,7 +2004,8 @@ export async function loadStates(repoRoot: string, mode: ScanMode): Promise<Stat
       await createWorkingTreeSource(root, diagnostics),
       diagnostics,
       JUDGED,
-      prefix
+      prefix,
+      isIgnoredPath
     );
     return { before: null, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
@@ -1999,9 +2016,15 @@ export async function loadStates(repoRoot: string, mode: ScanMode): Promise<Stat
 
   if (mode.kind === 'staged') {
     const before = (await hasCommittedHead(root))
-      ? await loadState(refSource(root, 'HEAD'), diagnostics, { kind: 'comparison', label: 'HEAD' }, prefix)
+      ? await loadState(
+          refSource(root, 'HEAD'),
+          diagnostics,
+          { kind: 'comparison', label: 'HEAD' },
+          prefix,
+          isIgnoredPath
+        )
       : null;
-    const after = await loadState(indexSource(root), diagnostics, JUDGED, prefix);
+    const after = await loadState(indexSource(root), diagnostics, JUDGED, prefix, isIgnoredPath);
     return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
 
@@ -2015,8 +2038,15 @@ export async function loadStates(repoRoot: string, mode: ScanMode): Promise<Stat
       kind: 'comparison',
       label: `the --base ref "${mode.ref}"`,
     },
-    prefix
+    prefix,
+    isIgnoredPath
   );
-  const after = await loadState(await createWorkingTreeSource(root, diagnostics), diagnostics, JUDGED, prefix);
+  const after = await loadState(
+    await createWorkingTreeSource(root, diagnostics),
+    diagnostics,
+    JUDGED,
+    prefix,
+    isIgnoredPath
+  );
   return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
 }
