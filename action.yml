@@ -39,7 +39,7 @@ inputs:
       request is not the place to widen a pattern for the convenience of
       testing one.
     required: false
-    default: 0.10.1
+    default: 0.11.0
   path:
     description: |
       Path to scan, relative to the workspace root. Must be 1..256 characters
@@ -255,14 +255,14 @@ runs:
         # a de facto flag-compatibility floor at 0.6.0, and the rule makes it
         # explicit instead of leaving it to be discovered.
         #
-        # The day a 0.11.0 scanner ships with new rules, a pull request pins
-        # 0.10.1, which knows `--trust-base` and runs cleanly, and is judged by
+        # The day a 0.12.0 scanner ships with new rules, a pull request pins
+        # 0.11.0, which knows `--trust-base` and runs cleanly, and is judged by
         # the older rule set it chose for itself.
         #
         # This is the same class of hole as `trust-base: off`, refused by name a
         # few checks below for exactly this reason. The difference is what a
         # reviewer sees: deleting a security step reads as deleting a security
-        # step, while `version: 0.10.1` reads as ordinary version management.
+        # step, while `version: 0.11.0` reads as ordinary version management.
         #
         # FORWARD STAYS ALLOWED, ON AN ASSUMPTION THIS RULE DOES NOT ENFORCE.
         # The rule assumes a newer scanner is at least as strict as the one this
@@ -279,7 +279,7 @@ runs:
         # DG_TAG_SCANNER is THE TESTED SCANNER THIS TAG SHIPS, which moves with
         # the published packages, and it is the `version` input's default. It is
         # compared against as a hardcoded constant because `inputs.version` looks
-        # identical whether the consumer wrote 0.10.1 or the default supplied it,
+        # identical whether the consumer wrote 0.11.0 or the default supplied it,
         # so the step cannot tell a pin from a default and the constant is the
         # only source of truth. It is safe to trust because action.yml comes
         # from the ref the consumer's workflow names, not from the pull
@@ -297,8 +297,8 @@ runs:
         # those in this file to end in a 40-character sha, and it cannot tell
         # prose from a step.)
         DG_TAG_SCANNER_MAJOR=0
-        DG_TAG_SCANNER_MINOR=10
-        DG_TAG_SCANNER_PATCH=1
+        DG_TAG_SCANNER_MINOR=11
+        DG_TAG_SCANNER_PATCH=0
         DG_TAG_SCANNER="${DG_TAG_SCANNER_MAJOR}.${DG_TAG_SCANNER_MINOR}.${DG_TAG_SCANNER_PATCH}"
 
         # GITHUB_BASE_REF being non-empty IS the pull-request test, and it is the

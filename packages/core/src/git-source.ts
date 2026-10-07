@@ -7,6 +7,7 @@ import { MissingPackagesMapError, parseNpmLockfile } from './lockfiles/npm.js';
 import { parseOnlyBuilt, parsePnpmLockfile } from './lockfiles/pnpm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
 import { parseManifest, type ParsedManifest } from './manifest.js';
+import { isPythonManifestPath, parsePyproject, parseRequirements } from './python-manifest.js';
 import {
   isReadLockfile,
   parseNpmrcDefaultRegistry,
@@ -136,6 +137,68 @@ const UNRESOLVABLE_LINK_CODES = new Set(['ELOOP', 'ENAMETOOLONG']);
 // Never a workspace package, and a bare "*" pattern would otherwise walk
 // straight into it.
 const NEVER_A_PACKAGE_DIR = 'node_modules';
+
+// Directories a project manifest never lives in. Installed trees
+// (node_modules, virtualenvs), build output, and vendored trees each hold
+// their own manifests, and reading those would report someone else's
+// dependencies as this repository's.
+const SKIP_DIR_NAMES: ReadonlySet<string> = new Set([
+  'node_modules',
+  '.venv',
+  'venv',
+  'dist',
+  'build',
+  'vendor',
+  'vendored',
+  '.git',
+]);
+
+function parentDir(relPath: string): string {
+  const slash = relPath.lastIndexOf('/');
+  return slash === -1 ? '' : relPath.slice(0, slash);
+}
+
+function baseName(relPath: string): string {
+  const slash = relPath.lastIndexOf('/');
+  return slash === -1 ? relPath : relPath.slice(slash + 1);
+}
+
+function pathSkipped(relPath: string): boolean {
+  return relPath.split('/').some((segment) => SKIP_DIR_NAMES.has(segment));
+}
+
+function underPrefix(relPath: string, prefix: string): boolean {
+  if (prefix === '') {
+    return true;
+  }
+  return relPath === prefix || relPath.startsWith(`${prefix}/`);
+}
+
+function uniquePaths(paths: readonly string[]): string[] {
+  return [...new Set(paths)];
+}
+
+const PYPROJECT_TOML = 'pyproject.toml';
+const REQUIREMENTS_TXT = 'requirements.txt';
+
+function isPackageJsonPath(relPath: string): boolean {
+  return baseName(relPath) === 'package.json';
+}
+
+function isProjectManifestPath(relPath: string): boolean {
+  return isPackageJsonPath(relPath) || isPythonManifestPath(relPath);
+}
+
+function parseProjectManifest(relPath: string, content: string): ParsedManifest {
+  const name = baseName(relPath);
+  if (name === PYPROJECT_TOML) {
+    return parsePyproject(relPath, content);
+  }
+  if (name === REQUIREMENTS_TXT) {
+    return parseRequirements(relPath, content);
+  }
+  return parseManifest(relPath, content);
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -298,6 +361,10 @@ interface FileSource {
   // cannot be used at all (it escapes the root, or its links cycle) and
   // has already been reported. The empty string identifies the root.
   identifyDir(relPath: string): Promise<string | null>;
+  // Every file on this side, repository-relative. A git side lists the
+  // index or the tree. The working tree lists tracked files and untracked
+  // files git does not ignore.
+  listFiles(): Promise<string[]>;
   // Every file on this side whose name is a known lockfile name, at any
   // depth, with the git blob id of its bytes (see LockfileInventoryEntry
   // in state.ts). A root lockfile name that exists but is not a readable
@@ -472,6 +539,9 @@ function gitSource(
     async listChildDirs(dir: string): Promise<string[]> {
       return (await children()).get(dir) ?? [];
     },
+    async listFiles(): Promise<string[]> {
+      return [...(await files()).keys()];
+    },
     async lockfileInventory(): Promise<Array<{ path: string; blobId: string | null }>> {
       const found: Array<{ path: string; blobId: string | null }> = [];
       for (const [filePath, blobId] of await files()) {
@@ -625,6 +695,9 @@ async function createWorkingTreeSource(
       }
     },
 
+    listFiles(): Promise<string[]> {
+      return listWorkingTreeFiles(root);
+    },
     lockfileInventory(): Promise<Array<{ path: string; blobId: string | null }>> {
       return workingTreeLockfileInventory(root);
     },
@@ -689,6 +762,41 @@ async function createWorkingTreeSource(
     },
   };
   return source;
+}
+
+// Tracked files plus untracked files git does not ignore. Outside a
+// repository the same answer is a directory walk that skips installed,
+// build, and vendored trees and does not follow symlinks.
+async function listWorkingTreeFiles(root: string): Promise<string[]> {
+  const listed = await runGit(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
+  if (listed.ok) {
+    return listed.stdout.split('\0').filter((entry) => entry !== '');
+  }
+  return walkFiles(root);
+}
+
+async function walkFiles(root: string, dir = ''): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(path.join(root, dir), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const entry of entries) {
+    if (SKIP_DIR_NAMES.has(entry.name) || entry.isSymbolicLink()) {
+      continue;
+    }
+    const relPath = dir === '' ? entry.name : `${dir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      found.push(...(await walkFiles(root, relPath)));
+      continue;
+    }
+    if (entry.isFile()) {
+      found.push(relPath);
+    }
+  }
+  return found;
 }
 
 // The working tree's lockfile inventory: every tracked file with a
@@ -1273,13 +1381,15 @@ const LOCKFILE_NAME_SET: ReadonlySet<string> = new Set(LOCKFILE_FILE_NAMES);
 async function loadLockfiles(
   source: FileSource,
   diagnostics: Diagnostic[],
-  // Root lockfiles treated as absent on this side (a symlink on a
-  // comparison side); they are never read.
+  // Lockfiles treated as absent on this side (a symlink on a comparison
+  // side); they are never read. Paths are repository-relative.
   unread: ReadonlySet<string>,
-  role: SideRole
+  role: SideRole,
+  directory = ''
 ): Promise<{ lockfile: ParsedLockfile | null; extraLockfiles: ParsedLockfile[] }> {
   const loaded: ParsedLockfile[] = [];
-  for (const [name, load] of LOCKFILE_CANDIDATES) {
+  for (const [base, load] of LOCKFILE_CANDIDATES) {
+    const name = directory === '' ? base : `${directory}/${base}`;
     if (unread.has(name)) {
       continue;
     }
@@ -1328,8 +1438,8 @@ async function loadLockfiles(
       code: MULTIPLE_LOCKFILES,
       message:
         `${[lockfile, ...extraLockfiles].map((entry) => entry.path).join(', ')}: more than one ` +
-        'lockfile is present at the repository root; every one of them was checked, because which one ' +
-        'an install honours depends on the package manager in use',
+        `lockfile is present in ${directory === '' ? 'the repository root' : directory}; every one of ` +
+        'them was checked, because which one an install honours depends on the package manager in use',
     });
   }
   // The further documents of a multi-document pnpm lockfile ride as extra
@@ -1413,19 +1523,38 @@ async function screenSymlinkedInputs(
   return absent;
 }
 
+function isParsedLockfilePath(relPath: string): boolean {
+  return (PARSED_LOCKFILE_NAMES as readonly string[]).includes(baseName(relPath));
+}
+
 async function loadState(
   source: FileSource,
   diagnostics: Diagnostic[],
-  role: SideRole
+  role: SideRole,
+  prefix: string
 ): Promise<RepoState> {
-  const unreadRoot = await screenSymlinkedInputs(
+  const files = (await source.listFiles()).filter(
+    (relPath) => underPrefix(relPath, prefix) && !pathSkipped(relPath)
+  );
+  const listedManifests = files.filter(isProjectManifestPath).sort();
+  const listedLockfiles = files.filter(isLockfileName);
+  const rootInScope = underPrefix(ROOT_MANIFEST, prefix);
+  const unread = await screenSymlinkedInputs(
     source,
-    [ROOT_MANIFEST, ...PARSED_LOCKFILE_NAMES],
+    uniquePaths([
+      ...(rootInScope ? [ROOT_MANIFEST] : []),
+      ...listedManifests,
+      ...listedLockfiles.filter(isParsedLockfilePath),
+    ]),
     role,
     diagnostics
   );
-  const rootManifestContent = unreadRoot.has(ROOT_MANIFEST) ? null : await source.read(ROOT_MANIFEST);
-  const workspaceYamlContent = await source.read(WORKSPACE_YAML);
+  const rootManifestContent =
+    rootInScope && !unread.has(ROOT_MANIFEST) ? await source.read(ROOT_MANIFEST) : null;
+  // Workspace globs name packages anywhere in the repository. They apply
+  // only when the scan covers the root; a scan of one directory reads the
+  // manifests under that directory and does not pull the rest in.
+  const workspaceYamlContent = prefix === '' ? await source.read(WORKSPACE_YAML) : null;
 
   const manifests: ParsedManifest[] = [];
   if (rootManifestContent !== null) {
@@ -1491,23 +1620,67 @@ async function loadState(
   const readPaths = manifestPaths.filter((manifestPath) => !unreadMembers.has(manifestPath));
   const contents = await source.readMany(readPaths);
   for (const manifestPath of readPaths) {
+    if (!underPrefix(manifestPath, prefix) || pathSkipped(manifestPath)) {
+      continue;
+    }
     const content = contents.get(manifestPath) ?? null;
     if (content !== null) {
       manifests.push(parseManifest(manifestPath, content));
     }
   }
 
-  const { lockfile, extraLockfiles } = await loadLockfiles(source, diagnostics, unreadRoot, role);
+  // Manifests the workspace globs did not name: a package.json outside any
+  // workspace, a requirements.txt, a pyproject.toml. Already-parsed paths
+  // are skipped so a workspace member is not read twice.
+  const seenManifests = new Set(manifests.map((manifest) => manifest.path));
+  const extraManifestPaths = listedManifests.filter(
+    (relPath) => !seenManifests.has(relPath) && !unread.has(relPath)
+  );
+  const extraContents = await source.readMany(extraManifestPaths);
+  for (const relPath of extraManifestPaths) {
+    const content = extraContents.get(relPath) ?? null;
+    if (content === null) {
+      continue;
+    }
+    manifests.push(parseProjectManifest(relPath, content));
+  }
+
+  const lockfileDirs = uniquePaths(listedLockfiles.map(parentDir)).sort((left, right) => {
+    if (left === right) {
+      return 0;
+    }
+    if (left === '') {
+      return -1;
+    }
+    if (right === '') {
+      return 1;
+    }
+    return left < right ? -1 : 1;
+  });
+  const merged: ParsedLockfile[] = [];
+  for (const directory of lockfileDirs) {
+    const loaded = await loadLockfiles(source, diagnostics, unread, role, directory);
+    if (loaded.lockfile !== null) {
+      merged.push(loaded.lockfile);
+    }
+    merged.push(...loaded.extraLockfiles);
+  }
+  const lockfile = merged.find(isReadLockfile) ?? merged[0] ?? null;
+  const extraLockfiles = merged.filter(
+    (parsed) => parsed !== lockfile && (parsed.format === 'npm' || parsed.format === 'pnpm')
+  );
   const readRootPaths = new Set(
     [...(lockfile === null ? [] : [lockfile]), ...extraLockfiles]
       .filter(isReadLockfile)
       .map((parsed) => parsed.path)
   );
-  const lockfileInventory = (await source.lockfileInventory()).map((entry) => ({
-    path: entry.path,
-    read: readRootPaths.has(entry.path),
-    blobId: entry.blobId,
-  }));
+  const lockfileInventory = (await source.lockfileInventory())
+    .filter((entry) => underPrefix(entry.path, prefix) && !pathSkipped(entry.path))
+    .map((entry) => ({
+      path: entry.path,
+      read: readRootPaths.has(entry.path),
+      blobId: entry.blobId,
+    }));
   // Read once and handed to both parsers below -- parseNpmrcPins and
   // parseNpmrcDefaultRegistry read the same file for two different keys,
   // and a source's read() is not assumed free of cost (a git source shells
@@ -1582,83 +1755,33 @@ export async function assertScannablePath(repoRoot: string): Promise<void> {
 // recognizes -- the exact set loadState can turn into a resolved
 // RepoState, so a hit here can never be a file the resolver would not
 // also have recognized by name.
-const MANIFEST_PROBE_NAMES = new Set<string>([ROOT_MANIFEST, ...LOCKFILE_FILE_NAMES]);
-
-// Directories a manifest search skips outright. node_modules holds
-// thousands of installed packages' own package.json files in a populated
-// repository -- every one of them a real file on disk that has nothing to
-// do with whether THIS repository's own dependencies were resolved -- and
-// .git is version-control bookkeeping, never project content.
-const PROBE_SKIP_DIRS = new Set<string>(['node_modules', '.git']);
-
-// How many directory levels probeManifestOnDisk descends below the scan
-// root. Deep enough to reach an ordinary workspace layout
-// (packages/<name>/package.json is two levels down) with room to spare,
-// shallow enough that an unrelated tree under the wrong root cannot make
-// this cheap probe expensive. A search that stopped short would only ever
-// make the probe MISS a real manifest, which only means the existing,
-// softer behaviour (a clean pass) is kept -- never a wrongful could-not-run
-// -- so erring toward "shallow enough to stay cheap" is the safe direction
-// here, unlike almost everywhere else in this module.
-const MANIFEST_PROBE_MAX_DEPTH = 4;
+const MANIFEST_PROBE_NAMES = new Set<string>([
+  ROOT_MANIFEST,
+  PYPROJECT_TOML,
+  REQUIREMENTS_TXT,
+  ...LOCKFILE_FILE_NAMES,
+]);
 
 /**
- * A cheap, resolver-INDEPENDENT answer to "does anything that looks like a
- * dependency manifest exist anywhere under this root". Used by scan.ts to
- * tell apart the two reasons a scan can resolve zero manifests: a
- * repository that genuinely has none (a real, legitimate state -- stays a
- * clean pass) from one where a manifest sits on disk but the resolver's own
- * rules (workspace globs, the git index for --staged, symlink containment)
- * never reached it (could-not-run instead).
+ * Whether a manifest-shaped file sits on disk inside this scan. Used by
+ * scan.ts when the resolver produced nothing, to tell a dependency-free
+ * tree from one that holds a file the resolver did not turn into a
+ * manifest or a lockfile it reads.
  *
- * Deliberately not a second implementation of the resolver: it does not
- * read a workspaces field or pnpm-workspace.yaml, so it does not know which
- * subdirectories the resolver considers packages, and it does not follow
- * symlinks, so a manifest reachable only through one is invisible here
- * exactly as it is to a plain recursive listing. Both are asymmetric in the
- * safe direction -- a manifest this probe cannot see only ever costs the
- * existing (softer) behaviour, never a wrongful could-not-run, because this
- * function is only ever consulted when the real resolver already found
- * zero.
+ * Uses the same listing as the working-tree side: gitignored paths are
+ * absent, and installed, build, and vendored directories are skipped. A
+ * file this probe cannot see is not a could-not-run. `prefix` limits the
+ * question to the directory `scan <path>` was asked to read.
  *
- * Reads the real filesystem, not whichever git snapshot the scan mode is
- * judging (the index for --staged, a ref for --base). A repository that has
- * a real, on-disk package.json the developer has not yet run `git add` on
- * is exactly the situation this probe is meant to flag as suspicious -- see
- * scan.ts's empty-scan-fail-closed note for the tradeoff this accepts.
+ * Not called for --staged. That mode judges the index, and an untracked
+ * manifest on disk is outside that scope.
  */
-export async function probeManifestOnDisk(
-  root: string,
-  depth: number = MANIFEST_PROBE_MAX_DEPTH
-): Promise<boolean> {
-  let entries;
-  try {
-    entries = await readdir(root, { withFileTypes: true });
-  } catch {
-    // An unreadable or vanished directory is not a manifest; scan.ts's own
-    // assertScannablePath already ran before this is ever reached, so a
-    // failure here is some other directory further down the walk, not the
-    // scan root itself.
-    return false;
-  }
-  const subdirs: string[] = [];
-  for (const entry of entries) {
-    if (entry.isFile() && MANIFEST_PROBE_NAMES.has(entry.name)) {
-      return true;
-    }
-    if (entry.isDirectory() && !PROBE_SKIP_DIRS.has(entry.name)) {
-      subdirs.push(entry.name);
-    }
-  }
-  if (depth <= 0) {
-    return false;
-  }
-  for (const dir of subdirs) {
-    if (await probeManifestOnDisk(path.join(root, dir), depth - 1)) {
-      return true;
-    }
-  }
-  return false;
+export async function probeManifestOnDisk(root: string, prefix = ''): Promise<boolean> {
+  const files = await listWorkingTreeFiles(root);
+  return files.some(
+    (relPath) =>
+      underPrefix(relPath, prefix) && !pathSkipped(relPath) && MANIFEST_PROBE_NAMES.has(baseName(relPath))
+  );
 }
 
 // git resolves "REF:path" against the top of the working tree, so the
@@ -1699,6 +1822,24 @@ export async function resolveScanRoot(repoRoot: string, mode: ScanMode): Promise
   return mode.kind === 'audit' ? resolveAuditRoot(repoRoot) : resolveRepoRoot(repoRoot);
 }
 
+// The directory `scan <path>` named, relative to the git root and using
+// "/" separators. Empty when the named path is the root itself. A path
+// outside the root does not narrow the scan.
+export async function relativeScanPrefix(named: string, anchor: string): Promise<string> {
+  const [resolvedNamed, resolvedAnchor] = await Promise.all([
+    resolveOrKeep(named),
+    resolveOrKeep(anchor),
+  ]);
+  if (resolvedNamed === resolvedAnchor) {
+    return '';
+  }
+  const rel = path.relative(resolvedAnchor, resolvedNamed);
+  if (rel === '' || rel === '.' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return '';
+  }
+  return rel.split(path.sep).join('/');
+}
+
 async function resolveOrKeep(candidate: string): Promise<string> {
   try {
     return await realpath(candidate);
@@ -1707,13 +1848,11 @@ async function resolveOrKeep(candidate: string): Promise<string> {
   }
 }
 
-// Naming a directory that sits inside a repository scans the enclosing
-// repository instead, and never reads the named directory on its own
-// terms. That is defensible -- the repository toplevel is the only anchor
-// git can resolve blob paths against -- but surprising enough that it has
-// to be said out loud rather than inferred from paths in the output. It
-// applies to every mode, not just audit: staged and base substitute the
-// toplevel just as silently.
+// Naming a directory inside a repository still anchors every path at the
+// git toplevel (that is the only place git can resolve blob paths), and
+// the scan reads manifests under the named directory. The notice says so,
+// because the paths in the output are not relative to the directory the
+// caller typed. It applies to every mode.
 //
 // Both paths are compared AND reported after resolution. Quoting the raw
 // argument beside a resolved anchor would print "/var/..." next to
@@ -1732,7 +1871,7 @@ async function noteAnchorDifference(
   }
   diagnostics.push({
     code: AUDIT_ANCHOR_DIFFERS,
-    message: `${resolvedNamed} sits inside the git repository at ${resolvedAnchor}; that repository was scanned and every reported path is relative to it`,
+    message: `${resolvedNamed} sits inside the git repository at ${resolvedAnchor}; that directory was scanned and every reported path is relative to the repository root`,
   });
 }
 
@@ -1764,17 +1903,23 @@ function refSource(root: string, ref: string): FileSource {
 export async function loadRefState(
   repoRoot: string,
   ref: string,
-  notes?: Diagnostic[]
+  notes?: Diagnostic[],
+  prefix = ''
 ): Promise<RepoState> {
   if (!isUsableRef(ref)) {
     throw new DepGuardError(`ref "${ref}" is not a usable git ref`, 'git-error');
   }
   const root = await resolveRepoRoot(repoRoot);
   const diagnostics: Diagnostic[] = [];
-  const state = await loadState(refSource(root, ref), diagnostics, {
-    kind: 'comparison',
-    label: `the trust base "${ref}"`,
-  });
+  const state = await loadState(
+    refSource(root, ref),
+    diagnostics,
+    {
+      kind: 'comparison',
+      label: `the trust base "${ref}"`,
+    },
+    prefix
+  );
   notes?.push(...diagnostics.filter((d) => COMPARISON_SIDE_CODES.has(d.code)));
   return state;
 }
@@ -1802,29 +1947,41 @@ export async function loadStates(repoRoot: string, mode: ScanMode): Promise<Stat
 
   if (mode.kind === 'audit') {
     const root = await resolveAuditRoot(repoRoot);
+    const prefix = await relativeScanPrefix(repoRoot, root);
     await noteAnchorDifference(repoRoot, root, diagnostics);
-    const after = await loadState(await createWorkingTreeSource(root, diagnostics), diagnostics, JUDGED);
+    const after = await loadState(
+      await createWorkingTreeSource(root, diagnostics),
+      diagnostics,
+      JUDGED,
+      prefix
+    );
     return { before: null, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
 
   const root = await resolveRepoRoot(repoRoot);
+  const prefix = await relativeScanPrefix(repoRoot, root);
   await noteAnchorDifference(repoRoot, root, diagnostics);
 
   if (mode.kind === 'staged') {
     const before = (await hasCommittedHead(root))
-      ? await loadState(refSource(root, 'HEAD'), diagnostics, { kind: 'comparison', label: 'HEAD' })
+      ? await loadState(refSource(root, 'HEAD'), diagnostics, { kind: 'comparison', label: 'HEAD' }, prefix)
       : null;
-    const after = await loadState(indexSource(root), diagnostics, JUDGED);
+    const after = await loadState(indexSource(root), diagnostics, JUDGED, prefix);
     return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
 
   if (!isUsableRef(mode.ref)) {
     throw new DepGuardError(`base ref "${mode.ref}" is not a usable git ref`, 'git-error');
   }
-  const before = await loadState(refSource(root, mode.ref), diagnostics, {
-    kind: 'comparison',
-    label: `the --base ref "${mode.ref}"`,
-  });
-  const after = await loadState(await createWorkingTreeSource(root, diagnostics), diagnostics, JUDGED);
+  const before = await loadState(
+    refSource(root, mode.ref),
+    diagnostics,
+    {
+      kind: 'comparison',
+      label: `the --base ref "${mode.ref}"`,
+    },
+    prefix
+  );
+  const after = await loadState(await createWorkingTreeSource(root, diagnostics), diagnostics, JUDGED, prefix);
   return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
 }

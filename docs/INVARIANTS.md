@@ -1228,20 +1228,31 @@ suppress a finding in a lockfile this tool reads` and `the refusal prints the
 exact entry to add and says it goes on the base branch first`; config
 validation in `loadConfig acknowledgedLockfiles`.
 
-**Lockfiles below the root are named, not judged.** This tool reads no
-lockfile below the repository root. One whose blob differs from the
-comparison side, a new one included, is named in `lockfile-nested-changed`,
-which says the run says nothing about what would be installed from it; the
-run continues and the exit code is decided by the findings. A path covered
-by `ignorePaths` (from the same config the findings filter uses: the trust
-base's on a `--trust-base` run, otherwise the `.dep-guard.json` on disk in
-the scanned repository, which is the judged side's) is
-`lockfile-nested-ignored` instead, and such an entry is not reported as
-unmatched. The no-lockfile note `lockfile-missing` is printed only when the
-inventory is empty; `lockfile-not-read` names every lockfile below the root,
-and every present root lockfile name when the scan has no root lockfile.
-Tests: the `N8:` group and `computeDelta lockfiles below the repository
-root`.
+**Lockfiles below the root are read when this tool can read them.** npm and
+pnpm lockfiles at any depth are parsed and judged; a finding names the
+manifest that declares the dependency, or the lockfile path when no
+manifest in that directory declares it. `package.json`, `pyproject.toml`
+and `requirements.txt` are read at any depth. A manifest with no
+dependencies (a `pyproject.toml` that holds only `[tool.*]` config) counts
+as resolved, so it does not by itself make the scan a could-not-run when
+another manifest or a read lockfile resolved. The scan skips
+`node_modules`, `.venv`, `venv`, `dist`, `build`, `vendor` and `vendored`,
+and paths git ignores. `dep-guard scan <path>` reads the named directory;
+paths stay relative to the git root. A lockfile this tool does not read
+(yarn, bun, a v1 npm file) below the root is still not judged. One whose
+blob differs from the comparison side, a new one included, is named in
+`lockfile-nested-changed`, which says the run says nothing about what would
+be installed from it; the run continues and the exit code is decided by the
+findings. A path covered by `ignorePaths` (from the same config the
+findings filter uses: the trust base's on a `--trust-base` run, otherwise
+the `.dep-guard.json` on disk in the scanned repository, which is the
+judged side's) drops findings under that path, and an unread lockfile
+there is `lockfile-nested-ignored` instead. Such an entry is not reported
+as unmatched. The no-lockfile note `lockfile-missing` is printed only when
+the inventory is empty; `lockfile-not-read` names every lockfile this tool
+does not read. `--staged`, `--base` and `--trust-base` compare each
+manifest with the same path on the other side. Tests: `manifests below the
+scan root` and the `N8:` group.
 
 **Two hashless unreadable resolutions at a held version are a finding.**
 When both resolved values are unreadable, neither side has an integrity

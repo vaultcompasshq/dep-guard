@@ -196,16 +196,16 @@ describe('scan', () => {
     test('a directory-style ignore entry drops findings from every manifest underneath it', async () => {
       await write(
         '.dep-guard.json',
-        JSON.stringify({ ignorePaths: ['packages/vendored'] })
+        JSON.stringify({ ignorePaths: ['packages/widgets'] })
       );
       await write('package.json', JSON.stringify({ name: 'root', workspaces: ['packages/*'] }));
       await write(
-        'packages/vendored/package.json',
+        'packages/widgets/package.json',
         JSON.stringify({ name: 'vendored', dependencies: {} })
       );
       await commitAll('first');
       await write(
-        'packages/vendored/package.json',
+        'packages/widgets/package.json',
         JSON.stringify({
           name: 'vendored',
           dependencies: { 'reeact-definitely-not-real': '1.0.0' },
@@ -358,15 +358,15 @@ describe('scan', () => {
   describe('ignorePaths coverage diagnostic', () => {
     test('an entry that matches no finding path is named in a diagnostic, and the finding is not dropped', async () => {
       // The natural-looking "packages/*" does not match a manifest one
-      // level deeper ("packages/vendored/package.json" is three segments,
+      // level deeper ("packages/widgets/package.json" is three segments,
       // "packages/*" is two) -- the matcher compares whole paths, not
       // prefixes, once a wildcard is involved.
       await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['packages/*'] }));
       await write('package.json', JSON.stringify({ name: 'root', workspaces: ['packages/*'] }));
-      await write('packages/vendored/package.json', JSON.stringify({ name: 'vendored', dependencies: {} }));
+      await write('packages/widgets/package.json', JSON.stringify({ name: 'vendored', dependencies: {} }));
       await commitAll('first');
       await write(
-        'packages/vendored/package.json',
+        'packages/widgets/package.json',
         JSON.stringify({ name: 'vendored', dependencies: { 'reeact-definitely-not-real': '1.0.0' } })
       );
       await git('add', '-A');
@@ -502,10 +502,10 @@ describe('scan', () => {
     });
 
     test('a subdirectory scan still honours the repo-root baseline', async () => {
-      await write('package.json', manifestJson({}));
+      await write('sub/package.json', manifestJson({}));
       await write('sub/keep.txt', 'a subdirectory to scan from\n');
       await commitAll('first');
-      await write('package.json', manifestJson({ 'reeact-definitely-not-real': '1.0.0' }));
+      await write('sub/package.json', manifestJson({ 'reeact-definitely-not-real': '1.0.0' }));
       await git('add', '-A');
 
       const fingerprint = fingerprintFinding({
@@ -513,7 +513,7 @@ describe('scan', () => {
         severity: 'high',
         packageName: 'reeact-definitely-not-real',
         message: 'irrelevant to the hash',
-        manifestPath: 'package.json',
+        manifestPath: 'sub/package.json',
       });
       await write('.dep-guard.baseline.json', JSON.stringify({ version: 1, fingerprints: [fingerprint] }));
 
@@ -615,25 +615,18 @@ describe('scan', () => {
   // resolver: present-but-zero is could-not-run, absent-and-zero stays
   // clean.
   describe('a resolve that finds zero manifests', () => {
-    test('a manifest present on disk but never resolved (workspace glob missed it) is could-not-run', async () => {
-      // No root package.json and no workspaces declaration anywhere, so
-      // packages/app is never discovered as a workspace member -- the
-      // resolver sees nothing, even though a real manifest sits on disk
-      // two directories down. This is the dep-guard analogue of a
-      // misrooted whole-tree walk: the scan root technically resolved, but
-      // what it actually looked at was not the project.
-      await write('packages/app/package.json', manifestJson({ react: '18.0.0' }));
+    test('a manifest below the root is resolved, and a finding names its path', async () => {
+      await write(
+        'packages/app/package.json',
+        manifestJson({ 'reeact-definitely-not-real': '1.0.0' })
+      );
 
-      let caught: unknown;
-      try {
-        await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
-      } catch (err) {
-        caught = err;
-      }
-      expect(caught).toBeInstanceOf(DepGuardError);
-      expect((caught as DepGuardError).code).toBe('manifests-unresolved');
-      expect((caught as DepGuardError).message).toMatch(/scan root may be wrong/);
-      expect((caught as DepGuardError).message).toMatch(/repository root/);
+      const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings[0]).toMatchObject({
+        ruleId: 'unknown-package',
+        manifestPath: 'packages/app/package.json',
+      });
     });
 
     test('a genuinely dependency-free repository (nothing on disk either) stays a clean pass', async () => {
@@ -647,15 +640,11 @@ describe('scan', () => {
       expect(result.exitCode).toBe(0);
     });
 
-    test('a lockfile present on disk with no package.json anywhere is also could-not-run', async () => {
-      // A lockfile is a manifest-shaped file this resolver recognizes too
-      // (LOCKFILE_FILE_NAMES); the probe has to look for it, not only for
-      // package.json, or a repo whose package.json went missing but whose
-      // lockfile survived would misreport as dependency-free.
-      await write(
-        'package-lock.json',
-        JSON.stringify({ name: 'root', version: '1.0.0', lockfileVersion: 3, requires: true, packages: {} })
-      );
+    test('a lockfile this tool does not read, with no manifest anywhere, is could-not-run', async () => {
+      // yarn.lock is a manifest-shaped file the probe recognizes. It is not
+      // parsed into dependencies, and there is no package.json, pyproject,
+      // or read lockfile, so the scan still refuses a clean pass.
+      await write('yarn.lock', '# yarn lockfile v1\n');
 
       let caught: unknown;
       try {

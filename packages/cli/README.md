@@ -177,11 +177,13 @@ package looks the same by age and downloads alone.
 ## What it does not do
 
 dep-guard is narrow on purpose. It reads manifests and lockfiles at the
-moment they change. It does not analyse package contents, mine git history,
-sandbox an install, or check anything against a vulnerability database, so
-it is not a replacement for `npm audit`, Snyk, or Socket -- it sits beside
-them and answers a question they answer late or not at all. Run it alongside
-them.
+moment they change, including `package.json`, npm and pnpm lockfiles,
+`requirements.txt` and `pyproject.toml` in subdirectories. It skips
+installed, build and vendored directories, and paths git ignores. It does
+not analyse package contents, mine git history, sandbox an install, or
+check anything against a vulnerability database, so it is not a replacement
+for `npm audit`, Snyk, or Socket -- it sits beside them and answers a
+question they answer late or not at all. Run it alongside them.
 
 Lockfile coverage is honest per format rather than uniform, and a scan says
 in a diagnostic where a format cannot answer: `package-lock.json` v2 and v3

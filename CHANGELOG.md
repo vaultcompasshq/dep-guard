@@ -10,6 +10,36 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-06
+
+Minor on both published packages. `@vaultcompass/dep-guard` and
+`@vaultcompass/dep-guard-core` move from 0.10.1 to 0.11.0. The action's
+`version` input default and the `DG_TAG_SCANNER` constant move with them, so
+`vaultcompasshq/dep-guard@v0.11.0` installs `@vaultcompass/dep-guard@0.11.0`.
+
+### Added
+
+- Manifests and lockfiles below the repository root are resolved.
+  `package.json`, `package-lock.json`, `npm-shrinkwrap.json`,
+  `pnpm-lock.yaml`, `requirements.txt` and `pyproject.toml` are read in
+  subdirectories. A finding names the manifest or lockfile it came from.
+  `dep-guard scan <path>` reads that directory. Paths in the output stay
+  relative to the git root. `.gitignore` is honoured. `node_modules`,
+  `.venv`, `venv`, `dist`, `build`, `vendor` and `vendored` are skipped.
+- `--staged`, `--base` and `--trust-base` compare each manifest with the
+  same path on the other side.
+
+### Changed
+
+- A `pyproject.toml` that only holds `[tool.*]` config, or any other
+  manifest with no dependencies, does not by itself make the scan a
+  could-not-run when another manifest or a read lockfile resolved.
+- A scan that resolves nothing, while a manifest-shaped file it does not
+  read is still on disk (a `yarn.lock` with no manifest, for example),
+  stays a could-not-run (`manifests-unresolved`).
+- npm and pnpm lockfiles below the root are judged. `lockfile-nested-changed`
+  remains for a lockfile below the root that this tool does not read.
+
 ## [0.10.1] - 2026-10-04
 
 Patch on both published packages. `@vaultcompass/dep-guard` and
