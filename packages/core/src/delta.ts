@@ -844,11 +844,15 @@ function refuseLockfileDowngrade(
         unreadChanged.set(entryPath, `${entryPath} (a YAML document in it other than the project lockfile)`);
       }
     }
-    // A manifest a read lockfile recorded on the comparison side, with no
-    // read lockfile in its directory or above it on the judged side.
+    // A manifest whose nearest read lockfile on the comparison side sits in
+    // a directory that has no read lockfile with entries on the judged
+    // side. A lockfile higher up does not stand in for it: this tool
+    // cannot see whether that file records this directory, and a deleted
+    // nested lockfile beside an untouched root one is how a directory
+    // stops being judged. A genuine hoist acknowledges the removed bytes.
     declared = declaredLockableDeps(after, (manifestPath) => {
       const baseDir = nearestCoveringDir(manifestPath, baseDirs);
-      if (baseDir === null || nearestCoveringDir(manifestPath, afterDirs) !== null) {
+      if (baseDir === null || afterDirs.has(baseDir)) {
         return false;
       }
       lostDirs.add(baseDir);

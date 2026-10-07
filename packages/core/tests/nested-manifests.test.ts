@@ -446,3 +446,26 @@ describe('a frontend and backend layout with nothing at the root', () => {
     );
   });
 });
+
+describe('a root lockfile does not stand in for a deleted nested one', () => {
+  test('deleting apps/web/package-lock.json beside a root lockfile with entries is still a downgrade', async () => {
+    await write('package.json', manifestJson({ 'left-pad': '^1.0.0' }));
+    await write('package-lock.json', npmLock({ 'node_modules/left-pad': CLEAN }));
+    await write('apps/web/package.json', manifestJson({ 'left-pad': '^1.0.0' }));
+    await write('apps/web/package-lock.json', npmLock({ 'node_modules/left-pad': CLEAN }));
+    await commitAll('base');
+    await git('tag', 'base');
+    await rm(path.join(repo, 'apps/web/package-lock.json'));
+
+    let caught: unknown;
+    try {
+      await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'base' }, corpusDir: FIXTURE_CORPUS });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(DepGuardError);
+    expect((caught as DepGuardError).code).toBe('lockfile-downgrade');
+    expect((caught as DepGuardError).message).toContain('apps/web/package-lock.json');
+  });
+});
