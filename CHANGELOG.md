@@ -10,7 +10,13 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
-Patch on both published packages. What can newly block, and how to clear
+## [0.11.1] - 2026-10-07
+
+Patch on both published packages. `@vaultcompass/dep-guard` and
+`@vaultcompass/dep-guard-core` move from 0.11.0 to 0.11.1. The action's
+`version` input default and the `DG_TAG_SCANNER` constant move with them, so
+`vaultcompasshq/dep-guard@v0.11.1` installs `@vaultcompass/dep-guard@0.11.1`.
+0.11.0 is deprecated on npm. What can newly block, and how to clear
 each:
 
 - Findings (exit 1) from a `package.json` a workspace pattern resolves

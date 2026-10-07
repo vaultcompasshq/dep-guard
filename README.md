@@ -397,7 +397,7 @@ steps:
       # and the baseline from the base branch, which a shallow checkout
       # does not have.
       fetch-depth: 0
-  - uses: vaultcompasshq/dep-guard@v0.10.1
+  - uses: vaultcompasshq/dep-guard@v0.11.1
     with:
       path: .
       online: 'true'
@@ -455,7 +455,7 @@ refused with a message saying so.
 
 **On a pull request, `version` may not pin BACKWARD.** The shape check above
 proves the value names a version and says nothing about which one, so every
-published version clears it, and fourteen are published (0.1.0 through 0.10.1).
+published version clears it, and fifteen are published (0.1.0 through 0.11.0).
 What stops a backward pin today is not that check but a flag: `--trust-base`
 arrived in the 0.6.0 scanner, the run step appends it on every pull-request run
 with no opt-out, and a scanner at or below 0.5.0 answers `error: unknown option
@@ -491,14 +491,14 @@ branch's own workflow file, written by the same author, so it is as
 author-controlled as a pull request and is not covered.
 
 The refusal names both numbers and the fix, which is to **remove the `version`
-input**. What it costs: fourteen scanners are published, so a workflow pinning any
-of `0.1.0` through `0.10.0` passes the shape check on a pull request today and
+input**. What it costs: fifteen scanners are published, so a workflow pinning any
+of `0.1.0` through `0.11.0` passes the shape check on a pull request today and
 is refused by this rule. A pin below `0.6.0` is already broken on that event,
 since those scanners do not know `--trust-base`; the change there is that the
 job fails at the validate step with a message saying why. A pin of `0.6.0`,
-`0.7.0`, `0.8.0`, `0.9.0`, or `0.10.0` fails on version alone: it knows
-`--trust-base` and would otherwise run cleanly. **Remove the `version` input,
-or raise it to `0.10.1` or newer.**
+`0.7.0`, `0.8.0`, `0.9.0`, `0.10.0`, `0.10.1`, or `0.11.0` fails on version alone: it
+knows `--trust-base` and would otherwise run cleanly. **Remove the `version` input,
+or raise it to `0.11.1` or newer.**
 
 **What it does not cover, and what it costs on forks.** A fork's
 `pull_request` run uses the base repository's workflow file, so a fork author
