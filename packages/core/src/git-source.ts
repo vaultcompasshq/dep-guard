@@ -138,10 +138,10 @@ const UNRESOLVABLE_LINK_CODES = new Set(['ELOOP', 'ENAMETOOLONG']);
 // straight into it.
 const NEVER_A_PACKAGE_DIR = 'node_modules';
 
-// Directories a project manifest never lives in. Installed trees
-// (node_modules, virtualenvs), build output, and vendored trees each hold
-// their own manifests, and reading those would report someone else's
-// dependencies as this repository's.
+// Directory names an undeclared stray manifest is not read from. A
+// workspace member a glob resolved, and every lockfile, are still read.
+// node_modules and .git are not announced per file. The other names are,
+// one diagnostic per stray manifest.
 const SKIP_DIR_NAMES: ReadonlySet<string> = new Set([
   'node_modules',
   '.venv',
@@ -152,6 +152,10 @@ const SKIP_DIR_NAMES: ReadonlySet<string> = new Set([
   'vendored',
   '.git',
 ]);
+
+const NEVER_WALK_DIR_NAMES: ReadonlySet<string> = new Set(['node_modules', '.git']);
+const SILENT_SKIP_DIR_NAMES: ReadonlySet<string> = new Set(['node_modules', '.git']);
+const MANIFEST_SKIPPED_DIRNAME = 'manifest-skipped-dirname';
 
 function parentDir(relPath: string): string {
   const slash = relPath.lastIndexOf('/');
@@ -165,6 +169,15 @@ function baseName(relPath: string): string {
 
 function pathSkipped(relPath: string): boolean {
   return relPath.split('/').some((segment) => SKIP_DIR_NAMES.has(segment));
+}
+
+function skipSegment(relPath: string): string | null {
+  for (const segment of relPath.split('/')) {
+    if (SKIP_DIR_NAMES.has(segment)) {
+      return segment;
+    }
+  }
+  return null;
 }
 
 function underPrefix(relPath: string, prefix: string): boolean {
@@ -765,8 +778,8 @@ async function createWorkingTreeSource(
 }
 
 // Tracked files plus untracked files git does not ignore. Outside a
-// repository the same answer is a directory walk that skips installed,
-// build, and vendored trees and does not follow symlinks.
+// repository the same answer is a directory walk that does not enter
+// node_modules or .git and does not follow symlinks.
 async function listWorkingTreeFiles(root: string): Promise<string[]> {
   const listed = await runGit(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
   if (listed.ok) {
@@ -784,7 +797,7 @@ async function walkFiles(root: string, dir = ''): Promise<string[]> {
   }
   const found: string[] = [];
   for (const entry of entries) {
-    if (SKIP_DIR_NAMES.has(entry.name) || entry.isSymbolicLink()) {
+    if (NEVER_WALK_DIR_NAMES.has(entry.name) || entry.isSymbolicLink()) {
       continue;
     }
     const relPath = dir === '' ? entry.name : `${dir}/${entry.name}`;
@@ -1533,9 +1546,9 @@ async function loadState(
   role: SideRole,
   prefix: string
 ): Promise<RepoState> {
-  const files = (await source.listFiles()).filter(
-    (relPath) => underPrefix(relPath, prefix) && !pathSkipped(relPath)
-  );
+  const filesInPrefix = (await source.listFiles()).filter((relPath) => underPrefix(relPath, prefix));
+  // Lockfiles are never dropped for a directory name. Stray manifests are.
+  const files = filesInPrefix.filter((relPath) => isLockfileName(relPath) || !pathSkipped(relPath));
   const listedManifests = files.filter(isProjectManifestPath).sort();
   const listedLockfiles = files.filter(isLockfileName);
   const rootInScope = underPrefix(ROOT_MANIFEST, prefix);
@@ -1618,9 +1631,25 @@ async function loadState(
   // order.
   const unreadMembers = await screenSymlinkedInputs(source, manifestPaths, role, diagnostics);
   const readPaths = manifestPaths.filter((manifestPath) => !unreadMembers.has(manifestPath));
+  const memberPaths = new Set(manifestPaths);
+  for (const relPath of filesInPrefix) {
+    if (!isProjectManifestPath(relPath) || !pathSkipped(relPath) || memberPaths.has(relPath)) {
+      continue;
+    }
+    const segment = skipSegment(relPath);
+    if (segment !== null && SILENT_SKIP_DIR_NAMES.has(segment)) {
+      continue;
+    }
+    diagnostics.push({
+      code: MANIFEST_SKIPPED_DIRNAME,
+      message:
+        `${relPath}: not scanned; a directory named ${segment ?? 'unknown'} is skipped unless a workspace ` +
+        'pattern names it. A lockfile on this path would still be read',
+    });
+  }
   const contents = await source.readMany(readPaths);
   for (const manifestPath of readPaths) {
-    if (!underPrefix(manifestPath, prefix) || pathSkipped(manifestPath)) {
+    if (!underPrefix(manifestPath, prefix)) {
       continue;
     }
     const content = contents.get(manifestPath) ?? null;
@@ -1675,7 +1704,7 @@ async function loadState(
       .map((parsed) => parsed.path)
   );
   const lockfileInventory = (await source.lockfileInventory())
-    .filter((entry) => underPrefix(entry.path, prefix) && !pathSkipped(entry.path))
+    .filter((entry) => underPrefix(entry.path, prefix))
     .map((entry) => ({
       path: entry.path,
       read: readRootPaths.has(entry.path),
@@ -1769,19 +1798,25 @@ const MANIFEST_PROBE_NAMES = new Set<string>([
  * manifest or a lockfile it reads.
  *
  * Uses the same listing as the working-tree side: gitignored paths are
- * absent, and installed, build, and vendored directories are skipped. A
- * file this probe cannot see is not a could-not-run. `prefix` limits the
- * question to the directory `scan <path>` was asked to read.
+ * absent. A stray manifest under a skipped directory name is not a
+ * could-not-run. A lockfile is, whatever directory names are in its path.
+ * `prefix` limits the question to the directory `scan <path>` was asked
+ * to read.
  *
  * Not called for --staged. That mode judges the index, and an untracked
  * manifest on disk is outside that scope.
  */
 export async function probeManifestOnDisk(root: string, prefix = ''): Promise<boolean> {
   const files = await listWorkingTreeFiles(root);
-  return files.some(
-    (relPath) =>
-      underPrefix(relPath, prefix) && !pathSkipped(relPath) && MANIFEST_PROBE_NAMES.has(baseName(relPath))
-  );
+  return files.some((relPath) => {
+    if (!underPrefix(relPath, prefix) || !MANIFEST_PROBE_NAMES.has(baseName(relPath))) {
+      return false;
+    }
+    if (isLockfileName(relPath)) {
+      return true;
+    }
+    return !pathSkipped(relPath);
+  });
 }
 
 // git resolves "REF:path" against the top of the working tree, so the
