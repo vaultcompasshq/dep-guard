@@ -1257,10 +1257,15 @@ export const tamperCheck: Check = (ctx) => {
       }
     }
 
-    const subject = comparableLockfile ? subjectOfChange(change, delta.lockfileFormat === 'pnpm') : null;
+    const subject = comparableLockfile
+      ? subjectOfChange(change, (change.lockfileFormat ?? delta.lockfileFormat) === 'pnpm')
+      : null;
     if (subject !== null) {
       for (const finding of compare(subject)) {
-        report(finding);
+        // The change knows which lockfile its entries were selected from;
+        // with lockfiles in several directories that is not always the
+        // delta's primary one.
+        report(finding, change.lockfilePath ?? delta.lockfilePath);
       }
     }
   }

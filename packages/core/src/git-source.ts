@@ -156,6 +156,7 @@ const SKIP_DIR_NAMES: ReadonlySet<string> = new Set([
 const NEVER_WALK_DIR_NAMES: ReadonlySet<string> = new Set(['node_modules', '.git']);
 const SILENT_SKIP_DIR_NAMES: ReadonlySet<string> = new Set(['node_modules', '.git']);
 const MANIFEST_SKIPPED_DIRNAME = 'manifest-skipped-dirname';
+const LOCKFILE_OUTSIDE_PREFIX = 'lockfile-outside-prefix';
 const MANIFEST_UNPARSED = 'manifest-unparsed';
 
 function parentDir(relPath: string): string {
@@ -1712,13 +1713,40 @@ async function loadState(
       .filter(isReadLockfile)
       .map((parsed) => parsed.path)
   );
-  const lockfileInventory = (await source.lockfileInventory())
+  const fullInventory = await source.lockfileInventory();
+  const lockfileInventory = fullInventory
     .filter((entry) => underPrefix(entry.path, prefix))
     .map((entry) => ({
       path: entry.path,
       read: readRootPaths.has(entry.path),
       blobId: entry.blobId,
     }));
+  // `scan <path>` reads that directory and nothing above it. A lockfile in
+  // an ancestor directory may record what this directory installs, and
+  // this scan did not read it; the reader has to know that a full gate is
+  // a scan of the repository root. Only the ancestor paths are looked at,
+  // not a second walk of the tree.
+  if (prefix !== '') {
+    const ancestors = new Set<string>();
+    for (let dir = parentDir(prefix); ; dir = parentDir(dir)) {
+      ancestors.add(dir);
+      if (dir === '') {
+        break;
+      }
+    }
+    const above = fullInventory
+      .map((entry) => entry.path)
+      .filter((entryPath) => ancestors.has(parentDir(entryPath)))
+      .sort();
+    if (above.length > 0) {
+      diagnostics.push({
+        code: LOCKFILE_OUTSIDE_PREFIX,
+        message:
+          `${above.join(', ')}: above the scanned directory ${prefix} and not read by this scan, so ` +
+          'what it installs was not judged here; a scan of the repository root reads it',
+      });
+    }
+  }
   // Read once and handed to both parsers below -- parseNpmrcPins and
   // parseNpmrcDefaultRegistry read the same file for two different keys,
   // and a source's read() is not assumed free of cost (a git source shells

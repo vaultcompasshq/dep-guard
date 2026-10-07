@@ -13,6 +13,13 @@ export interface DepChange {
   depType: DepType;
   protocol: Protocol;
   manifestPath: string;
+  // The lockfile the before and after entries were selected from: the one
+  // that records this manifest (lockfileForManifest). Absent when no read
+  // lockfile covers the manifest. A finding about this change names this
+  // file, not the delta's primary lockfile, which can be a different one
+  // when lockfiles sit in several directories.
+  lockfilePath?: string;
+  lockfileFormat?: LockfileFormat;
   before?: LockEntry;
   after?: LockEntry;
 }
@@ -679,13 +686,19 @@ function coveringLockfiles(state: RepoState): ParsedLockfile[] {
 // packages this side actually discovered as manifests. The workspace
 // exemption comes from the manifests, never from the lockfile's own
 // "link" entries, which the lockfile author controls.
-function declaredLockableDeps(state: RepoState): { manifests: string[]; count: number } {
+function declaredLockableDeps(
+  state: RepoState,
+  include: (manifestPath: string) => boolean = () => true
+): { manifests: string[]; count: number } {
   const workspaceNames = new Set(
     state.manifests.map((manifest) => manifest.name).filter((name): name is string => name !== undefined)
   );
   const manifestPaths = new Set<string>();
   let count = 0;
   for (const manifest of state.manifests) {
+    if (!include(manifest.path)) {
+      continue;
+    }
     for (const dep of manifest.deps) {
       // pypi dependencies are not recorded in an npm or pnpm lockfile, so
       // they do not count as coverage the lockfile downgrade rule can lose.
@@ -697,6 +710,27 @@ function declaredLockableDeps(state: RepoState): { manifests: string[]; count: n
     }
   }
   return { manifests: [...manifestPaths], count };
+}
+
+// The nearest directory in `dirs` that is the manifest's own directory or
+// an ancestor of it, or null when none is. `dirs` holds directories that
+// have a read lockfile with entries; the result is the directory whose
+// lockfile records this manifest's dependencies, if any does.
+function nearestCoveringDir(manifestPath: string, dirs: ReadonlySet<string>): string | null {
+  let dir = parentDirOf(manifestPath);
+  for (;;) {
+    if (dirs.has(dir)) {
+      return dir;
+    }
+    if (dir === '') {
+      return null;
+    }
+    dir = parentDirOf(dir);
+  }
+}
+
+function coveringDirs(state: RepoState): Set<string> {
+  return new Set(coveringLockfiles(state).map((lockfile) => parentDirOf(lockfile.path)));
 }
 
 // Root lockfiles that are unread on `after` and whose bytes differ from the
@@ -772,6 +806,12 @@ function refuseLockfileDowngrade(
     return;
   }
   const baseCovering = coveringLockfiles(before);
+  // Coverage is judged per directory: a read lockfile in apps/web says
+  // nothing about what the root installs, so it neither makes a root
+  // yarn.lock edit a downgrade nor stands in for a root lockfile that is
+  // gone. The root directory is the empty path.
+  const baseDirs = coveringDirs(before);
+  const afterDirs = coveringDirs(after);
   // file path -> how the message names it
   const unreadChanged = new Map<string, string>();
 
@@ -790,17 +830,31 @@ function refuseLockfileDowngrade(
 
   let coverageLost = false;
   let declared = { manifests: [] as string[], count: 0 };
+  // Directories whose read lockfile on the comparison side is gone on the
+  // judged side while a manifest it recorded still declares dependencies.
+  const lostDirs = new Set<string>();
   if (baseCovering.length > 0) {
-    for (const entryPath of changedUnreadRootLockfiles(before, after)) {
-      unreadChanged.set(entryPath, entryPath);
+    if (baseDirs.has('')) {
+      for (const entryPath of changedUnreadRootLockfiles(before, after)) {
+        unreadChanged.set(entryPath, entryPath);
+      }
     }
     for (const entryPath of changedSkippedDocuments(before, after)) {
-      unreadChanged.set(entryPath, `${entryPath} (a YAML document in it other than the project lockfile)`);
+      if (baseDirs.has(parentDirOf(entryPath))) {
+        unreadChanged.set(entryPath, `${entryPath} (a YAML document in it other than the project lockfile)`);
+      }
     }
-    if (coveringLockfiles(after).length === 0) {
-      declared = declaredLockableDeps(after);
-      coverageLost = declared.count > 0;
-    }
+    // A manifest a read lockfile recorded on the comparison side, with no
+    // read lockfile in its directory or above it on the judged side.
+    declared = declaredLockableDeps(after, (manifestPath) => {
+      const baseDir = nearestCoveringDir(manifestPath, baseDirs);
+      if (baseDir === null || nearestCoveringDir(manifestPath, afterDirs) !== null) {
+        return false;
+      }
+      lostDirs.add(baseDir);
+      return true;
+    });
+    coverageLost = declared.count > 0;
   }
 
   if (unreadChanged.size === 0 && !coverageLost) {
@@ -829,11 +883,17 @@ function refuseLockfileDowngrade(
   // of exactly those bytes). A partial set clears nothing.
   let coverageBlocks = false;
   if (coverageLost) {
-    const headRoot = inventoryOf(after).filter((entry) => !isBelowRoot(entry));
-    const required =
-      headRoot.length > 0
-        ? headRoot.map((entry) => acknowledgementFor(entry.path, entry.blobId))
-        : baseCovering.map((lockfile) => acknowledgementFor(lockfile.path, rootBlobId(before, lockfile.path)));
+    const required: Array<string | null> = [];
+    for (const dir of lostDirs) {
+      const headInDir = inventoryOf(after).filter((entry) => parentDirOf(entry.path) === dir);
+      required.push(
+        ...(headInDir.length > 0
+          ? headInDir.map((entry) => acknowledgementFor(entry.path, entry.blobId))
+          : baseCovering
+              .filter((lockfile) => parentDirOf(lockfile.path) === dir)
+              .map((lockfile) => acknowledgementFor(lockfile.path, rootBlobId(before, lockfile.path))))
+      );
+    }
     const cleared =
       required.length > 0 && required.every((entry) => entry !== null && acknowledged.has(entry));
     if (cleared) {
@@ -870,15 +930,25 @@ function refuseLockfileDowngrade(
     );
   }
   if (coverageBlocks) {
-    const headLockfiles = inventoryOf(after)
-      .filter((entry) => !isBelowRoot(entry))
-      .map((entry) => entry.path);
-    reasons.push(
-      `no lockfile this tool reads has an entry on this side (the base side had ${listPaths(basePaths)}; ` +
-        `this side has ${headLockfiles.length === 0 ? 'no lockfile at the repository root' : listPaths(headLockfiles)}), ` +
-        `while ${listPaths(declared.manifests)} still declare${declared.manifests.length === 1 ? 's' : ''} ` +
-        'dependencies a lockfile would record'
-    );
+    for (const dir of [...lostDirs].sort()) {
+      const headLockfiles = inventoryOf(after)
+        .filter((entry) => parentDirOf(entry.path) === dir)
+        .map((entry) => entry.path);
+      const baseInDir = baseCovering
+        .filter((lockfile) => parentDirOf(lockfile.path) === dir)
+        .map((lockfile) => lockfile.path);
+      const manifestsInDir = declared.manifests.filter(
+        (manifestPath) => nearestCoveringDir(manifestPath, baseDirs) === dir
+      );
+      const where = dir === '' ? '' : ` under ${dir}/`;
+      const none = dir === '' ? 'no lockfile at the repository root' : `no lockfile in ${dir}/`;
+      reasons.push(
+        `no lockfile this tool reads has an entry${where} on this side (the base side had ${listPaths(baseInDir)}; ` +
+          `this side has ${headLockfiles.length === 0 ? none : listPaths(headLockfiles)}), ` +
+          `while ${listPaths(manifestsInDir)} still declare${manifestsInDir.length === 1 ? 's' : ''} ` +
+          'dependencies a lockfile would record'
+      );
+    }
   }
   const entries = [...new Set(neededAcknowledgements.filter((entry): entry is string => entry !== null))].sort();
   const unidentifiable = neededAcknowledgements.some((entry) => entry === null);
@@ -970,6 +1040,7 @@ const NESTED_LOCKFILE_CHANGE_REFUSES = false;
 
 const NESTED_LOCKFILE_CHANGED = 'lockfile-nested-changed';
 const NESTED_LOCKFILE_IGNORED = 'lockfile-nested-ignored';
+const NESTED_LOCKFILE_REMOVED = 'lockfile-nested-removed';
 const LOCKFILE_NOT_READ = 'lockfile-not-read';
 const UNREAD_SIBLING = 'lockfile-unread-sibling';
 const DOWNGRADE_ACKNOWLEDGED = 'lockfile-downgrade-acknowledged';
@@ -1015,6 +1086,25 @@ function checkNestedLockfiles(
   const blocking = changed.filter((entryPath) => !isIgnored(entryPath));
 
   const diagnostics: Diagnostic[] = [];
+  // A lockfile below the root that the comparison side had and this side
+  // does not. Removing the file is how its directory stops being judged,
+  // so the removal is said even when nothing in that directory still
+  // declares a dependency (when something does, refuseLockfileDowngrade
+  // has already stopped the scan).
+  const afterPaths = new Set(inventoryOf(after).map((entry) => entry.path));
+  const removed = inventoryOf(before)
+    .filter(isBelowRoot)
+    .filter((entry) => !afterPaths.has(entry.path))
+    .map((entry) => entry.path);
+  if (removed.length > 0) {
+    diagnostics.push({
+      code: NESTED_LOCKFILE_REMOVED,
+      message:
+        `${listPaths(removed)}: ${removed.length === 1 ? 'a lockfile' : 'lockfiles'} below the repository ` +
+        `root present on the comparison side and absent on this side; the lockfile checks no longer ` +
+        `judge ${removed.length === 1 ? 'that directory' : 'those directories'}. Review the removal by hand`,
+    });
+  }
   if (ignored.length > 0) {
     diagnostics.push({
       code: NESTED_LOCKFILE_IGNORED,
@@ -1124,7 +1214,8 @@ export function computeDelta(
         before === null
           ? { entry: undefined }
           : selectEntry(lockfileForManifest(manifest.path, beforeLockfiles), previous ?? dep, 'before');
-      const afterSelection = selectEntry(lockfileForManifest(manifest.path, afterLockfiles), dep, 'after');
+      const afterLockfile = lockfileForManifest(manifest.path, afterLockfiles);
+      const afterSelection = selectEntry(afterLockfile, dep, 'after');
       const selections = [beforeSelection, afterSelection];
 
       const specifierHeld = previous !== undefined && previous.specifier === dep.specifier;
@@ -1154,6 +1245,7 @@ export function computeDelta(
         depType: dep.depType,
         protocol: dep.protocol,
         manifestPath: manifest.path,
+        ...(afterLockfile === null ? {} : { lockfilePath: afterLockfile.path, lockfileFormat: afterLockfile.format }),
         before: beforeSelection.entry,
         after: afterSelection.entry,
       });
