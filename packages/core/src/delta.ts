@@ -432,9 +432,70 @@ function pickCounterpart(after: LockEntry, beforeEntries: LockEntry[]): Counterp
 // entries by the installed name and pnpm by the registry name. First
 // declaration wins, so a name declared in two workspace manifests is
 // attributed consistently rather than by iteration accident.
-function attributeLockNames(manifests: RepoState['manifests']): Map<string, ManifestDep & { manifestPath: string }> {
-  const attribution = new Map<string, ManifestDep & { manifestPath: string }>();
+function parentDirOf(filePath: string): string {
+  const slash = filePath.lastIndexOf('/');
+  return slash === -1 ? '' : filePath.slice(0, slash);
+}
+
+function isPackageJson(filePath: string): boolean {
+  return filePath === 'package.json' || filePath.endsWith('/package.json');
+}
+
+// The lockfile that records this package.json: the one in the same
+// directory, else the nearest ancestor. A Python manifest is not covered
+// by an npm lockfile. A manifest that has its own lockfile is not covered
+// by an ancestor's.
+function lockfileForManifest(
+  manifestPath: string,
+  lockfiles: readonly ParsedLockfile[]
+): ParsedLockfile | null {
+  if (!isPackageJson(manifestPath)) {
+    return null;
+  }
+  const readable = lockfiles.filter(isReadLockfile);
+  let dir = parentDirOf(manifestPath);
+  for (;;) {
+    const match = readable.find((lockfile) => parentDirOf(lockfile.path) === dir);
+    if (match !== undefined) {
+      return match;
+    }
+    if (dir === '') {
+      return null;
+    }
+    dir = parentDirOf(dir);
+  }
+}
+
+function manifestsWithOwnLockfile(
+  manifests: RepoState['manifests'],
+  lockfiles: readonly ParsedLockfile[]
+): Set<string> {
+  const dirs = new Set(lockfiles.filter(isReadLockfile).map((lockfile) => parentDirOf(lockfile.path)));
+  const owned = new Set<string>();
   for (const manifest of manifests) {
+    if (dirs.has(parentDirOf(manifest.path))) {
+      owned.add(manifest.path);
+    }
+  }
+  return owned;
+}
+
+function attributeLockNames(
+  manifests: RepoState['manifests'],
+  lockfilePath: string,
+  owned: ReadonlySet<string>
+): Map<string, ManifestDep & { manifestPath: string }> {
+  const dir = parentDirOf(lockfilePath);
+  // Same directory first, then manifests that do not have a lockfile of
+  // their own (workspace members recorded in the root lockfile). A
+  // manifest that sits beside a different lockfile is not a declaration
+  // of this file's entries.
+  const ordered = [
+    ...manifests.filter((manifest) => parentDirOf(manifest.path) === dir),
+    ...manifests.filter((manifest) => parentDirOf(manifest.path) !== dir && !owned.has(manifest.path)),
+  ];
+  const attribution = new Map<string, ManifestDep & { manifestPath: string }>();
+  for (const manifest of ordered) {
     for (const dep of manifest.deps) {
       for (const key of [dep.name, dep.registryName]) {
         if (!attribution.has(key)) {
@@ -453,12 +514,13 @@ function attributeLockNames(manifests: RepoState['manifests']): Map<string, Mani
 function diffLockEntries(
   before: ParsedLockfile | null,
   after: ParsedLockfile | null,
-  manifests: RepoState['manifests']
+  manifests: RepoState['manifests'],
+  lockfiles: readonly ParsedLockfile[]
 ): { changes: LockEntryChange[]; diagnostics: Diagnostic[] } {
   if (after === null) {
     return { changes: [], diagnostics: [] };
   }
-  const attribution = attributeLockNames(manifests);
+  const attribution = attributeLockNames(manifests, after.path, manifestsWithOwnLockfile(manifests, lockfiles));
   const entryChanges: LockEntryChange[] = [];
   const diagnostics: Diagnostic[] = [];
 
@@ -625,7 +687,9 @@ function declaredLockableDeps(state: RepoState): { manifests: string[]; count: n
   let count = 0;
   for (const manifest of state.manifests) {
     for (const dep of manifest.deps) {
-      if (EXEMPT_PROTOCOLS.has(dep.protocol) || workspaceNames.has(dep.registryName)) {
+      // pypi dependencies are not recorded in an npm or pnpm lockfile, so
+      // they do not count as coverage the lockfile downgrade rule can lose.
+      if (EXEMPT_PROTOCOLS.has(dep.protocol) || dep.protocol === 'pypi' || workspaceNames.has(dep.registryName)) {
         continue;
       }
       count += 1;
@@ -926,12 +990,12 @@ function isBelowRoot(entry: LockfileInventoryEntry): boolean {
   return entry.path.includes('/');
 }
 
-// A lockfile below the repository root is never read by this tool, and a
-// package manager run in that directory installs from it. So a change to
-// its bytes (including a file that is new on this side) is something the
-// run cannot judge. An unknown identity on either side counts as a change.
-// The way out for a file nothing installs from (a test fixture, an
-// example) is ignorePaths, read from the comparison side.
+// A lockfile below the repository root that this tool does not read (yarn,
+// bun, a v1 npm file, a name that is not a regular file). npm and pnpm
+// lockfiles below the root are read and judged, so a change to those is a
+// finding rather than this note. An unknown identity on either side counts
+// as a change. The way out for a file nothing installs from (a test
+// fixture, an example) is ignorePaths, read from the comparison side.
 function checkNestedLockfiles(
   before: RepoState,
   after: RepoState,
@@ -940,6 +1004,7 @@ function checkNestedLockfiles(
   const beforeIds = new Map(inventoryOf(before).map((entry) => [entry.path, entry.blobId]));
   const changed = inventoryOf(after)
     .filter(isBelowRoot)
+    .filter((entry) => !entry.read)
     .filter((entry) => {
       const beforeId = beforeIds.get(entry.path);
       return entry.blobId === null || beforeId === undefined || beforeId === null || beforeId !== entry.blobId;
@@ -970,7 +1035,8 @@ function checkNestedLockfiles(
     'for itself.';
   const message = refuses
     ? `${listPaths(blocking)}: ${one ? 'a lockfile' : 'lockfiles'} below the repository root changed. ` +
-      'This tool reads only the lockfiles at the repository root, so it cannot judge what a package ' +
+      `This tool did not read ${one ? 'it' : 'them'} (it reads npm and pnpm lockfiles, and ` +
+      `${one ? 'this file is not one of those' : 'these files are not'}), so it cannot judge what a package ` +
       `manager would install from ${one ? 'it' : 'them'}; refusing to report a clean pass. ` +
       ignoreHint +
       ' Otherwise review the file by hand and merge with an admin override of the failing check. ' +
@@ -1052,11 +1118,13 @@ export function computeDelta(
       // side selects with the dependency as it was, not as it now is --
       // otherwise a bumped range picks the wrong old entry and the tamper
       // check compares two unrelated resolutions.
+      const beforeLockfiles = before === null ? [] : lockfilesOf(before);
+      const afterLockfiles = lockfilesOf(after);
       const beforeSelection =
         before === null
           ? { entry: undefined }
-          : selectEntry(before.lockfile, previous ?? dep, 'before');
-      const afterSelection = selectEntry(after.lockfile, dep, 'after');
+          : selectEntry(lockfileForManifest(manifest.path, beforeLockfiles), previous ?? dep, 'before');
+      const afterSelection = selectEntry(lockfileForManifest(manifest.path, afterLockfiles), dep, 'after');
       const selections = [beforeSelection, afterSelection];
 
       const specifierHeld = previous !== undefined && previous.specifier === dep.specifier;
@@ -1109,8 +1177,8 @@ export function computeDelta(
     deltaDiagnostics.push({
       code: LOCKFILE_NOT_READ,
       message:
-        `${listPaths(unreadPresent)}: present but not read; this tool reads npm and pnpm lockfiles ` +
-        'at the repository root only' +
+        `${listPaths(unreadPresent)}: present but not read; this tool reads npm and pnpm lockfiles, ` +
+        'and this file is not one of those' +
         (after.lockfile === null
           ? ', so the lockfile-tamper and install-script checks had nothing to read and were skipped; the manifest-level checks still ran'
           : ''),
@@ -1140,28 +1208,43 @@ export function computeDelta(
     });
   }
 
-  const lockEntries = diffLockEntries(before?.lockfile ?? null, after.lockfile, after.manifests);
-
-  // Every other npm or pnpm lockfile at the root is diffed the same way,
-  // against the before-side lockfile it corresponds to (same path first,
-  // then the same format). Which file an install honours is the package
-  // manager's choice, not something this scan can see, so a clean one must
-  // not stand in for a tampered one. Their entries join the same
-  // lockEntryChanges list the checks already walk, each tagged with its own
-  // path and format.
-  const primaryChanges = [...lockEntries.changes];
+  const comparedLockfiles = lockfilesOf(after);
   const beforeLockfiles = before === null ? [] : lockfilesOf(before);
+  // Same path first. A lockfile below the root is compared only with that
+  // path: falling through to another file of the same format would judge
+  // apps/web/package-lock.json against the root lockfile. At the root, a
+  // file with no same-path counterpart still falls back to the same format
+  // and then the primary, which is how two root lockfiles are judged.
+  const counterpartOf = (file: ParsedLockfile): ParsedLockfile | null => {
+    if (before === null) {
+      return null;
+    }
+    const samePath = beforeLockfiles.find((candidate) => candidate.path === file.path);
+    if (samePath !== undefined) {
+      return samePath;
+    }
+    if (file.path.includes('/')) {
+      return null;
+    }
+    return (
+      beforeLockfiles.find((candidate) => candidate.format === file.format) ?? before?.lockfile ?? null
+    );
+  };
+  const lockEntries = diffLockEntries(
+    after.lockfile === null ? null : counterpartOf(after.lockfile),
+    after.lockfile,
+    after.manifests,
+    comparedLockfiles
+  );
+
+  // Every other npm or pnpm lockfile is diffed the same way. Which file an
+  // install honours is the package manager's choice, not something this
+  // scan can see, so a clean one must not stand in for a tampered one.
+  // Their entries join the same lockEntryChanges list the checks already
+  // walk, each tagged with its own path and format.
+  const primaryChanges = [...lockEntries.changes];
   for (const extra of after.extraLockfiles ?? []) {
-    const counterpart =
-      beforeLockfiles.find((candidate) => candidate.path === extra.path) ??
-      beforeLockfiles.find((candidate) => candidate.format === extra.format) ??
-      // A lockfile that exists only on the head side (a new pnpm-lock.yaml
-      // beside an existing package-lock.json) has no same-path or
-      // same-format counterpart, and comparing it to nothing would wave it
-      // through as all-added. The base's primary lockfile, whatever its
-      // format, is the closest thing the base had to say about these names.
-      before?.lockfile ??
-      null;
+    const counterpart = counterpartOf(extra);
     if (before === null) {
       deltaDiagnostics.push({
         code: AUDIT_NO_TAMPER_COMPARISON,
@@ -1172,7 +1255,7 @@ export function computeDelta(
           'url-source signals ran',
       });
     }
-    const extraDiff = diffLockEntries(counterpart, extra, after.manifests);
+    const extraDiff = diffLockEntries(counterpart, extra, after.manifests, comparedLockfiles);
     const uncomparable = extraDiff.changes.filter((entry) => entry.before === undefined).length;
     if (before !== null && uncomparable > 0) {
       deltaDiagnostics.push({

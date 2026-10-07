@@ -347,7 +347,7 @@ describe('lockfile detection', () => {
 
 describe('manifest discovery', () => {
   test('expands the npm workspaces field one level', async () => {
-    await write('package.json', manifestJson({}, { workspaces: ['packages/*', 'tools/build'] }));
+    await write('package.json', manifestJson({}, { workspaces: ['packages/*', 'tools/builder'] }));
     await write('packages/a/package.json', JSON.stringify({ name: 'a' }));
     await write('packages/b/package.json', JSON.stringify({ name: 'b' }));
     // A directory under the glob with no manifest of its own, and a
@@ -355,7 +355,7 @@ describe('manifest discovery', () => {
     // workspace package.
     await write('packages/fixtures/data.txt', 'not a package\n');
     await write('packages/README.md', 'not a package\n');
-    await write('tools/build/package.json', JSON.stringify({ name: 'build' }));
+    await write('tools/builder/package.json', JSON.stringify({ name: 'builder' }));
 
     const { after } = await loadStates(repo, { kind: 'audit' });
 
@@ -363,7 +363,7 @@ describe('manifest discovery', () => {
       'package.json',
       'packages/a/package.json',
       'packages/b/package.json',
-      'tools/build/package.json',
+      'tools/builder/package.json',
     ]);
   });
 
@@ -376,7 +376,7 @@ describe('manifest discovery', () => {
     expect(manifestPaths(after)).toEqual(['package.json', 'apps/site/package.json'].sort());
   });
 
-  test('expands the pnpm-workspace.yaml packages list and honours exclusions', async () => {
+  test('a negated pnpm workspace pattern does not hide that package.json', async () => {
     await write('package.json', manifestJson({}));
     await write(
       'pnpm-workspace.yaml',
@@ -387,7 +387,14 @@ describe('manifest discovery', () => {
 
     const { after } = await loadStates(repo, { kind: 'audit' });
 
-    expect(manifestPaths(after)).toEqual(['package.json', 'packages/a/package.json']);
+    // Workspace exclusions still shape which directories the glob names.
+    // They no longer decide which manifests are read: a package.json on
+    // disk is resolved whether or not a workspace pattern names it.
+    expect(manifestPaths(after)).toEqual([
+      'package.json',
+      'packages/a/package.json',
+      'packages/ignored/package.json',
+    ]);
   });
 
   test('a package listed by both workspace sources is discovered once', async () => {
@@ -424,9 +431,11 @@ describe('manifest discovery', () => {
     });
   });
 
-  // The expected directories are what npm 10.9.8's own workspace mapper
+  // `dirs` is what npm 10.9.8's own workspace mapper
   // (@npmcli/map-workspaces) returns for the same tree and the same
-  // "workspaces" list.
+  // "workspaces" list. The scan no longer stops at that list: every
+  // package.json in the tree is resolved, and a pattern npm cannot
+  // expand still aborts.
   describe('package.json workspaces resolve to the directories npm maps', () => {
     const TREE = ['packages/a', 'packages/b', 'packages/b/a', 'packages/b/c', 'packages/c', 'apps/web', 'packages/.hidden'];
     const NPM_MAPS: Array<[string[], string[]]> = [
@@ -466,18 +475,21 @@ describe('manifest discovery', () => {
     ];
 
     for (const [workspaces, dirs] of NPM_MAPS) {
-      test(`${JSON.stringify(workspaces)} maps to ${JSON.stringify(dirs)}`, async () => {
+      test(`${JSON.stringify(workspaces)} still resolves every package.json`, async () => {
         await write('package.json', manifestJson({}, { workspaces }));
         for (const dir of TREE) {
           await write(`${dir}/package.json`, JSON.stringify({ name: dir.replace(/\//g, '-') }));
         }
         await git('add', '-A');
 
+        const everyManifest = ['package.json', ...TREE.map((dir) => `${dir}/package.json`)].sort();
         for (const mode of [{ kind: 'audit' as const }, { kind: 'staged' as const }]) {
           const { after } = await loadStates(repo, mode);
-          expect(manifestPaths(after)).toEqual(
-            ['package.json', ...dirs.map((dir) => `${dir}/package.json`)].sort()
-          );
+          // The glob still has to parse (a pattern npm cannot expand
+          // aborts). It no longer limits the scan: every package.json is
+          // resolved, including ones the pattern would leave out.
+          expect(manifestPaths(after)).toEqual(everyManifest);
+          expect(dirs.every((dir) => everyManifest.includes(`${dir}/package.json`))).toBe(true);
         }
       });
     }
@@ -544,7 +556,7 @@ describe('manifest discovery', () => {
 
     const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
 
-    expect(manifestPaths(after)).toEqual(['package.json']);
+    expect(manifestPaths(after)).toEqual(['package.json', 'packages/app/package.json']);
     expect(diagnostics.map((d) => d.code)).toContain('workspace-glob-unsupported');
   });
 
@@ -1045,20 +1057,20 @@ describe('the scanned path itself', () => {
     expect(diagnostics).toEqual([]);
   });
 
-  test('every mode anchors manifest paths to the same repository root', async () => {
+  test('every mode anchors manifest paths to the repository root and honours the named directory', async () => {
     // manifestPath feeds finding fingerprints, so the same file has to
-    // carry the same path whichever mode and whichever working directory
-    // produced it -- otherwise a stored baseline stops matching.
+    // carry the same path whichever mode produced it. The named directory
+    // is what is scanned: the root manifest is outside packages/a.
     await write('package.json', manifestJson({ 'left-pad': '1.0.0' }));
-    await write('packages/a/keep.txt', 'a subdirectory to scan from\n');
+    await write('packages/a/package.json', JSON.stringify({ name: 'a', version: '1.0.0' }));
     await commitAll('first');
     const subdirectory = path.join(repo, 'packages', 'a');
 
     const staged = await loadStates(subdirectory, { kind: 'staged' });
     const audited = await loadStates(subdirectory, { kind: 'audit' });
 
-    expect(manifestPaths(staged.after)).toEqual(['package.json']);
-    expect(manifestPaths(audited.after)).toEqual(['package.json']);
+    expect(manifestPaths(staged.after)).toEqual(['packages/a/package.json']);
+    expect(manifestPaths(audited.after)).toEqual(['packages/a/package.json']);
   });
 });
 

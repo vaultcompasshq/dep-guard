@@ -978,9 +978,10 @@ quiet:
   `npm:` alias needs no special handling: pnpm's `packages` map is already
   keyed by registry identity, not by whatever name a dependent's own alias
   used to reach it.
-- More than one lockfile at the root -- every npm and pnpm lockfile present
-  is checked (`npm-shrinkwrap.json`, `package-lock.json`, `pnpm-lock.yaml`),
-  and a `multiple-lockfiles` diagnostic names them. Which one an install
+- More than one lockfile in one directory -- every npm and pnpm lockfile
+  present is checked (`npm-shrinkwrap.json`, `package-lock.json`,
+  `pnpm-lock.yaml`), at the root and below it, and a `multiple-lockfiles`
+  diagnostic names them. Which one an install
   honours depends on the package manager in use, so a clean file never
   stands in for a tampered one. The run summary names the first lockfile
   dep-guard reads. A `yarn.lock` or `bun.lock` beside them is not parsed;
@@ -1021,14 +1022,25 @@ quiet:
   `continue-on-error` on the workflow step) and restore it afterwards. The
   migration pull request cannot clear the rule for itself, and an advisory
   mode does not help, because this is a could-not-run, not a finding.
-- Lockfiles below the repository root -- not read. Every tracked file with
-  a lockfile name is listed, and one whose bytes differ from the base is
-  named in the `lockfile-nested-changed` diagnostic: dep-guard did not read
-  it, so the run says nothing about what would be installed from it. A path
-  covered by `ignorePaths` (read from the base on a pull-request run) is
-  noted as `lockfile-nested-ignored` instead. `lockfile-not-read` names
-  every lockfile below the root, and, when no root lockfile was read, every
-  root lockfile name that is present.
+- Lockfiles below the repository root. npm and pnpm lockfiles are read
+  at any depth, and a finding names the manifest or lockfile it came from.
+  `package.json`, `pyproject.toml` and `requirements.txt` are read at any
+  depth too. A `pyproject.toml` that only holds `[tool.*]` config has no
+  dependencies; that file alone does not make the scan a could-not-run when
+  another manifest or lockfile resolved. The scan skips `node_modules`,
+  `.venv`, `venv`, `dist`, `build`, `vendor` and `vendored`, and it skips
+  paths git ignores. `dep-guard scan <path>` reads manifests under that
+  directory; reported paths stay relative to the git root, and config and
+  the baseline are still read from the git root. A lockfile this tool does
+  not read (yarn, bun, a v1 npm file) below the root is still not judged:
+  one whose bytes differ from the base is named in `lockfile-nested-changed`.
+  A path covered by `ignorePaths` (read from the base on a pull-request run)
+  drops findings under that path, and an unread lockfile there is noted as
+  `lockfile-nested-ignored` instead. `lockfile-not-read` names every
+  lockfile this tool does not read. `-r` lines in a requirements file are
+  not followed; a file named `requirements.txt` is read on its own.
+  `--staged`, `--base` and `--trust-base` compare each manifest with the
+  same path on the other side.
 - Workspace patterns -- a `workspaces` list in `package.json` is resolved
   the way npm's own workspace mapper resolves it, checked against npm
   10.9.8: patterns in order, a run of leading `!` negating when odd, one

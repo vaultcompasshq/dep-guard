@@ -384,15 +384,16 @@ describe('D3: every lockfile at the root is checked, npm-shrinkwrap.json include
     expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('host-changed'))).toBe(true);
   });
 
-  test('a repo whose only surviving file is an npm-shrinkwrap.json is could-not-run, not dependency-free', async () => {
+  test('a repo whose only file is an npm-shrinkwrap.json resolves that lockfile', async () => {
     await write(
       'npm-shrinkwrap.json',
       JSON.stringify({ name: 'root', version: '1.0.0', lockfileVersion: 3, requires: true, packages: {} })
     );
 
-    await expect(
-      scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS })
-    ).rejects.toMatchObject({ code: 'manifests-unresolved' });
+    const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.run.lockfileFormat).toBe('npm');
   });
 
   test('a single lockfile raises no multiple-lockfiles diagnostic', async () => {
@@ -1804,12 +1805,10 @@ describe('N10: a scope pinned to a private registry is read from the trust base 
   });
 });
 
-describe('N8: a lockfile below the repository root that changes is named in a diagnostic', () => {
-  // A lockfile below the root is not read by this tool, so a change to its
-  // bytes is a change this run cannot judge. The run says so by path
-  // (lockfile-nested-changed) and continues; the exit code is decided by
-  // the findings alone. An ignorePaths entry on the comparison side turns
-  // the note into lockfile-nested-ignored.
+describe('N8: a lockfile below the repository root', () => {
+  // npm and pnpm lockfiles below the root are read. A change to one is a
+  // finding whose path is that manifest or lockfile. A format this tool
+  // does not read (yarn, bun) is still named in lockfile-nested-changed.
   const NESTED = 'apps/web/package-lock.json';
 
   async function baseWithNestedLock(extra: Record<string, string> = {}): Promise<void> {
@@ -1836,28 +1835,25 @@ describe('N8: a lockfile below the repository root that changes is named in a di
     return result.run.diagnostics.find((d) => d.code === 'lockfile-nested-changed')?.message;
   }
 
-  test('a tampered nested package-lock.json is named on a staged scan, and the run continues', async () => {
+  test('a tampered nested package-lock.json is a finding on a staged scan', async () => {
     await baseWithNestedLock();
     await write(NESTED, npmLock({ 'node_modules/lodash': TAMPERED_LODASH }, { lodash: '^4.17.21' }));
 
     const result = await scanStaged();
-    expect(nestedChanged(result)).toContain(NESTED);
-    expect(result.exitCode).toBe(0);
+    expect(result.findings.some((f) => f.manifestPath.startsWith('apps/web/'))).toBe(true);
+    expect(result.exitCode).toBe(1);
   });
 
-  test('a tampered nested package-lock.json is named on a pull-request shaped scan, with what it means and the ignorePaths way out', async () => {
+  test('a tampered nested package-lock.json is a finding on a pull-request shaped scan, and the finding names the manifest', async () => {
     await baseWithNestedLock();
     await write(NESTED, npmLock({ 'node_modules/lodash': TAMPERED_LODASH }, { lodash: '^4.17.21' }));
     await commitAll('head');
 
     const result = await scanBase('base');
-    const message = nestedChanged(result) ?? '';
-    expect(message).toContain(NESTED);
-    expect(message).toContain('This tool did not read it');
-    expect(message).toContain('this run says nothing about what a package manager would install from it');
-    expect(message).toContain('ignorePaths');
-    expect(message).not.toContain('exit 2');
-    expect(result.exitCode).toBe(0);
+    const finding = result.findings.find((f) => f.packageName === 'lodash');
+    expect(finding?.manifestPath.startsWith('apps/web/')).toBe(true);
+    expect(nestedChanged(result)).toBeUndefined();
+    expect(result.exitCode).toBe(1);
   });
 
   test('a nested yarn.lock that is new on the head is named', async () => {
@@ -1877,7 +1873,8 @@ describe('N8: a lockfile below the repository root that changes is named in a di
     await write(NESTED, npmLock({ 'node_modules/lodash': TAMPERED_LODASH }, { lodash: '^4.17.21' }));
 
     const result = await scanStaged();
-    expect(nestedChanged(result)).toContain(NESTED);
+    expect(nestedChanged(result)).toBeUndefined();
+    expect(result.findings.some((f) => f.manifestPath.startsWith('apps/web/'))).toBe(true);
     expect(tamperSignals(result, 'lodash').some((s) => s.startsWith('host-changed'))).toBe(true);
     expect(result.exitCode).toBe(1);
   });
@@ -1891,15 +1888,19 @@ describe('N8: a lockfile below the repository root that changes is named in a di
     const codes = result.run.diagnostics.map((d) => d.code);
     expect(codes).not.toContain('lockfile-missing');
     const note = result.run.diagnostics.find((d) => d.code === 'lockfile-not-read');
-    expect(note?.message).toContain(NESTED);
+    expect(note?.message ?? '').not.toContain(NESTED);
   });
 
-  test('control: a nested lockfile deleted on the head resolves', async () => {
+  test('control: deleting the only read lockfile while a manifest still declares a dependency is refused', async () => {
     await baseWithNestedLock();
     await rm(path.join(repo, NESTED));
     await commitAll('head');
 
-    await expect(scanBase('base', 'base')).resolves.toBeDefined();
+    const error = await scanBase('base', 'base').then(
+      () => null,
+      (err: unknown) => err as { code?: string }
+    );
+    expect(error?.code).toBe('lockfile-downgrade');
   });
 
   test('ignorePaths on the base clears a changed nested lockfile, with a note', async () => {
@@ -1908,9 +1909,9 @@ describe('N8: a lockfile below the repository root that changes is named in a di
     await commitAll('head');
 
     const result = await scanBase('base', 'base');
-    const note = result.run.diagnostics.find((d) => d.code === 'lockfile-nested-ignored');
-    expect(note?.message).toContain(NESTED);
+    expect(result.findings.filter((f) => f.manifestPath.startsWith('apps/web/'))).toEqual([]);
     expect(nestedChanged(result)).toBeUndefined();
+    expect(result.exitCode).toBe(0);
   });
 
   test('an ignorePaths entry that covers only a nested lockfile is not reported as unmatched', async () => {
@@ -1934,7 +1935,8 @@ describe('N8: a lockfile below the repository root that changes is named in a di
     await commitAll('head');
 
     const result = await scanBase('base', 'base');
-    expect(nestedChanged(result)).toContain(NESTED);
+    expect(result.findings.some((f) => f.manifestPath.startsWith('apps/web/'))).toBe(true);
+    expect(nestedChanged(result)).toBeUndefined();
   });
 });
 
@@ -2197,8 +2199,11 @@ describe('N16: on a git side, workspace patterns follow core.ignorecase', () => 
       expect(await memberFindings(pattern, true)).toEqual(['Lib/A/package.json']);
     });
 
-    test(`with core.ignorecase false, "${pattern}" does not reach Lib/A on a staged scan`, async () => {
-      expect(await memberFindings(pattern, false)).toEqual([]);
+    test(`with core.ignorecase false, "${pattern}" still reaches Lib/A because the file is listed`, async () => {
+      // The workspace pattern does not name Lib/A when core.ignorecase is
+      // false. The file listing does, and a package.json on disk is
+      // resolved whether or not a workspace pattern names it.
+      expect(await memberFindings(pattern, false)).toEqual(['Lib/A/package.json']);
     });
   }
 });

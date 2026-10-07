@@ -3,9 +3,9 @@ import type { ParsedLockfile } from './lockfiles/types.js';
 import type { ParsedManifest } from './manifest.js';
 import { withoutByteOrderMark } from './text.js';
 
-// A root lockfile whose entries this tool parses: npm with a "packages"
-// map, or pnpm. Everything else (a v1 npm file, yarn, bun) is present but
-// unread.
+// A lockfile whose entries this tool parses, at the root or below it: npm
+// with a "packages" map, or pnpm. Everything else (a v1 npm file, yarn,
+// bun) is present but unread.
 export function isReadLockfile(lockfile: ParsedLockfile): boolean {
   if (lockfile.notRead === true) {
     return false;
@@ -27,8 +27,9 @@ export function isReadLockfile(lockfile: ParsedLockfile): boolean {
 export interface LockfileInventoryEntry {
   // Repository path, "/"-separated. A root lockfile has no "/" in it.
   path: string;
-  // True only for a root lockfile whose entries this tool parses: an npm
-  // lockfile with a "packages" map, or a pnpm lockfile.
+  // True for an npm lockfile with a "packages" map, or a pnpm lockfile,
+  // at the repository root or below it. A yarn or bun lockfile, and a v1
+  // npm file, stay false.
   read: boolean;
   // The git blob id of the file's bytes on this side, or null when it
   // could not be computed (a directory or other non-file under a lockfile

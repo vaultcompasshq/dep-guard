@@ -22,11 +22,13 @@ import {
   refsNameSameTree,
   matchGlobPath,
   probeManifestOnDisk,
+  relativeScanPrefix,
   resolveScanRoot,
 } from './git-source.js';
 import type { ScanMode } from './git-source.js';
 import { assertBaseNotHeadUnderTrustBase, loadConfigAtRef, loadTrustedControls } from './trust-base.js';
 import type { ControlShapeChange, TrustedControls } from './trust-base.js';
+import { isReadLockfile, type RepoState } from './state.js';
 import { DepGuardError } from './types.js';
 import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
 import { applyTyposquatAsymmetry } from './online/asymmetry.js';
@@ -842,6 +844,16 @@ function buildResult(
 // The full pipeline: loadConfig -> loadCorpus -> loadStates -> computeDelta
 // -> run all six checks -> fingerprint -> ignorePaths/baseline filter ->
 // evaluateGate.
+function sideResolvedSomething(state: RepoState): boolean {
+  if (state.manifests.length > 0) {
+    return true;
+  }
+  if (state.lockfile !== null && isReadLockfile(state.lockfile)) {
+    return true;
+  }
+  return (state.extraLockfiles ?? []).some(isReadLockfile);
+}
+
 export async function scan(opts: {
   repoRoot: string;
   mode: ScanMode;
@@ -880,6 +892,9 @@ export async function scan(opts: {
   // opts.repoRoot and can still raise its own scan-anchor-differs notice
   // when the two disagree.
   const root = await resolveScanRoot(opts.repoRoot, opts.mode);
+  // Manifests under this prefix are the scan. Empty when the named path
+  // is the git root. Config and the baseline stay on `root` either way.
+  const prefix = await relativeScanPrefix(opts.repoRoot, root);
   // Runs before the corpus is loaded and before any state is read, so an
   // unusable trust base is could-not-run with NOTHING scanned, which is
   // what the exit-2 message promises. Null outside pull-request mode, and
@@ -905,8 +920,12 @@ export async function scan(opts: {
   // could-not-run" invariant, adapted to dep-guard's own unit of work: a
   // manifest, not a file. statePair.after is the side under judgment in
   // every mode (the working tree for audit/base, the index for staged), so
-  // zero resolved manifests on it is the dep-guard analogue of a walk that
-  // opened nothing.
+  // nothing resolved on it is the dep-guard analogue of a walk that
+  // opened nothing. A parsed manifest counts even when it declares no
+  // dependencies (a pyproject.toml that holds only [tool.*] config), and a
+  // read npm or pnpm lockfile counts on its own. That zero-dependency
+  // manifest must not, by itself, turn a scan that resolved something
+  // else into could-not-run.
   //
   // Zero resolved manifests is ambiguous on its own, unlike that sibling
   // scanner's zero-files case: it is both what a genuinely dependency-free
@@ -933,8 +952,8 @@ export async function scan(opts: {
   // normal not-yet-staged file as a misrooted scan on every commit through
   // the init pre-commit hook (`dep-guard scan --staged`). The sibling
   // scanner makes this same exclusion for the same reason.
-  if (opts.mode.kind !== 'staged' && statePair.after.manifests.length === 0) {
-    const manifestOnDisk = await probeManifestOnDisk(root);
+  if (opts.mode.kind !== 'staged' && !sideResolvedSomething(statePair.after)) {
+    const manifestOnDisk = await probeManifestOnDisk(root, prefix);
     if (manifestOnDisk) {
       throw new DepGuardError(
         'found a manifest on disk but resolved none; the scan root may be wrong. In CI ' +
@@ -964,7 +983,7 @@ export async function scan(opts: {
           statePair.before !== null &&
           (await refsNameSameTree(root, opts.mode.ref, controls.ref))
         ? statePair.before
-        : await loadRefState(root, controls.ref, statePair.diagnostics);
+        : await loadRefState(root, controls.ref, statePair.diagnostics, prefix);
   const deltaWith = (acknowledgedLockfiles: readonly string[]): DependencyDelta =>
     computeDelta(statePair.before, statePair.after, {
       extraComparisonSides: trustState === null ? [] : [trustState],

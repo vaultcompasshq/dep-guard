@@ -12,7 +12,10 @@ export type Protocol =
   | 'file'
   | 'git'
   | 'url'
-  | 'alias';
+  | 'alias'
+  // A Python package index dependency (requirements.txt or pyproject.toml).
+  // Not an npm registry name, so the npm corpus checks do not see it.
+  | 'pypi';
 
 export interface ManifestDep {
   name: string; // the key in package.json
