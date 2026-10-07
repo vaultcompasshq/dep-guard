@@ -106,7 +106,8 @@ function requirementToDep(line: string): ManifestDep | null {
     return null;
   }
 
-  const direct = body.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)(\[[^\]]*\])?\s*@\s*(\S+)$/);
+  // PEP 508 allows whitespace between the name and its extras bracket.
+  const direct = body.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*@\s*(\S+)$/);
   if (direct !== null && direct[1] !== undefined && direct[3] !== undefined) {
     return dep(direct[1], direct[3], protocolOfUrl(direct[3]));
   }
@@ -275,6 +276,12 @@ export function parsePyproject(filePath: string, content: string): ParsedManifes
     const top = asRecord(poetry.dependencies);
     if (top !== null) {
       deps.push(...poetryDeps(filePath, top, 'dependencies'));
+    }
+    // Poetry 1.1 and earlier kept development dependencies in their own
+    // table; a url or git source there is as installable as any other.
+    const legacyDev = asRecord(poetry['dev-dependencies']);
+    if (legacyDev !== null) {
+      deps.push(...poetryDeps(filePath, legacyDev, 'devDependencies'));
     }
     const groups = asRecord(poetry.group);
     if (groups !== null) {

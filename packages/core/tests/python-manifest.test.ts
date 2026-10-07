@@ -1,4 +1,4 @@
-import { parsePyproject } from '../src/python-manifest.js';
+import { parsePyproject, parseRequirements } from '../src/python-manifest.js';
 import { DepGuardError } from '../src/types.js';
 
 const REV = '0123456789abcdef0123456789abcdef01234567';
@@ -123,5 +123,27 @@ describe('parsePyproject', () => {
     expect(caught).toBeInstanceOf(DepGuardError);
     expect((caught as DepGuardError).code).toBe('manifest-parse');
     expect((caught as DepGuardError).message).toContain('apps/bad/pyproject.toml');
+  });
+});
+
+describe('review follow-ups', () => {
+  test('a space before the extras bracket still makes a URL requirement a git source', () => {
+    const parsed = parsePyproject(
+      'pyproject.toml',
+      ['[project]', 'name = "x"', 'dependencies = ["name [extra] @ git+https://example.com/r.git@abc"]', ''].join('\n')
+    );
+    expect(parsed.deps).toContainEqual(expect.objectContaining({ name: 'name', protocol: 'git' }));
+    const reqs = parseRequirements('requirements.txt', 'name [extra] @ https://example.com/p.whl\n');
+    expect(reqs.deps).toContainEqual(expect.objectContaining({ name: 'name', protocol: 'url' }));
+  });
+
+  test('a legacy poetry dev-dependencies table is read as devDependencies', () => {
+    const parsed = parsePyproject(
+      'pyproject.toml',
+      ['[tool.poetry.dev-dependencies]', 'foo = { url = "https://example.com/p.whl" }', ''].join('\n')
+    );
+    expect(parsed.deps).toContainEqual(
+      expect.objectContaining({ name: 'foo', protocol: 'url', depType: 'devDependencies' })
+    );
   });
 });

@@ -733,19 +733,18 @@ function coveringDirs(state: RepoState): Set<string> {
   return new Set(coveringLockfiles(state).map((lockfile) => parentDirOf(lockfile.path)));
 }
 
-// Root lockfiles that are unread on `after` and whose bytes differ from the
-// same path on `before`. A path new on `after`, a path read on `before`,
-// and an unknown identity on either side all count as different.
-function changedUnreadRootLockfiles(before: RepoState, after: RepoState): string[] {
-  const beforeRoot = new Map(
-    inventoryOf(before)
-      .filter((entry) => !isBelowRoot(entry))
-      .map((entry) => [entry.path, entry])
-  );
+// Lockfiles in one of `dirs` that are unread on `after` and whose bytes
+// differ from the same path on `before`. A path new on `after`, a path
+// read on `before`, and an unknown identity on either side all count as
+// different. `dirs` holds the directories that had a read lockfile with
+// entries on `before`: an unread lockfile only matters beside one this
+// tool reads, in the same directory.
+function changedUnreadLockfiles(before: RepoState, after: RepoState, dirs: ReadonlySet<string>): string[] {
+  const beforeByPath = new Map(inventoryOf(before).map((entry) => [entry.path, entry]));
   return inventoryOf(after)
-    .filter((entry) => !isBelowRoot(entry) && !entry.read)
+    .filter((entry) => !entry.read && dirs.has(parentDirOf(entry.path)))
     .filter((entry) => {
-      const previous = beforeRoot.get(entry.path);
+      const previous = beforeByPath.get(entry.path);
       return (
         previous === undefined ||
         previous.read ||
@@ -834,10 +833,8 @@ function refuseLockfileDowngrade(
   // judged side while a manifest it recorded still declares dependencies.
   const lostDirs = new Set<string>();
   if (baseCovering.length > 0) {
-    if (baseDirs.has('')) {
-      for (const entryPath of changedUnreadRootLockfiles(before, after)) {
-        unreadChanged.set(entryPath, entryPath);
-      }
+    for (const entryPath of changedUnreadLockfiles(before, after, baseDirs)) {
+      unreadChanged.set(entryPath, entryPath);
     }
     for (const entryPath of changedSkippedDocuments(before, after)) {
       if (baseDirs.has(parentDirOf(entryPath))) {
@@ -924,13 +921,15 @@ function refuseLockfileDowngrade(
   const reasons: string[] = [];
   if (blockingPaths.length > 0) {
     const paths = [...blockingPaths].sort();
+    const allRoot = [...unreadChanged.keys()].every((entryPath) => !entryPath.includes('/'));
+    const where = allRoot ? 'at the repository root' : 'below the repository root';
     reasons.push(
       `${listPaths(paths)}: ${
         paths.length === 1
-          ? 'a lockfile at the repository root that this tool does not read is'
-          : 'lockfiles at the repository root that this tool does not read are'
-      } new or changed in this change, while the base side has a lockfile this tool reads ` +
-        `(${listPaths(basePaths)})`
+          ? `a lockfile ${where} that this tool does not read is`
+          : `lockfiles ${where} that this tool does not read are`
+      } new or changed in this change, while the base side has a lockfile this tool reads in the ` +
+        `same directory (${listPaths(basePaths)})`
     );
   }
   if (coverageBlocks) {

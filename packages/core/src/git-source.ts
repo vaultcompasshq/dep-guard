@@ -1674,14 +1674,23 @@ async function loadState(
     if (content === null) {
       continue;
     }
-    if (isPythonManifestPath(relPath) && isIgnoredPath(relPath)) {
+    // A Python manifest that does not parse is a per-file failure. When
+    // ignorePaths from the comparison side covers it, the file is skipped
+    // with a note and the scan goes on; otherwise the failure stands, so a
+    // change cannot clear its own parse error. A file that parses is read
+    // whether or not it is ignored: its findings are filtered later, like
+    // any other path under ignorePaths.
+    try {
+      manifests.push(parseProjectManifest(relPath, content));
+    } catch (err) {
+      if (!(isPythonManifestPath(relPath) && isIgnoredPath(relPath))) {
+        throw err;
+      }
       diagnostics.push({
         code: MANIFEST_UNPARSED,
         message: `${relPath}: not parsed; covered by ignorePaths`,
       });
-      continue;
     }
-    manifests.push(parseProjectManifest(relPath, content));
   }
 
   const lockfileDirs = uniquePaths(listedLockfiles.map(parentDir)).sort((left, right) => {

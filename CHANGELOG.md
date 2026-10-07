@@ -37,8 +37,8 @@ each:
   while a manifest it recorded still declares dependencies, even when a
   root lockfile remains. Clear it by acknowledging the removed bytes in
   `acknowledgedLockfiles` on the base, as the message prints.
-- `manifest-parse` (exit 2) for a `pyproject.toml` or `requirements.txt`
-  that does not parse now names the path. Clear it by fixing the file, or
+- `manifest-parse` (exit 2) for a `pyproject.toml` that does not parse
+  now names the path. Clear it by fixing the file, or
   by covering a file nothing installs from with `ignorePaths` on the base,
   which skips it with a note instead.
 
@@ -56,6 +56,23 @@ each:
   `package-lock.json` beside a changed root `yarn.lock` is still refused.
 - A finding from a lockfile below the root names that lockfile, once, not
   the root lockfile beside it.
+- An unread lockfile (yarn, bun, a v1 npm file) that changes beside a read
+  lockfile in the same directory below the root is refused as a downgrade,
+  the way a root one is.
+- A poetry `[tool.poetry.dev-dependencies]` table is read, and a
+  `name [extra] @ <url>` requirement with a space before the extras is a
+  git or url source.
+- A `pyproject.toml` or `requirements.txt` under `ignorePaths` that parses
+  is still read; only one that does not parse is skipped with a note.
+
+### Changed
+
+- `dep-guard scan <path>` reads that directory and nothing above it, so a
+  lockfile in an ancestor directory is not applied; the scan names it in
+  `lockfile-outside-prefix`. On 0.10.1 a scan of a subdirectory still read
+  the root lockfile. A full gate is a scan of the repository root, and the
+  Action's `path` input should stay `.` unless the directory is the whole
+  project.
 
 ### Added
 

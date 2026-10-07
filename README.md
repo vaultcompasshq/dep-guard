@@ -475,8 +475,8 @@ allowed there, on an assumption the rule does not enforce: that a newer scanner
 is at least as strict. That assumption has already failed once: 0.11.0 could
 skip a workspace member or a lockfile under a directory named `build`,
 `dist`, `vendor`, `vendored`, `venv` or `.venv`, and is deprecated on npm.
-Use 0.10.1, or 0.11.1 or newer; do not pin 0.11.0. Nothing bounds a forward pin. The comparison is against
-a constant in `action.yml`, which comes from the ref your workflow's `uses:`
+Use 0.10.1, or 0.11.1 or newer; do not pin 0.11.0. Nothing bounds a forward
+pin. The comparison is against a constant in `action.yml`, which comes from the ref your workflow's `uses:`
 names rather than from the pull request's tree. That holds when your workflow
 names this action by owner and ref; if it names a LOCAL PATH instead, the
 `./some/dir` form, `action.yml` is read out of the pull request's own tree, so
