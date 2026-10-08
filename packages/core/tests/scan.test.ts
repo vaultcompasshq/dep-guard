@@ -196,16 +196,16 @@ describe('scan', () => {
     test('a directory-style ignore entry drops findings from every manifest underneath it', async () => {
       await write(
         '.dep-guard.json',
-        JSON.stringify({ ignorePaths: ['packages/widgets'] })
+        JSON.stringify({ ignorePaths: ['packages/vendored'] })
       );
       await write('package.json', JSON.stringify({ name: 'root', workspaces: ['packages/*'] }));
       await write(
-        'packages/widgets/package.json',
+        'packages/vendored/package.json',
         JSON.stringify({ name: 'vendored', dependencies: {} })
       );
       await commitAll('first');
       await write(
-        'packages/widgets/package.json',
+        'packages/vendored/package.json',
         JSON.stringify({
           name: 'vendored',
           dependencies: { 'reeact-definitely-not-real': '1.0.0' },
@@ -216,6 +216,7 @@ describe('scan', () => {
       const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
 
       expect(result.findings).toHaveLength(0);
+      expect(result.ignored).toBe(1);
       expect(result.exitCode).toBe(0);
     });
   });
@@ -358,15 +359,15 @@ describe('scan', () => {
   describe('ignorePaths coverage diagnostic', () => {
     test('an entry that matches no finding path is named in a diagnostic, and the finding is not dropped', async () => {
       // The natural-looking "packages/*" does not match a manifest one
-      // level deeper ("packages/widgets/package.json" is three segments,
+      // level deeper ("packages/vendored/package.json" is three segments,
       // "packages/*" is two) -- the matcher compares whole paths, not
       // prefixes, once a wildcard is involved.
       await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['packages/*'] }));
       await write('package.json', JSON.stringify({ name: 'root', workspaces: ['packages/*'] }));
-      await write('packages/widgets/package.json', JSON.stringify({ name: 'vendored', dependencies: {} }));
+      await write('packages/vendored/package.json', JSON.stringify({ name: 'vendored', dependencies: {} }));
       await commitAll('first');
       await write(
-        'packages/widgets/package.json',
+        'packages/vendored/package.json',
         JSON.stringify({ name: 'vendored', dependencies: { 'reeact-definitely-not-real': '1.0.0' } })
       );
       await git('add', '-A');
@@ -1702,5 +1703,63 @@ describe('a bump beside an unrelated second entry of the same name stays quiet',
 
     expect(result.findings.filter((finding) => finding.ruleId === 'install-script')).toEqual([]);
     expect(result.exitCode).toBe(0);
+  });
+});
+
+describe('a skipped directory name does not hide a declared package or a lockfile', () => {
+  test('a dependency added in a workspace member named build is a finding', async () => {
+    await write(
+      'package.json',
+      JSON.stringify({ name: 'root', version: '1.0.0', workspaces: ['packages/*'] })
+    );
+    await write('packages/web/package.json', JSON.stringify({ name: 'web', dependencies: {} }));
+    await write('packages/build/package.json', JSON.stringify({ name: 'build', dependencies: {} }));
+    await commitAll('first');
+    await write(
+      'packages/build/package.json',
+      JSON.stringify({
+        name: 'build',
+        dependencies: { 'reeact-definitely-not-real': '1.0.0' },
+      })
+    );
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'main' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.findings.some((finding) => finding.manifestPath === 'packages/build/package.json')).toBe(
+      true
+    );
+  });
+
+  test('a resolved URL changed in a lockfile under tools/build is a finding', async () => {
+    await write('package.json', manifestJson({}));
+    await write('tools/build/package.json', JSON.stringify({ name: 'build', dependencies: { lodash: '^4.17.21' } }));
+    await write(
+      'tools/build/package-lock.json',
+      npmLockJson({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' })
+    );
+    await commitAll('first');
+    await write(
+      'tools/build/package-lock.json',
+      npmLockJson(
+        {
+          'node_modules/lodash': {
+            version: '4.17.21',
+            resolved: 'https://evil.example.com/lodash/-/lodash-4.17.21.tgz',
+            integrity: 'sha512-evilevilevil',
+          },
+        },
+        { lodash: '^4.17.21' }
+      )
+    );
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'main' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(signalsFor(result.findings, 'lodash').some((signal) => signal.startsWith('host-changed:'))).toBe(
+      true
+    );
+    const finding = result.findings.find((item) => item.packageName === 'lodash');
+    expect(finding?.lockfilePath).toBe('tools/build/package-lock.json');
   });
 });

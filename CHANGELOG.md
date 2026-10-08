@@ -10,6 +10,79 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-07
+
+Patch on both published packages. `@vaultcompass/dep-guard` and
+`@vaultcompass/dep-guard-core` move from 0.11.0 to 0.11.1. The action's
+`version` input default and the `DG_TAG_SCANNER` constant move with them, so
+`vaultcompasshq/dep-guard@v0.11.1` installs `@vaultcompass/dep-guard@0.11.1`.
+0.11.0 is deprecated on npm. What can newly block, and how to clear
+each:
+
+- Findings (exit 1) from a `package.json` a workspace pattern resolves
+  whose path contains a directory named `build`, `dist`, `vendor`,
+  `vendored`, `venv` or `.venv`, and from an npm or pnpm lockfile on such
+  a path. 0.11.0 skipped both, so a dependency added there or a lockfile
+  edited there scanned clean. 0.11.1 reads them. Clear a finding as any
+  other; a stray manifest that no workspace pattern names is still not
+  read, and the scan now says so in `manifest-skipped-dirname`.
+- Findings (exit 1) from `pyproject.toml`. 0.11.0 read the first array
+  after the text `dependencies` anywhere in `[project]`, so `dynamic` or a
+  description could make it read `classifiers` or `keywords` as the
+  dependency list and miss the real one. 0.11.1 parses the file as TOML
+  and reads `project.dependencies`, `project.optional-dependencies` and
+  the poetry tables. A poetry `git` or `url` table, and a `name[extra] @`
+  URL requirement, are now judged as git or url sources.
+- `lockfile-downgrade` (exit 2) when a lockfile below the root is deleted
+  while a manifest it recorded still declares dependencies, even when a
+  root lockfile remains. Clear it by acknowledging the removed bytes in
+  `acknowledgedLockfiles` on the base, as the message prints.
+- `manifest-parse` (exit 2) for a `pyproject.toml` that does not parse
+  now names the path. Clear it by fixing the file, or
+  by covering a file nothing installs from with `ignorePaths` on the base,
+  which skips it with a note instead.
+
+### Fixed
+
+- A workspace member or a lockfile under a directory named `build`,
+  `dist`, `vendor`, `vendored`, `venv` or `.venv` is read. Only a stray
+  manifest no workspace pattern names is skipped there, and the skip is
+  reported.
+- `pyproject.toml` is parsed as TOML. A document that does not parse no
+  longer stops the scan when `ignorePaths` on the comparison side covers
+  it.
+- Lockfile coverage is judged per directory. A root `yarn.lock` edit is no
+  longer refused because a nested npm lockfile is read, and a root
+  `package-lock.json` beside a changed root `yarn.lock` is still refused.
+- A finding from a lockfile below the root names that lockfile, once, not
+  the root lockfile beside it.
+- An unread lockfile (yarn, bun, a v1 npm file) that changes beside a read
+  lockfile in the same directory below the root is refused as a downgrade,
+  the way a root one is.
+- A poetry `[tool.poetry.dev-dependencies]` table is read, and a
+  `name [extra] @ <url>` requirement with a space before the extras is a
+  git or url source.
+- A `pyproject.toml` or `requirements.txt` under `ignorePaths` that parses
+  is still read; only one that does not parse is skipped with a note.
+
+### Changed
+
+- `dep-guard scan <path>` reads that directory and nothing above it, so a
+  lockfile in an ancestor directory is not applied; the scan names it in
+  `lockfile-outside-prefix`. On 0.10.1 a scan of a subdirectory still read
+  the root lockfile. A full gate is a scan of the repository root, and the
+  Action's `path` input should stay `.` unless the directory is the whole
+  project.
+
+### Added
+
+- `lockfile-nested-removed`: a lockfile below the root present on the
+  comparison side and absent on the judged side.
+- `lockfile-outside-prefix`: `dep-guard scan <path>` names a lockfile in
+  an ancestor directory that this scan did not read.
+- `manifest-skipped-dirname`: a stray manifest skipped for its directory
+  name.
+
 ## [0.11.0] - 2026-10-06
 
 Minor on both published packages. `@vaultcompass/dep-guard` and

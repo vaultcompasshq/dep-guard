@@ -347,7 +347,7 @@ describe('lockfile detection', () => {
 
 describe('manifest discovery', () => {
   test('expands the npm workspaces field one level', async () => {
-    await write('package.json', manifestJson({}, { workspaces: ['packages/*', 'tools/builder'] }));
+    await write('package.json', manifestJson({}, { workspaces: ['packages/*', 'tools/build'] }));
     await write('packages/a/package.json', JSON.stringify({ name: 'a' }));
     await write('packages/b/package.json', JSON.stringify({ name: 'b' }));
     // A directory under the glob with no manifest of its own, and a
@@ -355,7 +355,7 @@ describe('manifest discovery', () => {
     // workspace package.
     await write('packages/fixtures/data.txt', 'not a package\n');
     await write('packages/README.md', 'not a package\n');
-    await write('tools/builder/package.json', JSON.stringify({ name: 'builder' }));
+    await write('tools/build/package.json', JSON.stringify({ name: 'build' }));
 
     const { after } = await loadStates(repo, { kind: 'audit' });
 
@@ -363,8 +363,56 @@ describe('manifest discovery', () => {
       'package.json',
       'packages/a/package.json',
       'packages/b/package.json',
-      'tools/builder/package.json',
+      'tools/build/package.json',
     ]);
+  });
+
+  test('a workspace member under a skipped directory name is still read', async () => {
+    await write('package.json', manifestJson({}, { workspaces: ['vendor/*'] }));
+    await write(
+      'vendor/pkg/package.json',
+      JSON.stringify({ name: 'pkg', dependencies: { 'left-pad': '1.0.0' } })
+    );
+
+    const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
+
+    expect(manifestPaths(after)).toContain('vendor/pkg/package.json');
+    expect(specifierOf(after, 'vendor/pkg/package.json', 'left-pad')).toBe('1.0.0');
+    expect(diagnostics.map((diagnostic) => diagnostic.code)).not.toContain('manifest-skipped-dirname');
+  });
+
+  test('a stray manifest under a skipped directory name is not read, and the skip is named', async () => {
+    await write('package.json', manifestJson({}));
+    await write(
+      'vendor/package.json',
+      JSON.stringify({ name: 'stray', dependencies: { 'left-pad': '1.0.0' } })
+    );
+
+    const { after, diagnostics } = await loadStates(repo, { kind: 'audit' });
+
+    expect(manifestPaths(after)).toEqual(['package.json']);
+    const notice = diagnostics.find((diagnostic) => diagnostic.code === 'manifest-skipped-dirname');
+    expect(notice?.message).toContain('vendor/package.json');
+    expect(notice?.message).toContain('vendor');
+  });
+
+  test('a lockfile under a skipped directory name stays in the inventory', async () => {
+    await write('package.json', manifestJson({}));
+    await write(
+      'tools/build/package-lock.json',
+      JSON.stringify({
+        name: 'build',
+        lockfileVersion: 3,
+        packages: { '': { name: 'build' } },
+      })
+    );
+    await commitAll('first');
+
+    const { after } = await loadStates(repo, { kind: 'audit' });
+
+    const entry = after.lockfileInventory?.find((item) => item.path === 'tools/build/package-lock.json');
+    expect(entry).toBeDefined();
+    expect(entry?.read).toBe(true);
   });
 
   test('expands the object form of the npm workspaces field', async () => {

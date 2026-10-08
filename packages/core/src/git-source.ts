@@ -138,10 +138,10 @@ const UNRESOLVABLE_LINK_CODES = new Set(['ELOOP', 'ENAMETOOLONG']);
 // straight into it.
 const NEVER_A_PACKAGE_DIR = 'node_modules';
 
-// Directories a project manifest never lives in. Installed trees
-// (node_modules, virtualenvs), build output, and vendored trees each hold
-// their own manifests, and reading those would report someone else's
-// dependencies as this repository's.
+// Directory names an undeclared stray manifest is not read from. A
+// workspace member a glob resolved, and every lockfile, are still read.
+// node_modules and .git are not announced per file. The other names are,
+// one diagnostic per stray manifest.
 const SKIP_DIR_NAMES: ReadonlySet<string> = new Set([
   'node_modules',
   '.venv',
@@ -152,6 +152,12 @@ const SKIP_DIR_NAMES: ReadonlySet<string> = new Set([
   'vendored',
   '.git',
 ]);
+
+const NEVER_WALK_DIR_NAMES: ReadonlySet<string> = new Set(['node_modules', '.git']);
+const SILENT_SKIP_DIR_NAMES: ReadonlySet<string> = new Set(['node_modules', '.git']);
+const MANIFEST_SKIPPED_DIRNAME = 'manifest-skipped-dirname';
+const LOCKFILE_OUTSIDE_PREFIX = 'lockfile-outside-prefix';
+const MANIFEST_UNPARSED = 'manifest-unparsed';
 
 function parentDir(relPath: string): string {
   const slash = relPath.lastIndexOf('/');
@@ -165,6 +171,15 @@ function baseName(relPath: string): string {
 
 function pathSkipped(relPath: string): boolean {
   return relPath.split('/').some((segment) => SKIP_DIR_NAMES.has(segment));
+}
+
+function skipSegment(relPath: string): string | null {
+  for (const segment of relPath.split('/')) {
+    if (SKIP_DIR_NAMES.has(segment)) {
+      return segment;
+    }
+  }
+  return null;
 }
 
 function underPrefix(relPath: string, prefix: string): boolean {
@@ -765,8 +780,8 @@ async function createWorkingTreeSource(
 }
 
 // Tracked files plus untracked files git does not ignore. Outside a
-// repository the same answer is a directory walk that skips installed,
-// build, and vendored trees and does not follow symlinks.
+// repository the same answer is a directory walk that does not enter
+// node_modules or .git and does not follow symlinks.
 async function listWorkingTreeFiles(root: string): Promise<string[]> {
   const listed = await runGit(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
   if (listed.ok) {
@@ -784,7 +799,7 @@ async function walkFiles(root: string, dir = ''): Promise<string[]> {
   }
   const found: string[] = [];
   for (const entry of entries) {
-    if (SKIP_DIR_NAMES.has(entry.name) || entry.isSymbolicLink()) {
+    if (NEVER_WALK_DIR_NAMES.has(entry.name) || entry.isSymbolicLink()) {
       continue;
     }
     const relPath = dir === '' ? entry.name : `${dir}/${entry.name}`;
@@ -1531,11 +1546,12 @@ async function loadState(
   source: FileSource,
   diagnostics: Diagnostic[],
   role: SideRole,
-  prefix: string
+  prefix: string,
+  isIgnoredPath: (relPath: string) => boolean = () => false
 ): Promise<RepoState> {
-  const files = (await source.listFiles()).filter(
-    (relPath) => underPrefix(relPath, prefix) && !pathSkipped(relPath)
-  );
+  const filesInPrefix = (await source.listFiles()).filter((relPath) => underPrefix(relPath, prefix));
+  // Lockfiles are never dropped for a directory name. Stray manifests are.
+  const files = filesInPrefix.filter((relPath) => isLockfileName(relPath) || !pathSkipped(relPath));
   const listedManifests = files.filter(isProjectManifestPath).sort();
   const listedLockfiles = files.filter(isLockfileName);
   const rootInScope = underPrefix(ROOT_MANIFEST, prefix);
@@ -1618,9 +1634,25 @@ async function loadState(
   // order.
   const unreadMembers = await screenSymlinkedInputs(source, manifestPaths, role, diagnostics);
   const readPaths = manifestPaths.filter((manifestPath) => !unreadMembers.has(manifestPath));
+  const memberPaths = new Set(manifestPaths);
+  for (const relPath of filesInPrefix) {
+    if (!isProjectManifestPath(relPath) || !pathSkipped(relPath) || memberPaths.has(relPath)) {
+      continue;
+    }
+    const segment = skipSegment(relPath);
+    if (segment !== null && SILENT_SKIP_DIR_NAMES.has(segment)) {
+      continue;
+    }
+    diagnostics.push({
+      code: MANIFEST_SKIPPED_DIRNAME,
+      message:
+        `${relPath}: not scanned; a directory named ${segment ?? 'unknown'} is skipped unless a workspace ` +
+        'pattern names it. A lockfile on this path would still be read',
+    });
+  }
   const contents = await source.readMany(readPaths);
   for (const manifestPath of readPaths) {
-    if (!underPrefix(manifestPath, prefix) || pathSkipped(manifestPath)) {
+    if (!underPrefix(manifestPath, prefix)) {
       continue;
     }
     const content = contents.get(manifestPath) ?? null;
@@ -1642,7 +1674,23 @@ async function loadState(
     if (content === null) {
       continue;
     }
-    manifests.push(parseProjectManifest(relPath, content));
+    // A Python manifest that does not parse is a per-file failure. When
+    // ignorePaths from the comparison side covers it, the file is skipped
+    // with a note and the scan goes on; otherwise the failure stands, so a
+    // change cannot clear its own parse error. A file that parses is read
+    // whether or not it is ignored: its findings are filtered later, like
+    // any other path under ignorePaths.
+    try {
+      manifests.push(parseProjectManifest(relPath, content));
+    } catch (err) {
+      if (!(isPythonManifestPath(relPath) && isIgnoredPath(relPath))) {
+        throw err;
+      }
+      diagnostics.push({
+        code: MANIFEST_UNPARSED,
+        message: `${relPath}: not parsed; covered by ignorePaths`,
+      });
+    }
   }
 
   const lockfileDirs = uniquePaths(listedLockfiles.map(parentDir)).sort((left, right) => {
@@ -1674,13 +1722,40 @@ async function loadState(
       .filter(isReadLockfile)
       .map((parsed) => parsed.path)
   );
-  const lockfileInventory = (await source.lockfileInventory())
-    .filter((entry) => underPrefix(entry.path, prefix) && !pathSkipped(entry.path))
+  const fullInventory = await source.lockfileInventory();
+  const lockfileInventory = fullInventory
+    .filter((entry) => underPrefix(entry.path, prefix))
     .map((entry) => ({
       path: entry.path,
       read: readRootPaths.has(entry.path),
       blobId: entry.blobId,
     }));
+  // `scan <path>` reads that directory and nothing above it. A lockfile in
+  // an ancestor directory may record what this directory installs, and
+  // this scan did not read it; the reader has to know that a full gate is
+  // a scan of the repository root. Only the ancestor paths are looked at,
+  // not a second walk of the tree.
+  if (prefix !== '') {
+    const ancestors = new Set<string>();
+    for (let dir = parentDir(prefix); ; dir = parentDir(dir)) {
+      ancestors.add(dir);
+      if (dir === '') {
+        break;
+      }
+    }
+    const above = fullInventory
+      .map((entry) => entry.path)
+      .filter((entryPath) => ancestors.has(parentDir(entryPath)))
+      .sort();
+    if (above.length > 0) {
+      diagnostics.push({
+        code: LOCKFILE_OUTSIDE_PREFIX,
+        message:
+          `${above.join(', ')}: above the scanned directory ${prefix} and not read by this scan, so ` +
+          'what it installs was not judged here; a scan of the repository root reads it',
+      });
+    }
+  }
   // Read once and handed to both parsers below -- parseNpmrcPins and
   // parseNpmrcDefaultRegistry read the same file for two different keys,
   // and a source's read() is not assumed free of cost (a git source shells
@@ -1769,19 +1844,25 @@ const MANIFEST_PROBE_NAMES = new Set<string>([
  * manifest or a lockfile it reads.
  *
  * Uses the same listing as the working-tree side: gitignored paths are
- * absent, and installed, build, and vendored directories are skipped. A
- * file this probe cannot see is not a could-not-run. `prefix` limits the
- * question to the directory `scan <path>` was asked to read.
+ * absent. A stray manifest under a skipped directory name is not a
+ * could-not-run. A lockfile is, whatever directory names are in its path.
+ * `prefix` limits the question to the directory `scan <path>` was asked
+ * to read.
  *
  * Not called for --staged. That mode judges the index, and an untracked
  * manifest on disk is outside that scope.
  */
 export async function probeManifestOnDisk(root: string, prefix = ''): Promise<boolean> {
   const files = await listWorkingTreeFiles(root);
-  return files.some(
-    (relPath) =>
-      underPrefix(relPath, prefix) && !pathSkipped(relPath) && MANIFEST_PROBE_NAMES.has(baseName(relPath))
-  );
+  return files.some((relPath) => {
+    if (!underPrefix(relPath, prefix) || !MANIFEST_PROBE_NAMES.has(baseName(relPath))) {
+      return false;
+    }
+    if (isLockfileName(relPath)) {
+      return true;
+    }
+    return !pathSkipped(relPath);
+  });
 }
 
 // git resolves "REF:path" against the top of the working tree, so the
@@ -1904,7 +1985,8 @@ export async function loadRefState(
   repoRoot: string,
   ref: string,
   notes?: Diagnostic[],
-  prefix = ''
+  prefix = '',
+  isIgnoredPath: (relPath: string) => boolean = () => false
 ): Promise<RepoState> {
   if (!isUsableRef(ref)) {
     throw new DepGuardError(`ref "${ref}" is not a usable git ref`, 'git-error');
@@ -1918,7 +2000,8 @@ export async function loadRefState(
       kind: 'comparison',
       label: `the trust base "${ref}"`,
     },
-    prefix
+    prefix,
+    isIgnoredPath
   );
   notes?.push(...diagnostics.filter((d) => COMPARISON_SIDE_CODES.has(d.code)));
   return state;
@@ -1941,7 +2024,12 @@ export async function refsNameSameTree(repoRoot: string, a: string, b: string): 
   return left.ok && right.ok && left.stdout.trim() !== '' && left.stdout.trim() === right.stdout.trim();
 }
 
-export async function loadStates(repoRoot: string, mode: ScanMode): Promise<StatePair> {
+export async function loadStates(
+  repoRoot: string,
+  mode: ScanMode,
+  options: { isIgnoredPath?: (relPath: string) => boolean } = {}
+): Promise<StatePair> {
+  const isIgnoredPath = options.isIgnoredPath ?? (() => false);
   await assertScannablePath(repoRoot);
   const diagnostics: Diagnostic[] = [];
 
@@ -1953,7 +2041,8 @@ export async function loadStates(repoRoot: string, mode: ScanMode): Promise<Stat
       await createWorkingTreeSource(root, diagnostics),
       diagnostics,
       JUDGED,
-      prefix
+      prefix,
+      isIgnoredPath
     );
     return { before: null, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
@@ -1964,9 +2053,15 @@ export async function loadStates(repoRoot: string, mode: ScanMode): Promise<Stat
 
   if (mode.kind === 'staged') {
     const before = (await hasCommittedHead(root))
-      ? await loadState(refSource(root, 'HEAD'), diagnostics, { kind: 'comparison', label: 'HEAD' }, prefix)
+      ? await loadState(
+          refSource(root, 'HEAD'),
+          diagnostics,
+          { kind: 'comparison', label: 'HEAD' },
+          prefix,
+          isIgnoredPath
+        )
       : null;
-    const after = await loadState(indexSource(root), diagnostics, JUDGED, prefix);
+    const after = await loadState(indexSource(root), diagnostics, JUDGED, prefix, isIgnoredPath);
     return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
 
@@ -1980,8 +2075,15 @@ export async function loadStates(repoRoot: string, mode: ScanMode): Promise<Stat
       kind: 'comparison',
       label: `the --base ref "${mode.ref}"`,
     },
-    prefix
+    prefix,
+    isIgnoredPath
   );
-  const after = await loadState(await createWorkingTreeSource(root, diagnostics), diagnostics, JUDGED, prefix);
+  const after = await loadState(
+    await createWorkingTreeSource(root, diagnostics),
+    diagnostics,
+    JUDGED,
+    prefix,
+    isIgnoredPath
+  );
   return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
 }

@@ -1231,28 +1231,52 @@ validation in `loadConfig acknowledgedLockfiles`.
 **Lockfiles below the root are read when this tool can read them.** npm and
 pnpm lockfiles at any depth are parsed and judged; a finding names the
 manifest that declares the dependency, or the lockfile path when no
-manifest in that directory declares it. `package.json`, `pyproject.toml`
-and `requirements.txt` are read at any depth. A manifest with no
-dependencies (a `pyproject.toml` that holds only `[tool.*]` config) counts
-as resolved, so it does not by itself make the scan a could-not-run when
-another manifest or a read lockfile resolved. The scan skips
-`node_modules`, `.venv`, `venv`, `dist`, `build`, `vendor` and `vendored`,
-and paths git ignores. `dep-guard scan <path>` reads the named directory;
-paths stay relative to the git root. A lockfile this tool does not read
-(yarn, bun, a v1 npm file) below the root is still not judged. One whose
-blob differs from the comparison side, a new one included, is named in
-`lockfile-nested-changed`, which says the run says nothing about what would
-be installed from it; the run continues and the exit code is decided by the
-findings. A path covered by `ignorePaths` (from the same config the
-findings filter uses: the trust base's on a `--trust-base` run, otherwise
-the `.dep-guard.json` on disk in the scanned repository, which is the
-judged side's) drops findings under that path, and an unread lockfile
-there is `lockfile-nested-ignored` instead. Such an entry is not reported
-as unmatched. The no-lockfile note `lockfile-missing` is printed only when
-the inventory is empty; `lockfile-not-read` names every lockfile this tool
-does not read. `--staged`, `--base` and `--trust-base` compare each
-manifest with the same path on the other side. Tests: `manifests below the
-scan root` and the `N8:` group.
+manifest in that directory declares it, and its `lockfilePath` is the file
+whose entry changed, not the primary lockfile. `package.json`,
+`pyproject.toml` and `requirements.txt` are read at any depth. A manifest
+with no dependencies (a `pyproject.toml` that holds only `[tool.*]` config)
+counts as resolved, so it does not by itself make the scan a could-not-run
+when another manifest or a read lockfile resolved. Paths git ignores are
+not scanned. A directory named `node_modules`, `.venv`, `venv`, `dist`,
+`build`, `vendor` or `vendored` drops only an undeclared stray manifest
+under it, named in `manifest-skipped-dirname` (`node_modules` and `.git`
+are dropped without a note); a `package.json` a workspace pattern resolved
+and a lockfile at any depth are read whatever directory names are on their
+path. Every other `package.json` git tracks is read, test fixtures and
+templates included; `ignorePaths` on the comparison side is how one is
+dropped. `pyproject.toml` is parsed as TOML and dependencies come from
+`project.dependencies`, `project.optional-dependencies` and the poetry
+tables only; a file that does not parse is a could-not-run that names the
+path unless `ignorePaths` on the comparison side covers it. Lockfile
+coverage is judged per directory: an unread root lockfile that changed is a
+downgrade only when the root had a read lockfile with entries on the
+comparison side, and a directory whose read lockfile is gone on the judged
+side while a manifest it recorded still declares dependencies is a
+downgrade, a lockfile higher up notwithstanding; a lockfile below the root
+present on the comparison side and absent on the judged side is named in
+`lockfile-nested-removed`. `dep-guard scan <path>` reads the named
+directory and nothing above it; a lockfile in an ancestor directory is
+named in `lockfile-outside-prefix` and not applied, and paths stay relative
+to the git root. A lockfile this tool does not read (yarn, bun, a v1 npm
+file) below the root is still not judged. One whose blob differs from the
+comparison side, a new one included, is named in `lockfile-nested-changed`,
+which says the run says nothing about what would be installed from it; the
+run continues and the exit code is decided by the findings. A path covered
+by `ignorePaths` (from the same config the findings filter uses: the trust
+base's on a `--trust-base` run, otherwise the `.dep-guard.json` on disk in
+the scanned repository, which is the judged side's) drops findings under
+that path, and an unread lockfile there is `lockfile-nested-ignored`
+instead. Such an entry is not reported as unmatched. The no-lockfile note
+`lockfile-missing` is printed only when the inventory is empty;
+`lockfile-not-read` names every lockfile this tool does not read.
+`--staged`, `--base` and `--trust-base` compare each manifest with the same
+path on the other side. Tests: `manifests below the scan root`, `a skipped
+directory name does not hide a declared package or a lockfile`,
+`pyproject.toml`, `lockfile coverage is judged per directory`, `a root
+lockfile does not stand in for a deleted nested one`, `a finding names the
+lockfile that changed`, `scan <path> says when an ancestor lockfile was not
+read`, `a frontend and backend layout with nothing at the root` and the
+`N8:` group.
 
 **Two hashless unreadable resolutions at a held version are a finding.**
 When both resolved values are unreadable, neither side has an integrity
@@ -3101,9 +3125,9 @@ control for version choice: it admits every published version. On a same-repo
 `pull_request` event GitHub runs the workflow file from the HEAD, so `version:`
 is written by the pull request being judged. Once a second scanner version
 exists, that is a bypass with an innocent shape: deleting a security step reads
-as deleting a security step, while `version: 0.10.1` reads as version
-management. Fourteen scanners are published, 0.1.0 through 0.10.1, so the shape
-check admits thirteen versions below the tag scanner. What stops those today is
+as deleting a security step, while `version: 0.11.0` reads as version
+management. Fifteen scanners are published, 0.1.0 through 0.11.0, so the shape
+check admits fifteen versions below the tag scanner. What stops those today is
 not the shape check but a FLAG: `--trust-base` arrived in 0.6.0, the run step
 appends it on every pull-request run with no opt-out, and a scanner at or below
 0.5.0 answers `error: unknown option '--trust-base'`. A backward pin therefore
@@ -3197,24 +3221,24 @@ else.
   that branch's own workflow file, written by the same author, with
   `GITHUB_BASE_REF` empty, so it is as author-controlled as a pull request and
   the rule does not cover it.
-- It is not free today. Fourteen scanners are published, so a consumer pinning any
-  of 0.1.0 through 0.10.0 passes the shape check on a pull request now and is
+- It is not free today. Fifteen scanners are published, so a consumer pinning any
+  of 0.1.0 through 0.11.0 passes the shape check on a pull request now and is
   refused, with a message telling them to remove the input or raise it. A pin
   below 0.6.0 is already broken on that event, because no scanner below 0.6.0
   knows `--trust-base` and the run step always passes it; the rule changes
-  that failure from the scan to a named refusal at validate. A pin of 0.6.0,
-  0.7.0, 0.8.0, 0.9.0, or 0.10.0 fails on version alone, since each knows
-  `--trust-base` and would otherwise run cleanly. Pins at or above 0.10.1 are
-  unaffected.
+  that failure from the scan to a named refusal at validate. A pin of 0.6.0
+  through 0.11.0 fails on version alone, since each knows `--trust-base` and
+  would otherwise run cleanly; 0.11.0 is the withdrawn release this tag
+  replaces. Pins at or above 0.11.1 are unaffected.
 
 **Enforced by:** the `pinning the scanner backward on a pull request` cases in
 `scripts/tests/action-run-script.test.mjs`. One case drives the SHIPPED,
 unmodified step with `version: 0.5.9` and `GITHUB_BASE_REF` set, and asserts
-the refusal names both 0.5.9 and 0.10.1, with the same input accepted when
+the refusal names both 0.5.9 and 0.11.1, with the same input accepted when
 `GITHUB_BASE_REF` is unset: the rule is observable on the real file, because
-thirteen published versions sit below the tag scanner. The cases that need a
+fifteen published versions sit below the tag scanner. The cases that need a
 version below a FUTURE tag scanner, to exercise the comparison as it will
-behave once a second scanner in the 0.10.1-or-newer family ships, drive the real
+behave once a second scanner in the 0.11.1-or-newer family ships, drive the real
 step text with the tag-scanner constant advanced one minor version and assert
 the replacement matched, so deleting the constant turns them red. Plus a drift
 case tying `DG_TAG_SCANNER_*`, the `version` input's default and both

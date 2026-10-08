@@ -397,7 +397,7 @@ steps:
       # and the baseline from the base branch, which a shallow checkout
       # does not have.
       fetch-depth: 0
-  - uses: vaultcompasshq/dep-guard@v0.10.1
+  - uses: vaultcompasshq/dep-guard@v0.11.1
     with:
       path: .
       online: 'true'
@@ -455,7 +455,7 @@ refused with a message saying so.
 
 **On a pull request, `version` may not pin BACKWARD.** The shape check above
 proves the value names a version and says nothing about which one, so every
-published version clears it, and fourteen are published (0.1.0 through 0.10.1).
+published version clears it, and fifteen are published (0.1.0 through 0.11.0).
 What stops a backward pin today is not that check but a flag: `--trust-base`
 arrived in the 0.6.0 scanner, the run step appends it on every pull-request run
 with no opt-out, and a scanner at or below 0.5.0 answers `error: unknown option
@@ -472,8 +472,11 @@ while a version pin reads as version management.
 **So on a pull-request event the Action refuses a `version` below the scanner
 the tag ships, and accepts anything at or above it.** Pinning forward is still
 allowed there, on an assumption the rule does not enforce: that a newer scanner
-is at least as strict. Nothing bounds a forward pin. The comparison is against
-a constant in `action.yml`, which comes from the ref your workflow's `uses:`
+is at least as strict. That assumption has already failed once: 0.11.0 could
+skip a workspace member or a lockfile under a directory named `build`,
+`dist`, `vendor`, `vendored`, `venv` or `.venv`, and is deprecated on npm.
+Use 0.10.1, or 0.11.1 or newer; do not pin 0.11.0. Nothing bounds a forward
+pin. The comparison is against a constant in `action.yml`, which comes from the ref your workflow's `uses:`
 names rather than from the pull request's tree. That holds when your workflow
 names this action by owner and ref; if it names a LOCAL PATH instead, the
 `./some/dir` form, `action.yml` is read out of the pull request's own tree, so
@@ -488,14 +491,14 @@ branch's own workflow file, written by the same author, so it is as
 author-controlled as a pull request and is not covered.
 
 The refusal names both numbers and the fix, which is to **remove the `version`
-input**. What it costs: fourteen scanners are published, so a workflow pinning any
-of `0.1.0` through `0.10.0` passes the shape check on a pull request today and
+input**. What it costs: fifteen scanners are published, so a workflow pinning any
+of `0.1.0` through `0.11.0` passes the shape check on a pull request today and
 is refused by this rule. A pin below `0.6.0` is already broken on that event,
 since those scanners do not know `--trust-base`; the change there is that the
 job fails at the validate step with a message saying why. A pin of `0.6.0`,
-`0.7.0`, `0.8.0`, `0.9.0`, or `0.10.0` fails on version alone: it knows
-`--trust-base` and would otherwise run cleanly. **Remove the `version` input,
-or raise it to `0.10.1` or newer.**
+`0.7.0`, `0.8.0`, `0.9.0`, `0.10.0`, `0.10.1`, or `0.11.0` fails on version alone: it
+knows `--trust-base` and would otherwise run cleanly. **Remove the `version` input,
+or raise it to `0.11.1` or newer.**
 
 **What it does not cover, and what it costs on forks.** A fork's
 `pull_request` run uses the base repository's workflow file, so a fork author
@@ -1023,24 +1026,43 @@ quiet:
   migration pull request cannot clear the rule for itself, and an advisory
   mode does not help, because this is a could-not-run, not a finding.
 - Lockfiles below the repository root. npm and pnpm lockfiles are read
-  at any depth, and a finding names the manifest or lockfile it came from.
-  `package.json`, `pyproject.toml` and `requirements.txt` are read at any
-  depth too. A `pyproject.toml` that only holds `[tool.*]` config has no
-  dependencies; that file alone does not make the scan a could-not-run when
-  another manifest or lockfile resolved. The scan skips `node_modules`,
-  `.venv`, `venv`, `dist`, `build`, `vendor` and `vendored`, and it skips
-  paths git ignores. `dep-guard scan <path>` reads manifests under that
-  directory; reported paths stay relative to the git root, and config and
-  the baseline are still read from the git root. A lockfile this tool does
-  not read (yarn, bun, a v1 npm file) below the root is still not judged:
-  one whose bytes differ from the base is named in `lockfile-nested-changed`.
-  A path covered by `ignorePaths` (read from the base on a pull-request run)
-  drops findings under that path, and an unread lockfile there is noted as
-  `lockfile-nested-ignored` instead. `lockfile-not-read` names every
-  lockfile this tool does not read. `-r` lines in a requirements file are
-  not followed; a file named `requirements.txt` is read on its own.
-  `--staged`, `--base` and `--trust-base` compare each manifest with the
-  same path on the other side.
+  at any depth, and a finding names the manifest or lockfile it came from;
+  its `lockfilePath` is the file whose entry changed. `package.json`,
+  `pyproject.toml` and `requirements.txt` are read at any depth too. A
+  `pyproject.toml` that only holds `[tool.*]` config has no dependencies;
+  that file alone does not make the scan a could-not-run when another
+  manifest or lockfile resolved. `pyproject.toml` is parsed as TOML, and
+  dependencies come from `project.dependencies`,
+  `project.optional-dependencies`, `[tool.poetry.dependencies]` and the
+  poetry group tables; a poetry `git` or `url` table is judged as a git or
+  url source. A file that does not parse stops the scan and names the
+  path, unless `ignorePaths` on the base covers it, in which case it is
+  skipped with a note. Paths git ignores are not scanned. A directory
+  named `node_modules`, `.venv`, `venv`, `dist`, `build`, `vendor` or
+  `vendored` only drops a stray manifest that no workspace pattern names,
+  and says so in `manifest-skipped-dirname`; a workspace member and a
+  lockfile on such a path are read. Every other `package.json` git tracks
+  is read, test fixtures and templates included, so a fixture cannot hide
+  a dependency; an `ignorePaths` entry on the base branch is how one is
+  dropped. `dep-guard scan <path>` reads manifests under that directory
+  and nothing above it; a lockfile in an ancestor directory is named in
+  `lockfile-outside-prefix` and not applied, so a full gate is a scan of
+  the repository root. Reported paths stay relative to the git root, and
+  config and the baseline are still read from the git root. Lockfile
+  coverage is judged per directory: a nested npm lockfile does not make a
+  root `yarn.lock` edit a downgrade, and deleting a nested lockfile whose
+  manifest still declares dependencies is one even when a root lockfile
+  remains; a nested lockfile present on the base and gone in the change
+  is named in `lockfile-nested-removed`. A lockfile this tool does not
+  read (yarn, bun, a v1 npm file) below the root is still not judged: one
+  whose bytes differ from the base is named in `lockfile-nested-changed`.
+  A path covered by `ignorePaths` (read from the base on a pull-request
+  run) drops findings under that path, and an unread lockfile there is
+  noted as `lockfile-nested-ignored` instead. `lockfile-not-read` names
+  every lockfile this tool does not read. `-r` lines in a requirements
+  file are not followed; a file named `requirements.txt` is read on its
+  own. `--staged`, `--base` and `--trust-base` compare each manifest with
+  the same path on the other side.
 - Workspace patterns -- a `workspaces` list in `package.json` is resolved
   the way npm's own workspace mapper resolves it, checked against npm
   10.9.8: patterns in order, a run of leading `!` negating when odd, one
