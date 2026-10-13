@@ -73,6 +73,15 @@ export interface LockEntryChange {
   // walk because a scan can now diff several lockfiles of different formats
   // in one delta, and only the entry knows which one it belongs to.
   lockfileFormat?: LockfileFormat;
+  // True when a manifest line declares this entry's key, so packageName is
+  // what that manifest says installs. checks/tamper.ts reads it to refuse
+  // an entry's own "name" field as an excuse for a tarball naming another
+  // package: where a manifest has said what installs, the lockfile does not
+  // get to say otherwise.
+  declared?: boolean;
+  // The npm alias targets the after lockfile's own dependency maps ask for
+  // under this key (ParsedLockfile.aliasEdges), when there are any.
+  aliasTargets?: string[];
   before?: LockEntry;
   after: LockEntry;
   // The `before` entry was a guess between several the selector could not
@@ -90,6 +99,27 @@ export interface LockEntryChange {
   // unreported. A check that reads `before` alone here is asserting the
   // guess.
   beforeCandidates?: LockEntry[];
+}
+
+// The alias target an ADDED lock entry that no manifest declares may
+// install, or null. npm records a transitive alias ("string-width-cjs"
+// installed from string-width) as an entry whose own "name" field is the
+// target, vouched by its tarball URL (LockEntry.lookupName), and as an
+// "npm:<target>@" edge in its dependent's dependency map. Both have to be
+// there: a name field alone is one line any pull request can add to make a
+// tarball of another package look like an alias. A changed entry never
+// qualifies (its earlier tarball already says what it was), and a declared
+// one never does (its manifest has said what installs).
+//
+// The single definition both readers use: checks/tamper.ts accepts the
+// target as the package the tarball may name, and checks/candidates.ts runs
+// the name checks over exactly that target.
+export function acceptedTransitiveAliasTarget(entryChange: LockEntryChange): string | null {
+  const target = entryChange.after.lookupName;
+  if (entryChange.kind !== 'added' || entryChange.declared === true || target === undefined) {
+    return null;
+  }
+  return (entryChange.aliasTargets ?? []).includes(target) ? target : null;
 }
 
 export interface DependencyDelta {
@@ -119,6 +149,11 @@ export interface DependencyDelta {
   // than two checks each deciding for themselves what "workspace-local"
   // means.
   workspaceLocalNames: ReadonlySet<string>;
+  // The same names keyed by the directory of the lockfile that confirmed
+  // each one (RepoState.workspaceLocalNamesByDir). When present,
+  // candidates.ts exempts a name only for a change whose own lockfile sits
+  // in that directory.
+  workspaceLocalNamesByDir?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 const LOCKFILE_MISSING = 'lockfile-missing';
@@ -564,6 +599,10 @@ function diffLockEntries(
         manifestPath: declared?.manifestPath ?? after.path,
         lockfilePath: after.path,
         lockfileFormat: after.format,
+        ...(declared === undefined ? {} : { declared: true }),
+        ...((after.aliasEdges?.get(name)?.size ?? 0) > 0
+          ? { aliasTargets: [...(after.aliasEdges?.get(name) ?? [])] }
+          : {}),
         before: counterpart.entry,
         after: entry,
         ...(counterpart.ambiguous
@@ -1397,6 +1436,9 @@ export function computeDelta(
     lockfileFormat,
     hasComparisonBase: before !== null,
     workspaceLocalNames: after.workspaceLocalNames,
+    ...(after.workspaceLocalNamesByDir === undefined
+      ? {}
+      : { workspaceLocalNamesByDir: after.workspaceLocalNamesByDir }),
     lockfilePath: after.lockfile?.path,
     diagnostics: dedupeDiagnostics([
       ...(before?.lockfile?.diagnostics ?? []),

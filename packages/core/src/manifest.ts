@@ -32,6 +32,15 @@ export interface ParsedManifest {
   // lockfile would record, from the manifests actually discovered rather
   // than from anything the lockfile says.
   name?: string;
+  // The "packageManager" field (corepack's "pnpm@9.15.9" form), when it is
+  // a string. Read only to decide which lockfile in this manifest's
+  // directory the install honours, so that a lockfile no install reads
+  // cannot vouch for workspace-local names (git-source.ts).
+  packageManager?: string;
+  // The npm "workspaces" patterns, when the field is present
+  // (workspacePatternsOf). Read to decide whether a lockfile link entry
+  // points at a real workspace member of its install root.
+  workspaces?: string[];
   deps: ManifestDep[];
   pnpmOnlyBuilt: string[];
 }
@@ -49,6 +58,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+// The npm "workspaces" field of a parsed package.json, as written: npm
+// accepts both "workspaces": ["packages/*"] and the older
+// "workspaces": { "packages": [...] } spelling. Non-string entries are
+// dropped. The one reader of this field, so that discovering workspace
+// members and confirming a link entry against them (git-source.ts) agree.
+export function workspacePatternsOf(parsed: unknown): string[] {
+  if (!isPlainObject(parsed)) {
+    return [];
+  }
+  const raw = isPlainObject(parsed.workspaces) ? parsed.workspaces.packages : parsed.workspaces;
+  return Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === 'string') : [];
 }
 
 // npm: aliases carry their target after the last "@" that isn't the scope
@@ -222,6 +244,8 @@ export function parseManifest(path: string, content: string): ParsedManifest {
   return {
     path,
     ...(typeof parsed.name === 'string' ? { name: parsed.name } : {}),
+    ...(typeof parsed.packageManager === 'string' ? { packageManager: parsed.packageManager } : {}),
+    ...(parsed.workspaces === undefined ? {} : { workspaces: workspacePatternsOf(parsed) }),
     deps: extractDeps(path, parsed),
     pnpmOnlyBuilt: extractPnpmOnlyBuilt(path, parsed),
   };

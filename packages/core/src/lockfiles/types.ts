@@ -30,11 +30,21 @@ export interface LockEntry {
   // name this parser cannot verify must be visible as unverified, not
   // silently used or silently dropped.
   //
-  // Only online/publish-age.ts reads this field (as `lookupName ??
-  // packageName`, for the registry query alone -- its finding still
-  // reports under packageName, with the looked-up name carried in
-  // `details` when the two differ). No other consumer may read it; grep to
-  // confirm before adding one.
+  // Three consumers read this field, and no other may; grep to confirm
+  // before adding one:
+  //   - online/publish-age.ts, as `lookupName ?? packageName`, for the
+  //     registry query alone -- its finding still reports under
+  //     packageName, with the looked-up name carried in `details` when the
+  //     two differ;
+  //   - checks/tamper.ts's tarball-identity rule, which accepts it as the
+  //     package an ADDED, undeclared entry's tarball may name, and only when
+  //     the lockfile also records an "npm:<lookupName>@" alias edge for the
+  //     entry's key (ParsedLockfile.aliasEdges). It excuses that one
+  //     mismatch and decides nothing else;
+  //   - checks/candidates.ts, which runs the name checks over exactly that
+  //     accepted alias target, so the target the excuse let through is
+  //     judged as a name. That finding's packageName is the target, which is
+  //     what installs; the URL and the alias edge both name it.
   //
   // Never set by lockfiles/pnpm.ts: a pnpm alias mapping lives entirely in
   // the DEPENDENT's own "dependencies" block, never on the target's own
@@ -95,9 +105,27 @@ export interface ParsedLockfile {
   // "workspace:" specifier the manifest walk already exempts). Populated
   // by the npm parser from those link entries; every other format leaves
   // it empty because its workspace members are already exempt earlier, at
-  // the manifest/specifier level. This is discovered once, here, at parse
-  // time, and carried forward rather than re-derived by a check.
+  // the manifest/specifier level.
+  //
+  // This is what the FILE CLAIMS, and a claim is all it is: the lockfile is
+  // written by whoever opened the pull request, and a decoy lockfile that
+  // no install ever reads can carry any link entry it likes. No check reads
+  // this set directly. git-source.ts confirms each claim against the side's
+  // own manifests and the package manager the directory uses, and only the
+  // confirmed names reach RepoState.workspaceLocalNames (see
+  // confirmWorkspaceLocalNames there, and docs/INVARIANTS.md).
   workspaceLocalNames: Set<string>;
+  // Every "link": true entry behind workspaceLocalNames, with its
+  // "resolved" value (the linked directory, relative to the lockfile's own
+  // directory) when it has one. What the confirmation step reads.
+  workspaceLinks?: Array<{ name: string; resolved?: string }>;
+  // npm only: for each dependency name, the alias targets some packages
+  // entry's own dependency maps ask for under it ("string-width-cjs":
+  // "npm:string-width@^4.2.0" gives string-width-cjs -> string-width). A
+  // claim written into the same file, so it decides nothing alone; it is
+  // what the tarball-identity rule requires beside a vouched lookupName
+  // before an added transitive alias is accepted.
+  aliasEdges?: Map<string, Set<string>>;
   // For a pnpm lockfile of several YAML documents with at least one that is
   // not shaped like a lockfile: the file's bytes outside every document
   // that was read (the unread documents in order, with their directives

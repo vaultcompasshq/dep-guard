@@ -1229,10 +1229,31 @@ exact entry to add and says it goes on the base branch first`; config
 validation in `loadConfig acknowledgedLockfiles`.
 
 **Lockfiles below the root are read when this tool can read them.** npm and
-pnpm lockfiles at any depth are parsed and judged; a finding names the
-manifest that declares the dependency, or the lockfile path when no
-manifest in that directory declares it, and its `lockfilePath` is the file
-whose entry changed, not the primary lockfile. `package.json`,
+pnpm lockfiles at any depth are parsed and judged.
+
+Which file a finding names is NOT uniform across checks, and an earlier
+version of this paragraph said it was. Corrected 2026-10-13 after an
+independent audit found both halves false:
+
+- `lockfilePath`: a lockfile-tamper finding carries the lockfile whose
+  entry changed (`checks/tamper.ts`, the `report` helper and its callers
+  pass `entryChange.lockfilePath` or `change.lockfilePath`), and so does a
+  dependency-confusion finding from the lockfile walk. An install-script
+  finding does NOT: `checks/install-script.ts` stamps `delta.lockfilePath`,
+  the primary lockfile, on every finding, so in a repository with
+  lockfiles in several directories it can name a lockfile that holds no
+  entry for that package. Known open.
+- `manifestPath`: an entry a manifest declares is anchored to the first
+  declaring manifest `attributeLockNames` (`delta.ts`) finds, searching the
+  lockfile's own directory first and then every manifest in the repository
+  that has no lockfile of its own, whatever its directory. So an entry in
+  `build/package-lock.json` can be anchored to `packages/vendor/package.json`
+  when that manifest declares the same name and has no lockfile beside it.
+  An entry no manifest declares is anchored to its lockfile. Known open;
+  the anchor is part of the fingerprint, so changing it re-keys baselines
+  and needs its own decision.
+
+`package.json`,
 `pyproject.toml` and `requirements.txt` are read at any depth. A manifest
 with no dependencies (a `pyproject.toml` that holds only `[tool.*]` config)
 counts as resolved, so it does not by itself make the scan a could-not-run
@@ -1240,9 +1261,15 @@ when another manifest or a read lockfile resolved. Paths git ignores are
 not scanned. A directory named `node_modules`, `.venv`, `venv`, `dist`,
 `build`, `vendor` or `vendored` drops only an undeclared stray manifest
 under it, named in `manifest-skipped-dirname` (`node_modules` and `.git`
-are dropped without a note); a `package.json` a workspace pattern resolved
-and a lockfile at any depth are read whatever directory names are on their
-path. Every other `package.json` git tracks is read, test fixtures and
+are dropped without a note); a `package.json` a workspace pattern resolved,
+a manifest with any recognised lockfile in the same directory, a
+`package.json` the workspace patterns of such an install root name, and a
+lockfile at any depth are read whatever directory names are on their path,
+except that nothing under `node_modules` is promoted this way.
+"Read" here means the manifest's lines reach the name checks; before
+2026-10-13 a lockfile under such a directory was read while the manifest
+beside it was dropped, so none of its names were checked (see "A manifest
+beside a lockfile is a project" below). Every other `package.json` git tracks is read, test fixtures and
 templates included; `ignorePaths` on the comparison side is how one is
 dropped. `pyproject.toml` is parsed as TOML and dependencies come from
 `project.dependencies`, `project.optional-dependencies` and the poetry
@@ -2957,26 +2984,37 @@ here rather than fixed because each fix has a cost that needs deciding
 rather than assuming, and an unrecorded known-open is indistinguishable
 from an oversight.
 
-**Workspace-local names are read from the head.** `candidates.ts` skips any
-name in `delta.workspaceLocalNames`, which `delta.ts` takes from the AFTER
-state, so a pull request that adds a workspace package named after the
-dependency it is introducing makes the existence check skip that name. The
-fix is not simply to read the set from the base: a pull request that
-legitimately adds a workspace package would then have its own new package
-reported as an unknown dependency, which is a false positive on an
-extremely ordinary change; a union of both sides is probably the right
-shape, and that is a design decision rather than a patch.
+**Workspace-local names are read from the head.** `candidates.ts` skips a
+name the judged side confirms as workspace-local, so a pull request that
+adds a workspace package named after the dependency it is introducing makes
+the existence check skip that name. The fix is not simply to read the set
+from the base: a pull request that legitimately adds a workspace package
+would then have its own new package reported as an unknown dependency,
+which is a false positive on an extremely ordinary change; a union of both
+sides is probably the right shape, and that is a design decision rather
+than a patch.
 
-There is no mitigating factor, and an earlier draft of this entry claimed
-one. It said the attack required committing a whole package directory and
-manifest under the chosen name, and that is false: `lockfiles/npm.ts` adds
-the name to `workspaceLocalNames` from a lockfile entry carrying
-`"link": true` and nothing else, and no code reads the directory to confirm
-it exists. So the cost is three lines inside `package-lock.json`, in the
-very file the pull request is already rewriting to add the dependency. That
-makes this QUIETER than the `.npmrc` hole, not louder: no separate file is
-touched, and the report affirms that no control input was proposed while
-the finding is gone.
+What changed on 2026-10-13, and what did not. An earlier version of this
+entry recorded that a `"link": true` lockfile entry alone, three lines in
+any lockfile, switched the name checks off, and an audit showed a decoy
+`package-lock.json` beside the `pnpm-lock.yaml` an install reads doing
+exactly that. That is closed (see "A link entry is a claim until this side
+confirms it" below): the link has to come from the npm lockfile its
+directory installs from, point at a `package.json` with that exact name on
+the same side, and that directory has to be a workspace member under the
+install root's `workspaces` field, read from the trust base on a
+`--trust-base` run wherever the base has that manifest.
+
+A first version of this fix stopped at the name check and this paragraph
+then claimed npm would link a planted package rather than fetch from the
+registry. That was false, and an independent review showed it: a
+`package.json` planted outside every `workspaces` glob is not a workspace,
+`npm install` rewrites its link entry to a registry fetch, and the scan had
+exempted the name. What remains now is a pull request adding a real
+workspace member under a glob the base already declares; npm links that
+member, and its code is in the diff under review. A `--base` run without
+`--trust-base`, a staged run, and an install root the pull request adds
+itself still read the `workspaces` field from the head.
 
 **Workspace globs are read from the head**, in `package.json`'s
 `workspaces` and in `pnpm-workspace.yaml`. These decide which manifests are
@@ -3397,3 +3435,177 @@ The suite now reads both from the file, and `DG_ACTION_FILE` points it at a
 mutated copy so any of this can be made to fail on demand. Both action test
 files honour that override; one of them not honouring it produced a green
 run against a weakened file.
+
+## A link entry is a claim until this side confirms it (2026-10-13)
+
+A `"link": true` entry in an npm lockfile makes a name workspace-local, and
+so exempt from unknown-package and typosquat, only when all of this holds
+on the same side (`confirmWorkspaceLocalNames` in `git-source.ts`):
+
+- its lockfile is the npm lockfile its directory installs from:
+  `npm-shrinkwrap.json` when one is present there, else `package-lock.json`;
+  and either the directory's own `package.json` has a `packageManager`
+  field naming npm, or it has none and no other lockfile format
+  (`pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb`) sits beside it;
+- the entry's `resolved` path, joined to that directory, stays inside the
+  repository and holds a `package.json` this side parsed whose own `name`
+  is exactly the linked name;
+- that path, relative to the lockfile's directory, is covered by the npm
+  `workspaces` field of the `package.json` in that directory
+  (`workspacePatternsCover`, matching rather than walking; a pattern this
+  module cannot match exactly covers nothing here). On a `--trust-base`
+  run the field is read from the trust base whenever the base has that
+  `package.json` (`reconfirmWorkspaceLocalNames`, called from `scan.ts`),
+  so a pull request that widens the field cannot confirm its own link, and
+  the diagnostic says so;
+- and the exemption reaches only a dependency whose own lockfile (the one
+  `lockfileForManifest` picks for its manifest) sits in that same
+  directory.
+
+`ParsedLockfile.workspaceLocalNames` is the file's claim and no check reads
+it. Every claim that fails is named in `workspace-link-unconfirmed`, which
+like every diagnostic never changes the exit code. Tests (all in
+`audit-2026-10-12.test.ts`): `a decoy package-lock.json link entry in a
+pnpm repository does not hide a typosquat`, `a decoy link entry backed by a
+planted package.json of that name still does not exempt it under pnpm`, `a
+real npm sibling in another directory does not exempt the name for a
+manifest its lockfile does not cover`, `a decoy link entry beside a
+yarn.lock does not hide a typosquat`, `a link entry pointing at a directory
+with no manifest is not honoured, even in an npm-only repository`, `a link
+entry pointing at a manifest with a different name is not honoured`, `a
+packageManager field naming pnpm keeps a lone package-lock.json from
+exempting a name`, `a package-lock.json shadowed by an npm-shrinkwrap.json
+contributes no names`; controls `a real npm workspace sibling with that name
+stays exempt` and `a packageManager field naming npm settles a directory
+with two lockfile formats`. Mutation-checked: dropping the manifest test
+turns the npm-only and wrong-name tests red, dropping the active-lockfile
+test turns the planted-manifest, packageManager and shrinkwrap tests red,
+and dropping both turns the original decoy red. Review round: `B1a: a
+planted package.json outside every workspaces glob does not exempt the
+name`, `B1b: a pnpm repository switched to packageManager npm with a
+planted package does not exempt it`, `B1f: a bare packageManager npm with a
+planted package does not exempt it`, `under --trust-base a workspaces glob
+the pull request adds does not confirm its own link`; control `a member the
+base glob already covers, added in the pull request, stays exempt`.
+Mutation-checked: dropping the glob test turns all four red; reading the
+head's field under `--trust-base` turns the last one red.
+
+The `packageManager` field is head-controlled. Setting it to npm in a pnpm
+repository makes pnpm 9 and corepack refuse to install, which is loud. The
+head also chooses its own workspace packages; see "Workspace-local names
+are read from the head" above.
+
+## A registry tarball is the package its entry names (2026-10-13)
+
+Every added or changed npm or pnpm lock entry whose resolved URL is an
+http(s) URL on a trusted registry host (the public registries plus every
+host the project `.npmrc` names, from the base under `--trust-base`) is
+held to the package its tarball path names (`registryTarballIdentity` in
+`resolution.ts`, the tarball-identity rule in `checks/tamper.ts`). This
+holds whether or not the version moved: the comparison signals are blind to
+it, because an ordinary bump moves the version, the URL and the hash
+together.
+
+- The tarball's package must be the entry's `packageName`, or (for a
+  changed entry) a package an earlier candidate's tarball named, or (for an
+  ADDED entry no manifest declares, `LockEntryChange.declared` unset) the
+  entry's vouched `lookupName`, and only when some entry in the same
+  lockfile also records an `npm:<lookupName>@` alias edge for that key
+  (`acceptedTransitiveAliasTarget` in `delta.ts`). A manifest-declared
+  entry and a changed entry never get the `lookupName` excuse. Otherwise
+  `tarball-name-mismatch:<package>`, critical.
+- An accepted alias target is name-checked: `checks/candidates.ts` adds it
+  to the names unknown-package and typosquat judge, anchored where the lock
+  entry is.
+- The version in a `<basename>-<version>.tgz` file name must be the
+  entry's version (build metadata stripped), else `tarball-version-mismatch`,
+  high. A file name of any other shape makes no version claim.
+- A path on a trusted host that has neither the npm shape nor the GitHub
+  Packages shape, after stripping an `.npmrc` registry's own path, is
+  `unparseable-tarball:<host>`, medium. Never a pass.
+- `allow` is not consulted, as for every tamper signal.
+
+These are the second and third deliberate uses of `lookupName` beyond the
+registry query: it may EXCUSE a mismatch on an added transitive entry that
+also has an alias edge, because that is how npm records `string-width-cjs`
+installed from `string-width`, and the excused target is then judged as a
+name, under its own name. It never decides an allow match, a pin or the
+identity of any other finding.
+
+Tests (`audit-2026-10-12.test.ts`): `a version bump repointed at another
+package tarball on the public registry is critical`, `a new transitive entry
+resolving to another package tarball is critical`, `a name field naming the
+other package does not excuse a changed entry`, `a name field does not
+excuse an entry a manifest declares under its own name`, `pnpm: an entry
+bumped to another package tarball URL on the registry is critical`, `a
+tarball of the same package at another version is high`, `a registry URL
+whose path names no package is medium, never a pass`, `a scoped package is
+compared whole, scope included`, `a registry with a path prefix in .npmrc is
+read past the prefix`; controls `an ordinary bump, scoped and unscoped,
+raises no tarball signal`, `a manifest-declared npm alias resolving to its
+target is not a mismatch`, `a transitive alias npm records with a matching
+name field is not a mismatch`, `an alias that was already there survives a
+version bump`. Mutation-checked: dropping the comparison turns ten tests red
+across this file and `check-tamper.test.ts`; dropping the declared guard
+turns the declared-entry test red. Review round: `C1: an added transitive
+entry whose name field names another package, with no alias edge, is
+critical`, `C1b: the same under a nested key is critical`, `an alias edge
+clears the tarball check, and the alias target is name-checked instead`,
+`C1c: a changed transitive entry gets no alias excuse even with an alias
+edge`, `C1c as the review wrote it, with no alias edge, is critical`, `@types%2fnode reads as @types/node and
+is clean`, `@evil%2fws under @types/ws is critical`. Mutation-checked:
+dropping the alias-edge requirement turns C1 and C1b red, dropping the
+added-only guard turns the C1c-with-edge test red, and dropping the
+percent-decoding turns both percent tests red.
+
+Known residual: a pull request that writes both a `name` field and a
+matching alias edge gets the alias accepted. Its target is then judged by
+unknown-package and typosquat, so a hallucinated or typosquatted target
+still blocks; a real, published, malicious target with a corpus-known name
+does not, which is the same coverage a manifest `npm:` alias to that name
+has. `registryTarballPackageName`, which vouches `lookupName`, reads past a
+registry's path prefix by taking the last segment (two for a scope), so a
+transitive alias on such a registry keeps its excuse (the prefix test above
+also pins `string-width-cjs` there). A registry that percent-encodes the
+scope in that path still loses the `lookupName`, and its transitive aliases
+are reported as mismatches: a false positive, never a pass.
+
+## A manifest beside a lockfile is a project (2026-10-13)
+
+A manifest under a directory named `.venv`, `venv`, `dist`, `build`,
+`vendor` or `vendored` is read like any other when any recognised lockfile
+sits in the same directory, and so is every `package.json` that the install
+root's own workspace patterns name (its `package.json` `workspaces` field,
+or a `pnpm-workspace.yaml` beside the lockfile), matched against the listed
+paths (`readDespiteSkippedName` in `loadState`, `git-source.ts`; a pattern
+this module cannot match exactly reads more, never less). Only a manifest
+there that is neither an install root nor one of its members, and no
+repository-root workspace pattern names, is dropped, and
+`manifest-skipped-dirname` says so without promising lockfile coverage.
+
+`node_modules` is the exception, by ruling: nothing is installed from
+inside it, so a committed `node_modules` package that ships a lockfile is
+not promoted, and that lockfile is still read while its manifest is not.
+
+The two sentences an earlier version of this entry ended with were both
+false, and an independent review showed it: "no lockfile is ever read while
+the manifest beside it is dropped" (a workspace member under a skipped
+name was still dropped while its root's lockfile was read, and node_modules
+is now a deliberate exception), and "a filter on directory names may only
+ever drop a file nothing else vouches for" (the root's workspace patterns
+vouched for that member). What holds now: outside `node_modules`, a
+directory-name filter drops a manifest only when no lockfile in its own
+directory and no workspace pattern of an install root covering it reads it.
+This is the same class as the withdrawn 0.11.0.
+
+Tests (`audit-2026-10-12.test.ts`): `build/package.json with
+build/package-lock.json beside it gets the name checks`, `vendor/package.json
+with a pnpm-lock.yaml beside it gets the name checks`, `dist/package.json
+with a yarn.lock beside it gets the name checks`, `B3a: build/app declared by
+build/package.json workspaces gets the name checks`, `a pnpm install root
+under vendor reads the members its pnpm-workspace.yaml names`; controls
+`build/package.json with no lockfile beside it keeps the note and is not
+read` and `a committed node_modules package with a lockfile beside it is
+still not read`. Mutation-checked: restoring the drop turns the first three
+red, dropping the member rule turns the two member tests red, and dropping
+the node_modules exclusion turns its control red.

@@ -178,8 +178,12 @@ package looks the same by age and downloads alone.
 
 dep-guard is narrow on purpose. It reads manifests and lockfiles at the
 moment they change, including `package.json`, npm and pnpm lockfiles,
-`requirements.txt` and `pyproject.toml` in subdirectories. It skips
-installed, build and vendored directories, and paths git ignores. It does
+`requirements.txt` and `pyproject.toml` in subdirectories. Python package
+names are read but not checked against any registry or corpus; the name
+checks judge npm names only. It skips a stray manifest under installed,
+build and vendored directories, unless a lockfile sits beside it or that
+install root's workspace patterns name it (never under node_modules), and
+paths git ignores. It does
 not analyse package contents, mine git history, sandbox an install, or
 check anything against a vulnerability database, so it is not a replacement
 for `npm audit`, Snyk, or Socket -- it sits beside them and answers a

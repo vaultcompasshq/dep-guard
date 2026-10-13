@@ -124,14 +124,84 @@ export function originOf(url: string | undefined): string | null {
   return resolutionOf(url)?.origin ?? null;
 }
 
+// What a registry tarball URL's path says it is: the package name, and the
+// version its file name or path carries. Used by checks/tamper.ts to hold a
+// lockfile entry to the package its own key names, which is the check
+// lockfile-lint calls --validate-package-names.
+//
+// Stricter than registryTarballPackageName below, on purpose, because here
+// a null is a finding rather than a lost lookup hint:
+//
+//   - `basePaths` are the path parts of the registries the project .npmrc
+//     names for this URL's host ("/api/npm/remote/" for a registry mounted
+//     below a path). The longest one the path starts with is stripped
+//     first, so a proxied registry's tarballs read like the public one's.
+//   - npm shape: "/<name>/-/<file>", with the scope's "/" and "@" also
+//     accepted percent-encoded. The name must be one segment or
+//     "@scope/name"; anything else is null. The name segment is the
+//     identity: a registry serves a tarball from the package document the
+//     segment names, never from another package's. The version is read
+//     only when the file is "<basename>-<version>.tgz", which is the only
+//     file name npm and pnpm write; a file name of any other shape carries
+//     no version claim.
+//   - GitHub Packages shape: "/download/@scope/name/<version>/<hex>".
+export interface RegistryTarballIdentity {
+  name: string;
+  version?: string;
+}
+
+const NPM_PACKAGE_NAME_SHAPE = /^(?:@[^/@]+\/)?[^/@][^/]*$/;
+const GITHUB_PACKAGES_DOWNLOAD = /^\/download\/(@[^/]+\/[^/]+)\/([^/]+)\/[0-9a-f]+$/;
+
+export function registryTarballIdentity(
+  url: string,
+  basePaths: readonly string[] = []
+): RegistryTarballIdentity | null {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return null;
+  }
+  const base = [...basePaths]
+    .filter((candidate) => candidate.length > 1 && candidate.endsWith('/') && pathname.startsWith(candidate))
+    .sort((left, right) => right.length - left.length)[0];
+  if (base !== undefined) {
+    pathname = pathname.slice(base.length - 1);
+  }
+  const github = GITHUB_PACKAGES_DOWNLOAD.exec(pathname);
+  if (github !== null) {
+    return { name: github[1], version: github[2] };
+  }
+  const marker = pathname.indexOf('/-/');
+  if (marker <= 0) {
+    return null;
+  }
+  const name = pathname.slice(1, marker).replace(/%2f/gi, '/').replace(/%40/gi, '@');
+  const file = pathname.slice(marker + 3);
+  if (!NPM_PACKAGE_NAME_SHAPE.test(name) || file.includes('/')) {
+    return null;
+  }
+  if (file.length === 0) {
+    return null;
+  }
+  const basename = name.slice(name.lastIndexOf('/') + 1);
+  if (!file.startsWith(`${basename}-`) || !file.endsWith('.tgz')) {
+    return { name };
+  }
+  const version = file.slice(basename.length + 1, file.length - '.tgz'.length);
+  return version.length === 0 ? { name } : { name, version };
+}
+
 // The package name a REGISTRY tarball URL's own path encodes, or null when
 // the URL is not a registry resolution at all (git, file, a remote tarball
 // -- resolutionKindOf's other three kinds) or does not have the shape a
 // registry tarball path always has. npm and pnpm both write it the same
 // way: "/<name>/-/<basename>-<version>.tgz" for an unscoped name,
 // "/@scope/<name>/-/<basename>-<version>.tgz" for a scoped one -- so the
-// name is exactly the pathname segment before the literal "/-/" marker,
-// leading slash stripped, whether or not it itself contains a "/".
+// name is the pathname segment before the literal "/-/" marker, leading
+// slash stripped, read past a registry path prefix as the comment in the
+// body says.
 //
 // This is the vouching rule LockEntry.lookupName depends on (see
 // lockfiles/types.ts): a lockfile entry's own "name" field is written by
@@ -166,5 +236,17 @@ export function registryTarballPackageName(url: string): string | null {
   if (markerIndex <= 0) {
     return null;
   }
-  return pathname.slice(1, markerIndex);
+  const segment = pathname.slice(1, markerIndex);
+  // A registry mounted below a path ("/api/npm/remote/<name>/-/...") puts
+  // its own prefix in front of the name. The name is then the last segment,
+  // or the last two when the second-to-last is a scope. Without this a
+  // genuine alias on such a registry lost its lookup hint, and the tarball
+  // identity rule in checks/tamper.ts, which accepts a vouched alias on an
+  // added transitive entry, reported it as a mismatch.
+  const parts = segment.split('/');
+  if (parts.length <= 2 && (parts.length === 1 || parts[0].startsWith('@'))) {
+    return segment;
+  }
+  const scope = parts[parts.length - 2];
+  return scope.startsWith('@') ? parts.slice(-2).join('/') : parts[parts.length - 1];
 }
