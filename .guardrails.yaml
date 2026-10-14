@@ -26,6 +26,11 @@ gates:
   # a workspace build exits 2 with "corpus-missing" on every commit and
   # every CI run. The published tarball bundles a corpus, so it runs.
   #
+  # The version is the exact devDependencies pin in package.json. Keep it
+  # on the latest published release, and move it in each release pull
+  # request once that version is on npm: a pin left behind means none of
+  # the fixes since protect this repository's own pull requests.
+  #
   # Nothing is lost by that. The working tree is covered by the test suite
   # and by the dogfood bench over real public repositories. What this gate
   # is here for is the other job: catching a bad dependency added to this

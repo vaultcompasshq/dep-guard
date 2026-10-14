@@ -10,6 +10,71 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+Fixes three gate bypasses an independent audit reproduced against 0.11.1.
+What can newly block, and how to clear each:
+
+- Findings (exit 1) from unknown-package and typosquat for a name that an
+  npm `"link": true` lockfile entry used to exempt without proof. A link
+  entry now makes a name workspace-local only when its lockfile is the npm
+  lockfile its directory installs from (no other lockfile format beside it,
+  or a `packageManager` field naming npm; a `package-lock.json` beside an
+  `npm-shrinkwrap.json` never counts), its `resolved` path holds a
+  `package.json` with exactly that name on the same side, and that path is a
+  workspace member under the `workspaces` field of the `package.json` beside
+  the lockfile. On a `--trust-base` run that field is read from the trust
+  base wherever the base has that `package.json`, so a pull request cannot
+  widen it to confirm its own link. The exemption applies only to manifests
+  that lockfile covers. Before, a decoy
+  `package-lock.json` holding one link line beside the `pnpm-lock.yaml` an
+  install actually reads switched the name checks off for that name. A
+  claim that is not confirmed is named in `workspace-link-unconfirmed`. A
+  real npm workspace sibling is still exempt; if one is now reported, the
+  note says which test it failed.
+- Findings (exit 1) from lockfile-tamper when an added or changed npm or
+  pnpm entry resolves to a tarball on a trusted registry host that is not
+  the package the entry names: `tarball-name-mismatch:<package>` at
+  critical, whether or not the version changed. Before, `ws` bumped to a
+  new version and resolved to another package's tarball on
+  `registry.npmjs.org` scanned clean. A manifest-declared npm alias, an
+  alias that was already there before a bump, and a newly added transitive
+  alias npm records with a matching `name` field and an `npm:` alias edge in
+  a dependent's entry are not mismatches; the target of such an alias is
+  name-checked like a declared dependency. A `name` field alone excuses
+  nothing. Residual: a lockfile that writes both the field and the edge for
+  a real, published package name is accepted, as a manifest `npm:` alias to
+  that name would be. A `%2f`-encoded scope in a tarball path is decoded.
+  Two related
+  signals: `tarball-version-mismatch` (high) when the tarball file is the
+  same package at another version, and `unparseable-tarball:<host>`
+  (medium) when a URL on a trusted registry host has no tarball shape this
+  tool can read. A registry mounted below a path is read past that path
+  when the project `.npmrc` names it. Clear a true finding by regenerating
+  the lockfile with the package manager.
+- Findings (exit 1) from a manifest under a directory named `build`,
+  `dist`, `vendor`, `vendored`, `venv` or `.venv` that has a lockfile in the
+  same directory, and from every `package.json` that install root's own
+  workspace patterns name (its `workspaces` field, or a
+  `pnpm-workspace.yaml` beside the lockfile). That directory is an install
+  root, so its manifest and its members are now read like any other.
+  Before, its lockfile was read and its manifests dropped, so a
+  `build/package.json` declaring a known-malicious name beside its own
+  `build/package-lock.json`, or a `build/app` member of it, scanned clean
+  with one note. `node_modules` is not promoted this way: nothing installs
+  from inside it. A manifest with no lockfile beside it and no install root
+  naming it is still not read, and
+  `manifest-skipped-dirname` no longer claims a lockfile on its path would
+  cover it. Clear a finding as any other, or list the directory in
+  `ignorePaths` on the base.
+
+Documentation: the README no longer says dep-guard answers over MCP. No MCP
+server ships; `dep-guard check <name>` and the core library's `checkSingle`
+are the propose-time surface. The README and the CLI README now say that
+Python package names are read but not checked against any registry or
+corpus. Two `docs/INVARIANTS.md` claims about which lockfile and which
+manifest a finding names in a repository with several lockfiles were false
+and are corrected; an install-script finding still names the primary
+lockfile, which is recorded there as known open.
+
 ## [0.11.1] - 2026-10-07
 
 Patch on both published packages. `@vaultcompass/dep-guard` and

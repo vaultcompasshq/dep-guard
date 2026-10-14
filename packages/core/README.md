@@ -12,8 +12,9 @@ Most people who want dep-guard want the command line, not this package:
 [`@vaultcompass/dep-guard`](https://www.npmjs.com/package/@vaultcompass/dep-guard)
 wraps this engine, holds no gate logic of its own, and is one install away
 from working. Reach for this package only when you are embedding the scan or
-the propose-time name check in another tool -- an editor plugin, a bot, an
-MCP server. Node 22 or newer.
+the propose-time name check in another tool you are writing -- an editor
+plugin, a bot, or an MCP server of your own; dep-guard does not ship one.
+Node 22 or newer.
 
 ```
 npm install @vaultcompass/dep-guard-core

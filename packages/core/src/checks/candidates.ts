@@ -1,4 +1,4 @@
-import type { DepChange } from '../delta.js';
+import { acceptedTransitiveAliasTarget, type DepChange } from '../delta.js';
 import type { Protocol } from '../manifest.js';
 import type { CheckContext } from './types.js';
 
@@ -59,11 +59,62 @@ function noteEmptyAlias(ctx: CheckContext, change: DepChange): void {
   ctx.diagnostics.push(diagnostic);
 }
 
+function parentDir(filePath: string): string {
+  const slash = filePath.lastIndexOf('/');
+  return slash === -1 ? '' : filePath.slice(0, slash);
+}
+
+// A name is workspace-local only for the manifests the lockfile that
+// confirmed it actually installs: the change's own lockfile has to sit in
+// the directory whose npm lockfile confirmed the link (git-source.ts,
+// confirmWorkspaceLocalNames). A change no read lockfile covers is never
+// exempt. A delta built without the per-directory map (a hand-built one in
+// a unit test) falls back to the flat set.
+function isWorkspaceLocal(ctx: CheckContext, change: DepChange, registryName: string): boolean {
+  const byDir = ctx.delta.workspaceLocalNamesByDir;
+  if (byDir === undefined) {
+    return ctx.delta.workspaceLocalNames.has(registryName);
+  }
+  if (change.lockfilePath === undefined) {
+    return false;
+  }
+  return byDir.get(parentDir(change.lockfilePath))?.has(registryName) ?? false;
+}
+
+// The target of every added transitive npm alias the tarball-identity rule
+// accepted (acceptedTransitiveAliasTarget), as an added alias dependency
+// anchored where the lock entry is. Accepting the alias is what lets that
+// entry's tarball name another package without a tamper finding, so the
+// package it names is judged as a name instead: a lockfile cannot route a
+// typosquat or a hallucinated name in through an alias edge it wrote
+// itself.
+function acceptedAliasTargets(ctx: CheckContext): DepChange[] {
+  const changes: DepChange[] = [];
+  for (const entryChange of ctx.delta.lockEntryChanges) {
+    const target = acceptedTransitiveAliasTarget(entryChange);
+    if (target === null) {
+      continue;
+    }
+    changes.push({
+      name: entryChange.name,
+      registryName: target,
+      specifier: `npm:${target}`,
+      kind: 'added',
+      depType: 'dependencies',
+      protocol: 'alias',
+      manifestPath: entryChange.manifestPath,
+      lockfilePath: entryChange.lockfilePath,
+      ...(entryChange.lockfileFormat === undefined ? {} : { lockfileFormat: entryChange.lockfileFormat }),
+    });
+  }
+  return changes;
+}
+
 export function newRegistryNames(ctx: CheckContext): NewName[] {
   const seen = new Set<string>();
   const names: NewName[] = [];
 
-  for (const change of ctx.delta.changes) {
+  for (const change of [...ctx.delta.changes, ...acceptedAliasTargets(ctx)]) {
     if (!NAME_PROTOCOLS.has(change.protocol)) {
       continue;
     }
@@ -80,7 +131,7 @@ export function newRegistryNames(ctx: CheckContext): NewName[] {
       continue;
     }
 
-    if (ctx.delta.workspaceLocalNames.has(registryName)) {
+    if (isWorkspaceLocal(ctx, change, registryName)) {
       continue;
     }
 

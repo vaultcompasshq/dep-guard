@@ -28,7 +28,7 @@ npm install -g @vaultcompass/dep-guard
 ```
 
 **Status: published.** [`@vaultcompass/dep-guard`](https://www.npmjs.com/package/@vaultcompass/dep-guard)
-is on npm, covered by 1863 tests, and works out of the box: the package
+is on npm, covered by 1945 tests, and works out of the box: the package
 name corpus ships inside
 [`@vaultcompass/dep-guard-core`](https://www.npmjs.com/package/@vaultcompass/dep-guard-core),
 so a scan needs no `--corpus-dir` and no setup. Building your own corpus
@@ -47,8 +47,10 @@ registered hallucinated name reached 237 repositories through
 agent-generated files, with automated fetches starting within days.
 
 The tools that gate installs sit after the point where this lands. dep-guard
-reads the dependency diff -- or answers a proposed addition over MCP -- and
-scores it before anything is fetched.
+reads the dependency diff -- or answers a single proposed addition with
+`dep-guard check <name>` -- and scores it before anything is fetched.
+dep-guard ships no MCP server; an agent integration calls the CLI or the
+core library's `checkSingle`.
 
 ## What it checks
 
@@ -116,8 +118,8 @@ extremely popular target -- see below.
 ## Online checks (`--online`)
 
 Off by default, permanently -- this tool reads manifests and lockfiles
-offline by design, and network calls do not belong in a hook or an MCP
-propose-time check that has to answer fast. Turn `--online` on for CI or a
+offline by design, and network calls do not belong in a hook or a
+propose-time `dep-guard check` that has to answer fast. Turn `--online` on for CI or a
 scheduled audit, where the latency cost is irrelevant. The flag turns them
 on for one run; `"online": true` in `.dep-guard.json` turns them on for
 every invocation, pre-commit hooks included, which is why a
@@ -531,6 +533,19 @@ not exist and the job would fail as could-not-run.
 
 **On a pull-request run dep-guard takes every control input from the base
 ref, and the head tree is the thing being judged.**
+
+Two discovery inputs are still read from the head, because reading them
+from the base would hide the very packages a pull request adds: the
+workspace patterns (which manifests are scanned) and the npm workspace
+siblings that are exempt from the name checks. A sibling is exempt only
+when the npm lockfile its directory installs from links it to a
+`package.json` of exactly that name in the head tree, in a directory the
+install root's `workspaces` field covers, and only for the manifests that
+lockfile covers. That `workspaces` field is read from the trust base
+wherever the base has it, so a pull request cannot widen it to cover a
+package it plants. A decoy lockfile, a link to nothing, or a link to a
+directory outside the workspaces exempts nothing
+(`workspace-link-unconfirmed` names each claim that failed and why).
 
 Without that rule a pull request can turn the gate off in the same commit
 that carries what the gate exists to catch. `.dep-guard.json`,
@@ -981,6 +996,21 @@ quiet:
   `npm:` alias needs no special handling: pnpm's `packages` map is already
   keyed by registry identity, not by whatever name a dependent's own alias
   used to reach it.
+- A registry tarball that is not the package its entry names. For every
+  added or changed npm or pnpm entry resolved from a trusted registry host
+  (the public registries and every host the project `.npmrc` names), the
+  package the tarball path names has to be the package the entry is for,
+  whether or not the version moved: `ws` bumped to a new version and
+  resolved to another package's tarball on `registry.npmjs.org` is
+  `tarball-name-mismatch:<package>`, critical. A manifest-declared `npm:`
+  alias, an alias the entry already had before a bump, and a newly added
+  transitive alias npm records with both a matching `name` field and an
+  `npm:` alias edge in a dependent's entry are not mismatches; that alias
+  target is then name-checked. The
+  same package at another version in the tarball file name is
+  `tarball-version-mismatch` (high), and a URL on a trusted host whose path
+  has no tarball shape is `unparseable-tarball:<host>` (medium). A registry
+  mounted below a path is read past that path when `.npmrc` names it.
 - More than one lockfile in one directory -- every npm and pnpm lockfile
   present is checked (`npm-shrinkwrap.json`, `package-lock.json`,
   `pnpm-lock.yaml`), at the root and below it, and a `multiple-lockfiles`
@@ -1026,9 +1056,16 @@ quiet:
   migration pull request cannot clear the rule for itself, and an advisory
   mode does not help, because this is a could-not-run, not a finding.
 - Lockfiles below the repository root. npm and pnpm lockfiles are read
-  at any depth, and a finding names the manifest or lockfile it came from;
-  its `lockfilePath` is the file whose entry changed. `package.json`,
-  `pyproject.toml` and `requirements.txt` are read at any depth too. A
+  at any depth. A lockfile-tamper finding's `lockfilePath` is the file
+  whose entry changed; an install-script finding's is the scan's primary
+  lockfile, which in a repository with lockfiles in several directories can
+  be a different file. A finding for a declared dependency names a
+  manifest that declares it, which can be a manifest in another directory
+  that has no lockfile of its own. `package.json`,
+  `pyproject.toml` and `requirements.txt` are read at any depth too. Python
+  package names are read but not yet checked against any registry or
+  corpus: unknown-package and typosquat judge npm names only, so a Python
+  dependency produces no name finding. A
   `pyproject.toml` that only holds `[tool.*]` config has no dependencies;
   that file alone does not make the scan a could-not-run when another
   manifest or lockfile resolved. `pyproject.toml` is parsed as TOML, and
@@ -1039,9 +1076,12 @@ quiet:
   path, unless `ignorePaths` on the base covers it, in which case it is
   skipped with a note. Paths git ignores are not scanned. A directory
   named `node_modules`, `.venv`, `venv`, `dist`, `build`, `vendor` or
-  `vendored` only drops a stray manifest that no workspace pattern names,
-  and says so in `manifest-skipped-dirname`; a workspace member and a
-  lockfile on such a path are read. Every other `package.json` git tracks
+  `vendored` only drops a stray manifest that no workspace pattern names
+  and that has no lockfile beside it, and says so in
+  `manifest-skipped-dirname`; a workspace member, a manifest with a
+  lockfile in the same directory, a member that install root's own
+  workspace patterns name, and a lockfile on such a path are read. Under
+  `node_modules` only lockfiles are read. Every other `package.json` git tracks
   is read, test fixtures and templates included, so a fixture cannot hide
   a dependency; an `ignorePaths` entry on the base branch is how one is
   dropped. `dep-guard scan <path>` reads manifests under that directory

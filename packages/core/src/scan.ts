@@ -22,6 +22,7 @@ import {
   refsNameSameTree,
   matchGlobPath,
   probeManifestOnDisk,
+  reconfirmWorkspaceLocalNames,
   relativeScanPrefix,
   resolveScanRoot,
 } from './git-source.js';
@@ -986,6 +987,19 @@ export async function scan(opts: {
           (await refsNameSameTree(root, opts.mode.ref, controls.ref))
         ? statePair.before
         : await loadRefState(root, controls.ref, statePair.diagnostics, prefix, isIgnoredPath);
+  // Which npm workspace siblings are exempt from the name checks is decided
+  // against each install root's "workspaces" field, and on a pull-request
+  // run that field comes from the trust base wherever the base has it, so
+  // the pull request cannot widen it to confirm a link it adds itself
+  // (confirmWorkspaceLocalNames in git-source.ts).
+  if (trustState !== null && controls !== null) {
+    statePair.after = reconfirmWorkspaceLocalNames(
+      statePair.after,
+      trustState,
+      `the trust base "${controls.ref}"`,
+      statePair.diagnostics
+    );
+  }
   const deltaWith = (acknowledgedLockfiles: readonly string[]): DependencyDelta =>
     computeDelta(statePair.before, statePair.after, {
       extraComparisonSides: trustState === null ? [] : [trustState],

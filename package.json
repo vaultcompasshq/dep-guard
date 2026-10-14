@@ -28,7 +28,7 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^22.19.0",
     "@vaultcompass/conductor": "0.4.0",
-    "@vaultcompass/dep-guard": "0.4.0",
+    "@vaultcompass/dep-guard": "0.11.1",
     "@vaultcompass/intent-guard": "1.4.0",
     "@vaultcompass/vault-guard": "1.7.0",
     "jest": "^30.4.2",

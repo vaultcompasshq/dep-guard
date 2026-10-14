@@ -1,7 +1,12 @@
-import type { DepChange, LockEntryChange } from '../delta.js';
+import { acceptedTransitiveAliasTarget, type DepChange, type LockEntryChange } from '../delta.js';
 import type { LockEntry } from '../lockfiles/types.js';
 import type { Resolution } from '../resolution.js';
-import { registryTarballPackageName, resolutionOf, resolutionKindOf } from '../resolution.js';
+import {
+  registryTarballIdentity,
+  registryTarballPackageName,
+  resolutionOf,
+  resolutionKindOf,
+} from '../resolution.js';
 import { agreementAcrossCandidates } from './agreement.js';
 import { comparisonSignal, type ComparisonTamperSignal } from '../tamper-signals.js';
 import type { Diagnostic, Finding } from '../types.js';
@@ -347,6 +352,30 @@ function registryHostsOf(
     }
   }
   return hosts;
+}
+
+// The path each .npmrc-named registry is mounted under, per host, for a
+// registry that serves its tarballs below a path ("/api/npm/remote/"). The
+// tarball-name rule strips it before reading a name out of the path.
+function registryBasePathsOf(
+  pins: Map<string, string>,
+  defaultRegistry: string | null | undefined
+): Map<string, string[]> {
+  const byHost = new Map<string, string[]>();
+  for (const value of [...pins.values(), ...(defaultRegistry === null || defaultRegistry === undefined ? [] : [defaultRegistry])]) {
+    let parsed: URL;
+    try {
+      parsed = new URL(value.includes('://') ? value : `https://${value.replace(/^\/+/, '')}`);
+    } catch {
+      continue;
+    }
+    const pathname = parsed.pathname.endsWith('/') ? parsed.pathname : `${parsed.pathname}/`;
+    if (pathname === '/') {
+      continue;
+    }
+    byHost.set(parsed.host, [...(byHost.get(parsed.host) ?? []), pathname]);
+  }
+  return byHost;
 }
 
 const COMMIT_ID_SEGMENT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -1270,10 +1299,139 @@ export const tamperCheck: Check = (ctx) => {
     }
   }
 
+  // A registry tarball is the package its lockfile entry names. Judged on
+  // the after entry alone, so it holds whether the version moved or not,
+  // and for an added entry as much as a changed one.
+  //
+  // Every comparison rule above is blind to this by construction: an
+  // ordinary bump moves the version, the URL and the hash together, so a
+  // bump whose URL names ANOTHER package's tarball on the same trusted
+  // registry ("ws" 8.22.0 to 8.22.1, resolved to flatmap-stream's tarball)
+  // reads exactly like an ordinary bump, and lockEntrySource clears every
+  // URL on a trusted registry host whatever its path names. npm ci installs
+  // whatever "resolved" and "integrity" say, and a pull request writes
+  // both. This is lockfile-lint's --validate-package-names.
+  //
+  // What the tarball may name (see docs/INVARIANTS.md):
+  //   - packageName: the manifest's registry name when a manifest declares
+  //     the key (alias targets included), else the lockfile key, which for
+  //     pnpm already is the registry name;
+  //   - for a changed entry, what any earlier candidate's tarball named,
+  //     so an alias that was already reviewed survives a version bump;
+  //   - for an ADDED entry no manifest declares, the entry's vouched
+  //     lookupName: that is how npm records a transitive alias
+  //     ("string-width-cjs" installed from string-width), and an added
+  //     transitive entry's name is checked by nothing else either. A
+  //     declared entry never gets this, because there the manifest has
+  //     said what installs, and a changed entry never gets it, because its
+  //     earlier tarball already says what it was.
+  // A path on a trusted registry host that names no package is reported at
+  // medium, never passed: a URL this rule cannot read is not one it
+  // approved. pnpm entries with no tarball URL are the implied registry
+  // tarball for their own key and have nothing to check.
+  const registryBasePaths = registryBasePathsOf(ctx.npmrcRegistryPins, ctx.npmrcDefaultRegistry);
+  const tarballIdentityFindings = (entryChange: LockEntryChange): Omit<Finding, 'fingerprint'>[] => {
+    const { after } = entryChange;
+    if (after.resolvedUrl === undefined) {
+      return [];
+    }
+    const resolution = resolutionOf(after.resolvedUrl);
+    if (resolution === null || resolutionKindOf(resolution) !== 'registry' || !registryHosts.has(resolution.host)) {
+      return [];
+    }
+    const basePaths = registryBasePaths.get(resolution.host) ?? [];
+    const kind = (delta.hasComparisonBase ? entryChange.kind : 'present') satisfies ReportedKind;
+    const identity = registryTarballIdentity(after.resolvedUrl, basePaths);
+    if (identity === null) {
+      return [
+        {
+          ruleId: 'lockfile-tamper',
+          severity: 'medium',
+          packageName: entryChange.packageName,
+          message:
+            `"${entryChange.packageName}" resolves to a URL on the registry host "${resolution.host}" whose ` +
+            'path does not have the shape of a registry tarball, so this scan cannot tell which package it ' +
+            'installs. If the registry serves tarballs below a path, name that path in the project .npmrc.',
+          manifestPath: entryChange.manifestPath,
+          details: {
+            signal: `unparseable-tarball:${resolution.host}`,
+            kind,
+            host: resolution.host,
+            afterPath: pathLabel(after),
+          },
+        },
+      ];
+    }
+    const expected = new Set<string>([entryChange.packageName]);
+    for (const before of candidatesOfLockEntry(entryChange)) {
+      const earlier = before.resolvedUrl === undefined ? null : registryTarballIdentity(before.resolvedUrl, basePaths);
+      if (earlier !== null) {
+        expected.add(earlier.name);
+      }
+    }
+    const aliasTarget = acceptedTransitiveAliasTarget(entryChange);
+    if (aliasTarget !== null) {
+      expected.add(aliasTarget);
+    }
+    if (!expected.has(identity.name)) {
+      return [
+        {
+          ruleId: 'lockfile-tamper',
+          severity: 'critical',
+          packageName: entryChange.packageName,
+          message:
+            `"${entryChange.packageName}" resolves to the tarball of a different package, "${identity.name}", ` +
+            `on the registry host "${resolution.host}". An install would put that package's code under ` +
+            `this name.`,
+          manifestPath: entryChange.manifestPath,
+          details: {
+            // The tarball's package is the value-bearing subject: it is what
+            // the reader was shown and accepts, and it cannot move under a
+            // version bump. The path stays out of the signal.
+            signal: `tarball-name-mismatch:${identity.name}`,
+            kind,
+            tarballPackage: identity.name,
+            afterPath: pathLabel(after),
+          },
+        },
+      ];
+    }
+    const entryVersion = after.version?.split('+')[0];
+    if (
+      entryVersion !== undefined &&
+      identity.version !== undefined &&
+      !entryVersion.includes(':') &&
+      identity.version !== entryVersion
+    ) {
+      return [
+        {
+          ruleId: 'lockfile-tamper',
+          severity: 'high',
+          packageName: entryChange.packageName,
+          message:
+            `"${entryChange.packageName}" is recorded at version ${entryVersion} but resolves to the tarball ` +
+            `of version ${identity.version} on the registry host "${resolution.host}".`,
+          manifestPath: entryChange.manifestPath,
+          details: {
+            signal: 'tarball-version-mismatch',
+            kind,
+            recordedVersion: entryVersion,
+            tarballVersion: identity.version,
+            afterPath: pathLabel(after),
+          },
+        },
+      ];
+    }
+    return [];
+  };
+
   // Every entry the lockfile diff produced, whether or not any
   // manifest declares it, and however many entries share one name.
   if (comparableLockfile) {
     for (const entryChange of delta.lockEntryChanges) {
+      for (const finding of tarballIdentityFindings(entryChange)) {
+        report(finding, entryChange.lockfilePath);
+      }
       const candidates = candidatesOfLockEntry(entryChange);
       if (candidates.length === 0) {
         // An added entry has nothing to compare against, but where it

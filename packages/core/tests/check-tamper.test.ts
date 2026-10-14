@@ -62,6 +62,18 @@ function makeLockEntryChange(
   };
 }
 
+// The tarball-identity rule (a registry tarball must be the package its
+// entry names, at the version it records) is judged on the after entry
+// alone and is pinned in audit-2026-10-12.test.ts. Some fixtures below
+// repoint to another package's tarball or record a version their tarball
+// does not carry, so they trip it as well; a test about another signal sets
+// it aside with this, and says so where the extra finding is expected.
+const TARBALL_IDENTITY_SIGNAL = /^(?:tarball-name-mismatch|tarball-version-mismatch|unparseable-tarball)(?::|$)/;
+
+function otherThanTarballIdentity<T extends { details?: Record<string, unknown> }>(findings: T[]): T[] {
+  return findings.filter((finding) => !TARBALL_IDENTITY_SIGNAL.test(String(finding.details?.signal ?? '')));
+}
+
 interface ContextOptions {
   config?: Partial<ResolvedConfig>;
   lockfileFormat?: LockfileFormat;
@@ -686,7 +698,9 @@ describe('tamperCheck: a tarball swapped within one origin', () => {
         ),
       ],
     });
-    const findings = tamperCheck(context);
+    const all = tamperCheck(context);
+    expect(all.map((finding) => finding.details?.signal)).toContain('tarball-name-mismatch:evil');
+    const findings = otherThanTarballIdentity(all);
     expect(findings).toHaveLength(1);
     expect(findings[0].severity).toBe('critical');
     expect(findings[0].packageName).toBe('ansi-regex');
@@ -862,7 +876,9 @@ describe('tamperCheck: a same-origin repoint with no before integrity', () => {
         ),
       ],
     });
-    const findings = tamperCheck(context);
+    const all = tamperCheck(context);
+    expect(all.map((finding) => finding.details?.signal)).toContain('tarball-name-mismatch:evil');
+    const findings = otherThanTarballIdentity(all);
     expect(findings).toHaveLength(1);
     expect(findings[0].severity).toBe('high');
     expect(findings[0].packageName).toBe('ansi-regex');
@@ -918,7 +934,9 @@ describe('tamperCheck: a same-origin repoint with no before integrity', () => {
   });
 
   // No before entry at all -- audit mode, or a fresh add -- has no move to
-  // detect, so this delta-mode signal reports nothing.
+  // detect, so this delta-mode signal reports nothing. The tarball naming
+  // another package is still a fact about the entry on its own, and the
+  // tarball-identity rule reports exactly that and nothing more.
   test('an added entry with no before side reports nothing new', () => {
     const context = makeContext([], {
       lockEntryChanges: [
@@ -926,7 +944,9 @@ describe('tamperCheck: a same-origin repoint with no before integrity', () => {
       ],
       hasComparisonBase: false,
     });
-    expect(tamperCheck(context)).toEqual([]);
+    const findings = tamperCheck(context);
+    expect(findings.map((finding) => finding.details?.signal)).toEqual(['tarball-name-mismatch:evil']);
+    expect(otherThanTarballIdentity(findings)).toEqual([]);
   });
 
   // A repoint to a DIFFERENT host is the more specific host-changed fact,
@@ -2125,7 +2145,9 @@ describe('tamperCheck: lockfile entries no manifest declares', () => {
         ),
       ],
     });
-    const signals = tamperCheck(context).map((finding) => String(finding.details?.signal));
+    // 9.9.9 recorded against the 4.17.21 tarball is also a version
+    // mismatch, which is set aside here.
+    const signals = otherThanTarballIdentity(tamperCheck(context)).map((finding) => String(finding.details?.signal));
     expect(signals).toEqual(['integrity-removed']);
   });
 
@@ -2145,7 +2167,7 @@ describe('tamperCheck: lockfile entries no manifest declares', () => {
         ),
       ],
     });
-    const signals = tamperCheck(context).map((finding) => String(finding.details?.signal));
+    const signals = otherThanTarballIdentity(tamperCheck(context)).map((finding) => String(finding.details?.signal));
     expect(signals).not.toContain('integrity-removed');
     expect(signals).toEqual(['ambiguous-critical']);
   });
@@ -2330,7 +2352,7 @@ describe('tamperCheck: a verdict the candidates disagree on is announced', () =>
         ),
       ],
     });
-    const signals = tamperCheck(context).map((finding) => String(finding.details?.signal));
+    const signals = otherThanTarballIdentity(tamperCheck(context)).map((finding) => String(finding.details?.signal));
     expect(signals).toEqual(['ambiguous-critical']);
     expect(ambiguities(context)[0].message).toContain('integrity-removed');
   });
@@ -2351,7 +2373,7 @@ describe('tamperCheck: a verdict the candidates disagree on is announced', () =>
         ),
       ],
     });
-    const signals = tamperCheck(context).map((finding) => String(finding.details?.signal));
+    const signals = otherThanTarballIdentity(tamperCheck(context)).map((finding) => String(finding.details?.signal));
     expect(signals).toEqual(['ambiguous-critical']);
     expect(ambiguities(context)[0].message).toContain('host-changed');
   });
@@ -2388,7 +2410,9 @@ describe('tamperCheck: a verdict the candidates disagree on is announced', () =>
         ),
       ],
     });
-    expect(tamperCheck(context)).toEqual([]);
+    // 4.18.0 recorded against the 4.17.21 tarball is a version mismatch,
+    // which is a fact about the after entry and not an announcement.
+    expect(otherThanTarballIdentity(tamperCheck(context))).toEqual([]);
     expect(ambiguities(context)).toEqual([]);
   });
 
@@ -2427,7 +2451,7 @@ describe('tamperCheck: a verdict the candidates disagree on is announced', () =>
         ),
       ],
     });
-    const findings = tamperCheck(context);
+    const findings = otherThanTarballIdentity(tamperCheck(context));
     expect(findings).toHaveLength(1);
     expect(String(findings[0].details?.signal)).toContain('tarball-repointed');
     expect(findings[0].details?.beforePath).toBeUndefined();
@@ -2445,7 +2469,7 @@ describe('tamperCheck: a verdict the candidates disagree on is announced', () =>
         }),
       ],
     });
-    const findings = tamperCheck(context);
+    const findings = otherThanTarballIdentity(tamperCheck(context));
     expect(findings[0].details?.beforePath).toBe('/lodash/-/lodash-4.17.21.tgz');
     expect(findings[0].details?.counterpartCandidates).toBeUndefined();
   });

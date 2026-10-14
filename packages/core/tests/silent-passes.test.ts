@@ -732,7 +732,7 @@ describe('B1: a declared git source does not hide a different source under the s
 describe('B2: an added entry is judged by host first, path shape only sets severity', () => {
   const EVIL_SHAPED = 'https://evil.example.com/baz/-/baz-1.0.0.tgz';
 
-  async function baseThenAdd(npmrc: string | null, resolved: string): Promise<void> {
+  async function baseThenAdd(npmrc: string | null, resolved: string, key = 'baz'): Promise<void> {
     await write('package.json', manifestJson({ lodash: '^4.17.21' }));
     await write('package-lock.json', npmLock({ 'node_modules/lodash': CLEAN_LODASH }, { lodash: '^4.17.21' }));
     await commitAll('first');
@@ -744,7 +744,7 @@ describe('B2: an added entry is judged by host first, path shape only sets sever
       npmLock(
         {
           'node_modules/lodash': CLEAN_LODASH,
-          'node_modules/baz': { version: '1.0.0', resolved, integrity: 'sha512-baz' },
+          [`node_modules/${key}`]: { version: '1.0.0', resolved, integrity: 'sha512-baz' },
         },
         { lodash: '^4.17.21' }
       )
@@ -792,9 +792,12 @@ describe('B2: an added entry is judged by host first, path shape only sets sever
   test('GitHub Packages with the host pinned raises nothing, and without the pin it is a finding', async () => {
     const url = 'https://npm.pkg.github.com/download/@acme/baz/1.0.0/0123456789abcdef';
     await write('.npmrc', '@acme:registry=https://npm.pkg.github.com\n');
-    await baseThenAdd(null, url);
+    // Keyed by the package the GitHub Packages path names, as npm writes
+    // it: an entry keyed "baz" resolving to @acme/baz is a tarball naming
+    // another package, which the tarball-identity rule reports.
+    await baseThenAdd(null, url, '@acme/baz');
     const pinned = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'HEAD' }, corpusDir: FIXTURE_CORPUS });
-    expect(tamperSignals(pinned, 'baz')).toEqual([]);
+    expect(tamperSignals(pinned, '@acme/baz')).toEqual([]);
 
     await rm(path.join(repo, '.npmrc'));
     const unpinned = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'HEAD' }, corpusDir: FIXTURE_CORPUS });

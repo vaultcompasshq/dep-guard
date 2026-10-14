@@ -74,13 +74,20 @@ export interface RepoState {
   // one that never set one at all, the only two cases that reach it with
   // no resolvedUrl to judge an origin from.
   npmrcDefaultRegistry: string | null;
-  // Every name this side's lockfile records as workspace-local (see
-  // ParsedLockfile.workspaceLocalNames). A straight carry of the
-  // lockfile's own field to the level checks actually read -- RepoState is
-  // the object the delta step consumes, so this is where the fact has to
-  // surface for computeDelta to pass it on, not a place that re-derives it
-  // by walking lockfile entries a second time.
+  // Every name this side's lockfiles record as workspace-local AND that
+  // git-source.ts confirmed: the lockfile is the npm lockfile its directory
+  // installs from, and the link points at a package.json on this side with
+  // exactly that name. A lockfile's own claim (ParsedLockfile.
+  // workspaceLocalNames) never reaches here unconfirmed.
+  //
+  // workspaceLocalNamesByDir is the same set keyed by the directory of the
+  // lockfile that confirmed each name, and is the one the name checks read:
+  // a name is workspace-local only for the manifests that lockfile covers.
+  // workspaceLocalNames is the union, kept for consumers that judge a lock
+  // entry rather than a manifest line. Optional so a state built by hand
+  // falls back to the union.
   workspaceLocalNames: ReadonlySet<string>;
+  workspaceLocalNamesByDir?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 const SCOPE_PIN_SUFFIX = ':registry';

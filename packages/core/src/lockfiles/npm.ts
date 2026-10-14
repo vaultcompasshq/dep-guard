@@ -37,15 +37,47 @@ function installedNameFromKey(key: string): string | undefined {
 // value rather than by a string literal that could drift from the message.
 //
 // registryTarballPackageName (resolution.ts) only recognises npm's own
-// tarball path shape. A registry that serves tarballs under a path PREFIX
-// (a proxied or namespaced registry mounted below some base path) or that
-// percent-encodes a scope's "/" as "%2f" in the name segment writes a path
-// this parser cannot match against a scoped or unscoped name the ordinary
-// way, so a perfectly genuine alias on such a registry raises this
-// diagnostic too. That is expected noise for those registries -- a lost
-// lookupName, never a wrong finding -- not evidence of anything wrong with
-// the lockfile.
+// tarball path shape, read past a path PREFIX (a proxied or namespaced
+// registry mounted below some base path) by taking the last segment, or the
+// last two for a scope. A registry that percent-encodes a scope's "/" as
+// "%2f" in the name segment still writes a path this parser cannot match
+// against a scoped name the ordinary way, so a perfectly genuine alias on
+// such a registry raises this diagnostic too. That is expected noise for
+// those registries, not evidence of anything wrong with the lockfile; it
+// costs the lookupName, and with it the alias excuse the tarball-identity
+// rule in checks/tamper.ts gives an added transitive entry, which then
+// reports a mismatch: a false positive, never a pass.
 export const UNVERIFIABLE_NAME_CODE = 'npm-lockfile-unverifiable-name';
+
+// Every "npm:<target>@<range>" (or bare "npm:<target>") a packages entry's
+// own dependency maps declare, keyed by the dependency name it installs
+// under. This is how npm records that a dependent ASKED for an alias, as
+// opposed to an entry merely carrying a "name" field: the tarball-identity
+// rule in checks/tamper.ts accepts an added transitive entry's name field
+// only when such an edge names it (see ParsedLockfile.aliasEdges).
+const ALIAS_DEP_MAPS = ['dependencies', 'optionalDependencies', 'devDependencies', 'peerDependencies'];
+const NPM_ALIAS_SPEC = /^npm:((?:@[^/@\s]+\/)?[^/@\s]+)(?:@.*)?$/;
+
+function recordAliasEdges(value: unknown, aliasEdges: Map<string, Set<string>>): void {
+  if (!isPlainObject(value)) {
+    return;
+  }
+  for (const field of ALIAS_DEP_MAPS) {
+    const map = value[field];
+    if (!isPlainObject(map)) {
+      continue;
+    }
+    for (const [dependency, spec] of Object.entries(map)) {
+      const target = typeof spec === 'string' ? NPM_ALIAS_SPEC.exec(spec.trim())?.[1] : undefined;
+      if (target === undefined) {
+        continue;
+      }
+      const targets = aliasEdges.get(dependency) ?? new Set<string>();
+      targets.add(target);
+      aliasEdges.set(dependency, targets);
+    }
+  }
+}
 
 // The diagnostic code for a lockfile with no "packages" map at all (a real
 // v1 lockfile). delta.ts reads it to tell "the base side was parsed and
@@ -126,6 +158,8 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
   const diagnostics: Diagnostic[] = [];
   const entries = new Map<string, LockEntry[]>();
   const workspaceLocalNames = new Set<string>();
+  const workspaceLinks: Array<{ name: string; resolved?: string }> = [];
+  const aliasEdges = new Map<string, Set<string>>();
 
   const lockfileVersion = parsed.lockfileVersion;
   // A string of digits ("3") is read as that number, so a version that
@@ -192,6 +226,7 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
   // (both legal npm package names) are handled like any other entry
   // instead of colliding with inherited Object.prototype members.
   for (const [key, value] of Object.entries(packages)) {
+    recordAliasEdges(value, aliasEdges);
     const name = installedNameFromKey(key);
     if (name === undefined) {
       continue; // workspace-local package directory, or the root "" entry
@@ -216,7 +251,12 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
       // workspaceLocalNames for the name-based checks to read instead of
       // treating this dependency's plain version-range specifier as an
       // ordinary registry name.
+      //
+      // Recorded as a claim only, with the directory it points at: whether
+      // the claim holds is decided against the scanned side's manifests in
+      // git-source.ts, never here (see ParsedLockfile.workspaceLocalNames).
       workspaceLocalNames.add(name);
+      workspaceLinks.push(typeof value.resolved === 'string' ? { name, resolved: value.resolved } : { name });
       continue;
     }
     // Two different packages-map keys can resolve to the same installed
@@ -235,5 +275,5 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
     }
   }
 
-  return { format: 'npm', path, entries, diagnostics, workspaceLocalNames };
+  return { format: 'npm', path, entries, diagnostics, workspaceLocalNames, workspaceLinks, aliasEdges };
 }

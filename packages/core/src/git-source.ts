@@ -6,7 +6,7 @@ import { parse as parseYaml } from 'yaml';
 import { MissingPackagesMapError, parseNpmLockfile } from './lockfiles/npm.js';
 import { parseOnlyBuilt, parsePnpmLockfile } from './lockfiles/pnpm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
-import { parseManifest, type ParsedManifest } from './manifest.js';
+import { parseManifest, workspacePatternsOf, type ParsedManifest } from './manifest.js';
 import { isPythonManifestPath, parsePyproject, parseRequirements } from './python-manifest.js';
 import {
   isReadLockfile,
@@ -139,7 +139,8 @@ const UNRESOLVABLE_LINK_CODES = new Set(['ELOOP', 'ENAMETOOLONG']);
 const NEVER_A_PACKAGE_DIR = 'node_modules';
 
 // Directory names an undeclared stray manifest is not read from. A
-// workspace member a glob resolved, and every lockfile, are still read.
+// workspace member a glob resolved, a manifest with a lockfile beside it,
+// and every lockfile, are still read.
 // node_modules and .git are not announced per file. The other names are,
 // one diagnostic per stray manifest.
 const SKIP_DIR_NAMES: ReadonlySet<string> = new Set([
@@ -877,7 +878,7 @@ function stringArray(value: unknown): string[] {
 }
 
 // npm accepts both "workspaces": ["packages/*"] and the older
-// "workspaces": { "packages": [...] } spelling.
+// "workspaces": { "packages": [...] } spelling (workspacePatternsOf).
 function workspaceGlobsFromManifest(content: string | null): string[] {
   if (content === null) {
     return [];
@@ -891,14 +892,7 @@ function workspaceGlobsFromManifest(content: string | null): string[] {
     // avoids emitting a second, competing error for one bad file.
     return [];
   }
-  if (!isPlainObject(parsed)) {
-    return [];
-  }
-  const workspaces = parsed.workspaces;
-  if (isPlainObject(workspaces)) {
-    return stringArray(workspaces.packages);
-  }
-  return stringArray(workspaces);
+  return workspacePatternsOf(parsed);
 }
 
 function workspaceGlobsFromWorkspaceYaml(content: string | null): string[] {
@@ -1182,14 +1176,15 @@ async function expandPattern(
 // with a "." segment is one npm maps to nothing, and is noted. An
 // exclusion this module cannot apply exactly is not applied and is noted,
 // which only ever widens the scan.
-async function discoverWorkspaceDirs(
-  source: FileSource,
-  patterns: string[],
-  diagnostics: Diagnostic[],
-  role: SideRole
-): Promise<string[]> {
+// The positive patterns and the exclusions that survive npm's ordering
+// rules (see discoverWorkspaceDirs). An exclusion this module cannot apply
+// exactly is dropped and handed to onUnsupportedExclusion.
+function partitionWorkspacePatterns(
+  patterns: readonly string[],
+  onUnsupportedExclusion: (raw: string) => void = () => {}
+): { positives: string[]; negatedPatterns: string[] } {
   const positives: string[] = [];
-  let negatedPatterns: string[] = [];
+  const negatedPatterns: string[] = [];
   for (const raw of patterns) {
     const bangs = /^!+/.exec(raw)?.[0].length ?? 0;
     const pattern = raw.slice(bangs).replace(/^\.?\/+/, '');
@@ -1199,10 +1194,7 @@ async function discoverWorkspaceDirs(
         UNEXPANDABLE_GLOB_SYNTAX.test(pattern) ||
         patternReach(pattern) !== 'inside'
       ) {
-        diagnostics.push({
-          code: GLOB_UNSUPPORTED,
-          message: `workspace exclusion "${raw}": this tool cannot apply it exactly, so it was not applied and the directories it names were scanned`,
-        });
+        onUnsupportedExclusion(raw);
         continue;
       }
       negatedPatterns.push(pattern);
@@ -1223,7 +1215,50 @@ async function discoverWorkspaceDirs(
       positives.splice(positives.indexOf(matched), 1);
     }
   }
-  negatedPatterns = negatedPatterns.map(collapseSlashes);
+  return { positives, negatedPatterns: negatedPatterns.map(collapseSlashes) };
+}
+
+// Whether a directory, relative to an install root, is one of that root's
+// workspace members under these patterns, decided by matching rather than
+// by walking the tree, so it never throws. A pattern this module cannot
+// match exactly (glob syntax beyond "*" and "**", a ".." or a drive)
+// counts as `unsupported` says: "covers" where the stricter answer is to
+// read more (MB2, reading members), "excludes" where it is to exempt less
+// (B1, confirming a link). No directory with a node_modules segment is a
+// member, as in discoverWorkspaceDirs.
+function workspacePatternsCover(
+  patterns: readonly string[],
+  relDir: string,
+  unsupported: 'covers' | 'excludes'
+): boolean {
+  if (relDir === '' || relDir.split('/').includes(NEVER_A_PACKAGE_DIR)) {
+    return false;
+  }
+  const { positives, negatedPatterns } = partitionWorkspacePatterns(patterns);
+  if (negatedPatterns.some((negated) => matchNpmGlob(negated, relDir))) {
+    return false;
+  }
+  return positives.some((raw) => {
+    const pattern = collapseSlashes(raw.replace(/\\/g, '/'));
+    if (pattern === '' || patternReach(pattern) !== 'inside' || UNEXPANDABLE_GLOB_SYNTAX.test(pattern)) {
+      return pattern !== '' && unsupported === 'covers';
+    }
+    return matchNpmGlob(pattern, relDir);
+  });
+}
+
+async function discoverWorkspaceDirs(
+  source: FileSource,
+  patterns: string[],
+  diagnostics: Diagnostic[],
+  role: SideRole
+): Promise<string[]> {
+  const { positives, negatedPatterns } = partitionWorkspacePatterns(patterns, (raw) => {
+    diagnostics.push({
+      code: GLOB_UNSUPPORTED,
+      message: `workspace exclusion "${raw}": this tool cannot apply it exactly, so it was not applied and the directories it names were scanned`,
+    });
+  });
 
   const dirs = new Set<string>();
   const resolvePositive = async (raw: string): Promise<void> => {
@@ -1542,6 +1577,194 @@ function isParsedLockfilePath(relPath: string): boolean {
   return (PARSED_LOCKFILE_NAMES as readonly string[]).includes(baseName(relPath));
 }
 
+const WORKSPACE_LINK_UNCONFIRMED = 'workspace-link-unconfirmed';
+const NPM_SHRINKWRAP = 'npm-shrinkwrap.json';
+const NPM_LOCKFILE_NAMES: ReadonlySet<string> = new Set([NPM_SHRINKWRAP, 'package-lock.json']);
+
+function manifestPathIn(dir: string): string {
+  return dir === '' ? ROOT_MANIFEST : `${dir}/${ROOT_MANIFEST}`;
+}
+
+// Why an npm lockfile's link entries cannot vouch for anything in its
+// directory, or null when it is the lockfile npm installs from there.
+//
+// npm reads npm-shrinkwrap.json in preference to package-lock.json, so a
+// package-lock.json beside a shrinkwrap is never the one installed from. A
+// "packageManager" field in the directory's own package.json names the
+// manager outright (pnpm 9 and corepack refuse to install under a field
+// naming another one, so setting it falsely is loud rather than silent).
+// Without that field, another lockfile format in the same directory means
+// this scan cannot tell which manager the developer runs, and the stricter
+// answer is that no link entry vouches for anything.
+function inactiveNpmLockfileReason(
+  lockfilePath: string,
+  presentLockfilePaths: readonly string[],
+  manifests: readonly ParsedManifest[]
+): string | null {
+  const dir = parentDir(lockfilePath);
+  const presentHere = presentLockfilePaths
+    .filter((present) => parentDir(present) === dir)
+    .map(baseName);
+  if (baseName(lockfilePath) !== NPM_SHRINKWRAP && presentHere.includes(NPM_SHRINKWRAP)) {
+    return `npm installs from ${NPM_SHRINKWRAP} in that directory, not from this file`;
+  }
+  const declared = manifests.find((manifest) => manifest.path === manifestPathIn(dir))?.packageManager;
+  if (declared !== undefined) {
+    const manager = declared.split('@')[0]?.trim() ?? '';
+    return manager === 'npm' ? null : `${manifestPathIn(dir)} declares "packageManager": "${declared}"`;
+  }
+  const others = presentHere.filter((name) => !NPM_LOCKFILE_NAMES.has(name));
+  return others.length === 0
+    ? null
+    : `${others.join(', ')} sits beside it and no "packageManager" field says which one is installed from`;
+}
+
+// The workspace-local names one side may exempt from the name checks.
+//
+// A "link": true entry is a claim written by whoever wrote the lockfile, on
+// a pull request its author. Taken at its word, a nine-line decoy
+// package-lock.json beside the pnpm-lock.yaml an install actually reads
+// switched off unknown-package and typosquat for any name it listed. So a
+// claim is confirmed only when both hold on this same side:
+//
+//   - its lockfile is the npm lockfile the install reads in its directory
+//     (inactiveNpmLockfileReason), and
+//   - its "resolved" path, joined to that directory, names a directory
+//     inside the repository whose package.json this side parsed and whose
+//     own "name" field is exactly the linked name, and
+//   - that directory is a workspace member of the install root: the npm
+//     "workspaces" field of the package.json in the lockfile's own
+//     directory covers it (workspacePatternsCover). A package.json planted
+//     anywhere else is not a workspace, npm does not link it, and npm
+//     install rewrites the entry to a registry fetch.
+//
+// Under --trust-base the workspaces field is read from the trust base when
+// the base has that package.json (`workspaceSource`), so a pull request
+// that widens the field cannot confirm its own link; the diagnostic says
+// when that is why. A install root new in the pull request has nothing on
+// the base and is judged by its own field.
+//
+// A link entry with no "resolved" confirms nothing: npm always writes one.
+// Every claim that fails is named in one diagnostic per lockfile, with its
+// reason, so a reader can see why a sibling is being name-checked.
+//
+// A confirmed name is keyed by its lockfile's directory, because that
+// lockfile is what installs the manifests it covers and nothing else: a
+// sibling that is real in one npm project says nothing about a manifest
+// that a pnpm lockfile in another directory installs from the registry.
+export interface WorkspaceSource {
+  label: string;
+  manifests: readonly ParsedManifest[];
+}
+
+export function confirmWorkspaceLocalNames(
+  lockfiles: readonly ParsedLockfile[],
+  presentLockfilePaths: readonly string[],
+  manifests: readonly ParsedManifest[],
+  diagnostics: Diagnostic[],
+  workspaceSource: WorkspaceSource | null = null
+): Map<string, Set<string>> {
+  const byDir = new Map<string, Set<string>>();
+  const unconfirmed: Array<{ lockfilePath: string; failures: Map<string, string> }> = [];
+  for (const lockfile of lockfiles) {
+    if (lockfile.format !== 'npm' || lockfile.workspaceLocalNames.size === 0) {
+      continue;
+    }
+    const links: Array<{ name: string; resolved?: string }> =
+      lockfile.workspaceLinks ?? [...lockfile.workspaceLocalNames].map((name) => ({ name }));
+    const inactive = inactiveNpmLockfileReason(lockfile.path, presentLockfilePaths, manifests);
+    const dir = parentDir(lockfile.path);
+    const rootManifestPath = manifestPathIn(dir);
+    const headPatterns = manifests.find((manifest) => manifest.path === rootManifestPath)?.workspaces ?? [];
+    const baseRoot = workspaceSource?.manifests.find((manifest) => manifest.path === rootManifestPath);
+    const patterns = baseRoot === undefined ? headPatterns : baseRoot.workspaces ?? [];
+    const failures = new Map<string, string>();
+    for (const link of links) {
+      const reason = ((): string | null => {
+        if (inactive !== null) {
+          return inactive;
+        }
+        if (link.resolved === undefined) {
+          return 'the entry records no linked path';
+        }
+        const target = path.posix.normalize(dir === '' ? link.resolved : `${dir}/${link.resolved}`);
+        const targetDir = target === '.' ? '' : target.replace(/\/+$/, '');
+        if (path.posix.isAbsolute(target) || target === '..' || target.startsWith('../')) {
+          return `it links to "${link.resolved}", outside the repository`;
+        }
+        if (!manifests.some((manifest) => manifest.path === manifestPathIn(targetDir) && manifest.name === link.name)) {
+          return `no package.json named "${link.name}" was found at ${targetDir === '' ? 'the root' : targetDir}`;
+        }
+        const relDir = dir === '' ? targetDir : targetDir.startsWith(`${dir}/`) ? targetDir.slice(dir.length + 1) : null;
+        if (relDir !== null && workspacePatternsCover(patterns, relDir, 'excludes')) {
+          return null;
+        }
+        const where = baseRoot === undefined ? rootManifestPath : `${rootManifestPath} on ${workspaceSource?.label}`;
+        const widened =
+          baseRoot !== undefined && relDir !== null && workspacePatternsCover(headPatterns, relDir, 'excludes')
+            ? '; this change edits that field to cover it, and a pull request cannot widen it for its own link'
+            : '';
+        return `the "workspaces" field of ${where} does not cover ${targetDir}${widened}`;
+      })();
+      if (reason === null) {
+        const names = byDir.get(dir) ?? new Set<string>();
+        names.add(link.name);
+        byDir.set(dir, names);
+      } else if (!failures.has(link.name)) {
+        failures.set(link.name, reason);
+      }
+    }
+    if (failures.size > 0) {
+      unconfirmed.push({ lockfilePath: lockfile.path, failures });
+    }
+  }
+  for (const { lockfilePath, failures } of unconfirmed) {
+    const still = [...failures]
+      .filter(([name]) => !(byDir.get(parentDir(lockfilePath))?.has(name) ?? false))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+    if (still.length === 0) {
+      continue;
+    }
+    diagnostics.push({
+      code: WORKSPACE_LINK_UNCONFIRMED,
+      message:
+        `${lockfilePath}: records "link": true for ` +
+        `${still.map(([name, reason]) => `"${name}" (${reason})`).join(', ')}, so ` +
+        `${still.length === 1 ? 'that name is' : 'those names are'} name-checked like any registry dependency`,
+    });
+  }
+  return byDir;
+}
+
+// The judged side's workspace-local names, re-confirmed with the install
+// roots' "workspaces" fields read from the trust base (see
+// confirmWorkspaceLocalNames). Replaces the judged side's own
+// workspace-link-unconfirmed notes with the ones this pass produces.
+export function reconfirmWorkspaceLocalNames(
+  judged: RepoState,
+  trusted: RepoState,
+  trustedLabel: string,
+  diagnostics: Diagnostic[]
+): RepoState {
+  for (let i = diagnostics.length - 1; i >= 0; i -= 1) {
+    if (diagnostics[i].code === WORKSPACE_LINK_UNCONFIRMED) {
+      diagnostics.splice(i, 1);
+    }
+  }
+  const byDir = confirmWorkspaceLocalNames(
+    [...(judged.lockfile === null ? [] : [judged.lockfile]), ...(judged.extraLockfiles ?? [])],
+    (judged.lockfileInventory ?? []).map((entry) => entry.path),
+    judged.manifests,
+    diagnostics,
+    { label: trustedLabel, manifests: trusted.manifests }
+  );
+  return {
+    ...judged,
+    workspaceLocalNames: new Set([...byDir.values()].flatMap((names) => [...names])),
+    workspaceLocalNamesByDir: byDir,
+  };
+}
+
 async function loadState(
   source: FileSource,
   diagnostics: Diagnostic[],
@@ -1550,8 +1773,67 @@ async function loadState(
   isIgnoredPath: (relPath: string) => boolean = () => false
 ): Promise<RepoState> {
   const filesInPrefix = (await source.listFiles()).filter((relPath) => underPrefix(relPath, prefix));
-  // Lockfiles are never dropped for a directory name. Stray manifests are.
-  const files = filesInPrefix.filter((relPath) => isLockfileName(relPath) || !pathSkipped(relPath));
+  // Lockfiles are never dropped for a directory name, and neither is a
+  // manifest with a lockfile beside it: that directory is an install root,
+  // a project of its own, whatever it is called. Reading its lockfile while
+  // dropping its manifest meant its entries were read and its names never
+  // checked, since the name checks run over manifest lines; a build/ project
+  // declaring a known-malicious name scanned clean that way.
+  //
+  // The same holds for the install root's own workspace members: the
+  // lockfile records what they install, so a member under a skipped name
+  // (build/app, declared by build/package.json's "workspaces", or by a
+  // pnpm-workspace.yaml beside the lockfile) is read too. Members are found
+  // by matching the root's patterns against the listed paths
+  // (workspacePatternsCover), never by walking, and a pattern this module
+  // cannot match exactly reads more rather than less.
+  //
+  // node_modules is the one exception: nothing is installed FROM inside it,
+  // and a committed node_modules package that ships its own lockfile is a
+  // dependency's file, not a project of this repository's. Only a stray
+  // manifest outside every install root is dropped, and is announced below.
+  const listedSet = new Set(filesInPrefix);
+  const installRoots = uniquePaths(filesInPrefix.filter(isLockfileName).map(parentDir)).filter(
+    (dir) => !dir.split('/').includes(NEVER_A_PACKAGE_DIR)
+  );
+  const installRootSet = new Set(installRoots);
+  const installRootPatterns = new Map<string, string[]>();
+  for (const dir of installRoots) {
+    const patterns: string[] = [];
+    const manifestPath = manifestPathIn(dir);
+    if (listedSet.has(manifestPath) && !(await source.isSymlink(manifestPath))) {
+      patterns.push(...workspaceGlobsFromManifest(await source.read(manifestPath)));
+    }
+    const yamlPath = dir === '' ? WORKSPACE_YAML : `${dir}/${WORKSPACE_YAML}`;
+    if (listedSet.has(yamlPath) && !(await source.isSymlink(yamlPath))) {
+      patterns.push(...workspaceGlobsFromWorkspaceYaml(await source.read(yamlPath)));
+    }
+    if (patterns.length > 0) {
+      installRootPatterns.set(dir, patterns);
+    }
+  }
+  const readDespiteSkippedName = (relPath: string): boolean => {
+    if (!isProjectManifestPath(relPath) || relPath.split('/').includes(NEVER_A_PACKAGE_DIR)) {
+      return false;
+    }
+    const dir = parentDir(relPath);
+    if (installRootSet.has(dir)) {
+      return true;
+    }
+    if (!isPackageJsonPath(relPath)) {
+      return false;
+    }
+    for (const [root, patterns] of installRootPatterns) {
+      const relDir = root === '' ? dir : dir.startsWith(`${root}/`) ? dir.slice(root.length + 1) : null;
+      if (relDir !== null && workspacePatternsCover(patterns, relDir, 'covers')) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const files = filesInPrefix.filter(
+    (relPath) => isLockfileName(relPath) || !pathSkipped(relPath) || readDespiteSkippedName(relPath)
+  );
   const listedManifests = files.filter(isProjectManifestPath).sort();
   const listedLockfiles = files.filter(isLockfileName);
   const rootInScope = underPrefix(ROOT_MANIFEST, prefix);
@@ -1636,7 +1918,12 @@ async function loadState(
   const readPaths = manifestPaths.filter((manifestPath) => !unreadMembers.has(manifestPath));
   const memberPaths = new Set(manifestPaths);
   for (const relPath of filesInPrefix) {
-    if (!isProjectManifestPath(relPath) || !pathSkipped(relPath) || memberPaths.has(relPath)) {
+    if (
+      !isProjectManifestPath(relPath) ||
+      !pathSkipped(relPath) ||
+      memberPaths.has(relPath) ||
+      readDespiteSkippedName(relPath)
+    ) {
       continue;
     }
     const segment = skipSegment(relPath);
@@ -1646,8 +1933,8 @@ async function loadState(
     diagnostics.push({
       code: MANIFEST_SKIPPED_DIRNAME,
       message:
-        `${relPath}: not scanned; a directory named ${segment ?? 'unknown'} is skipped unless a workspace ` +
-        'pattern names it. A lockfile on this path would still be read',
+        `${relPath}: not scanned; a manifest under a directory named ${segment ?? 'unknown'} is skipped ` +
+        'unless a workspace pattern names it or a lockfile sits beside it, and this one has neither',
     });
   }
   const contents = await source.readMany(readPaths);
@@ -1761,6 +2048,12 @@ async function loadState(
   // and a source's read() is not assumed free of cost (a git source shells
   // out per read).
   const npmrcContent = await source.read(NPMRC);
+  const workspaceLocalNamesByDir = confirmWorkspaceLocalNames(
+    [...(lockfile === null ? [] : [lockfile]), ...extraLockfiles],
+    listedLockfiles,
+    manifests,
+    diagnostics
+  );
 
   return {
     manifests,
@@ -1775,13 +2068,12 @@ async function loadState(
     npmrcContent,
     npmrcRegistryPins: parseNpmrcPins(npmrcContent),
     npmrcDefaultRegistry: parseNpmrcDefaultRegistry(npmrcContent),
-    // A straight carry of what the lockfile parser already discovered
-    // (npm's "link": true entries, one per workspace member); no
-    // directory or manifest is re-walked to reconstruct it here.
-    workspaceLocalNames: new Set([
-      ...(lockfile?.workspaceLocalNames ?? []),
-      ...extraLockfiles.flatMap((extra) => [...extra.workspaceLocalNames]),
-    ]),
+    // npm's "link": true entries, each confirmed against this side's own
+    // manifests and the lockfile npm actually installs from in that
+    // directory. A claim alone exempts nothing; see
+    // confirmWorkspaceLocalNames.
+    workspaceLocalNames: new Set([...workspaceLocalNamesByDir.values()].flatMap((names) => [...names])),
+    workspaceLocalNamesByDir,
   };
 }
 
