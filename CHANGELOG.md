@@ -10,6 +10,8 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-14
+
 Fixes three gate bypasses an independent audit reproduced against 0.11.1.
 What can newly block, and how to clear each:
 
