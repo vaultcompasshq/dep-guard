@@ -399,7 +399,7 @@ steps:
       # and the baseline from the base branch, which a shallow checkout
       # does not have.
       fetch-depth: 0
-  - uses: vaultcompasshq/dep-guard@v0.11.1
+  - uses: vaultcompasshq/dep-guard@v0.12.0
     with:
       path: .
       online: 'true'
@@ -477,7 +477,7 @@ allowed there, on an assumption the rule does not enforce: that a newer scanner
 is at least as strict. That assumption has already failed once: 0.11.0 could
 skip a workspace member or a lockfile under a directory named `build`,
 `dist`, `vendor`, `vendored`, `venv` or `.venv`, and is deprecated on npm.
-Use 0.10.1, or 0.11.1 or newer; do not pin 0.11.0. Nothing bounds a forward
+Use 0.12.0 or newer; do not pin 0.11.0. Nothing bounds a forward
 pin. The comparison is against a constant in `action.yml`, which comes from the ref your workflow's `uses:`
 names rather than from the pull request's tree. That holds when your workflow
 names this action by owner and ref; if it names a LOCAL PATH instead, the
@@ -498,9 +498,9 @@ of `0.1.0` through `0.11.0` passes the shape check on a pull request today and
 is refused by this rule. A pin below `0.6.0` is already broken on that event,
 since those scanners do not know `--trust-base`; the change there is that the
 job fails at the validate step with a message saying why. A pin of `0.6.0`,
-`0.7.0`, `0.8.0`, `0.9.0`, `0.10.0`, `0.10.1`, or `0.11.0` fails on version alone: it
+`0.7.0`, `0.8.0`, `0.9.0`, `0.10.0`, `0.10.1`, `0.11.0`, or `0.11.1` fails on version alone: it
 knows `--trust-base` and would otherwise run cleanly. **Remove the `version` input,
-or raise it to `0.11.1` or newer.**
+or raise it to `0.12.0` or newer.**
 
 **What it does not cover, and what it costs on forks.** A fork's
 `pull_request` run uses the base repository's workflow file, so a fork author

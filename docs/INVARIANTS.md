@@ -3267,12 +3267,12 @@ else.
   that failure from the scan to a named refusal at validate. A pin of 0.6.0
   through 0.11.0 fails on version alone, since each knows `--trust-base` and
   would otherwise run cleanly; 0.11.0 is the withdrawn release this tag
-  replaces. Pins at or above 0.11.1 are unaffected.
+  replaces. Pins at or above 0.12.0 are unaffected.
 
 **Enforced by:** the `pinning the scanner backward on a pull request` cases in
 `scripts/tests/action-run-script.test.mjs`. One case drives the SHIPPED,
 unmodified step with `version: 0.5.9` and `GITHUB_BASE_REF` set, and asserts
-the refusal names both 0.5.9 and 0.11.1, with the same input accepted when
+the refusal names both 0.5.9 and 0.12.0, with the same input accepted when
 `GITHUB_BASE_REF` is unset: the rule is observable on the real file, because
 fifteen published versions sit below the tag scanner. The cases that need a
 version below a FUTURE tag scanner, to exercise the comparison as it will
