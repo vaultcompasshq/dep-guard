@@ -533,7 +533,9 @@ jobs:
             echo "Publishing ${name}@${ver}"
             tarball="$(find "${pack_dir}" -name '*.tgz' -print)"
             test -n "${tarball}"
-            npm publish "${tarball}" --access public
+            # A leading ./ is always a local file spec to npm; a bare dir/file.tgz
+            # with one slash is read as the GitHub shorthand owner/repo.
+            npm publish "./${tarball}" --access public
           }
           publish_one packages/core pack-out/core
           publish_one packages/cli pack-out/cli
