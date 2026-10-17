@@ -591,8 +591,10 @@ describe('.github/workflows/release.yml wiring', () => {
   // which point it publishes on a run that decided nothing.
   const GATE = "steps.kind.outputs.action_only == 'false'";
 
-  // The release job's steps sit at four spaces; the smoke job's at six, so
-  // this reads only the first job.
+  // prepare's steps sit at four spaces. The publish job's steps sit at
+  // six, and so do the smoke job's, so each job is sliced out before it
+  // is parsed. A parser that walked the whole file at one indent would
+  // either miss the publish job or mix it with smoke.
   //
   // A step is identified by its name, or by "uses:<value>" when it has no
   // name -- a step written "- uses: actions/checkout@..." with no name is
@@ -601,13 +603,18 @@ describe('.github/workflows/release.yml wiring', () => {
   // exact-list assertion must not have: an unnamed publish-side step
   // would then be invisible to every check below rather than caught by
   // them.
-  function parseSteps(text) {
+  function parseSteps(text, indent = 4) {
     const lines = text.split('\n');
     const steps = [];
     let current = null;
+    const nameRe = new RegExp(`^ {${indent}}- name: (.*)$`);
+    const usesRe = new RegExp(`^ {${indent}}- uses: (.*)$`);
+    const ifRe = new RegExp(`^ {${indent + 2}}if: (.*)$`);
+    const usesLaterRe = new RegExp(`^ {${indent + 2}}uses: (.*)$`);
+    const endStepRe = new RegExp(`^ {${indent - 2}}\\S`);
     for (const line of lines) {
-      const nameMatch = /^ {4}- name: (.*)$/.exec(line);
-      const usesMatch = /^ {4}- uses: (.*)$/.exec(line);
+      const nameMatch = nameRe.exec(line);
+      const usesMatch = usesRe.exec(line);
       if (nameMatch !== null || usesMatch !== null) {
         current = {
           name: nameMatch === null ? null : nameMatch[1].trim(),
@@ -619,15 +626,15 @@ describe('.github/workflows/release.yml wiring', () => {
         continue;
       }
       if (current !== null) {
-        const ifMatch = /^ {6}if: (.*)$/.exec(line);
+        const ifMatch = ifRe.exec(line);
         if (ifMatch !== null) {
           current.if = ifMatch[1].trim();
         }
-        const usesLater = /^ {6}uses: (.*)$/.exec(line);
+        const usesLater = usesLaterRe.exec(line);
         if (usesLater !== null && current.uses === null) {
           current.uses = usesLater[1].trim();
         }
-        if (/^ {2}\S/.test(line)) {
+        if (endStepRe.test(line)) {
           current = null;
         }
       }
@@ -635,7 +642,13 @@ describe('.github/workflows/release.yml wiring', () => {
     return steps;
   }
 
-  const releaseJobSteps = () => parseSteps(workflow);
+  const prepareText = workflow.slice(workflow.indexOf('\n  prepare:'), workflow.indexOf('\n  release:'));
+  const publishText = workflow.slice(workflow.indexOf('\n  release:'), workflow.indexOf('\n  smoke-published:'));
+  const releaseJobSteps = () => parseSteps(prepareText, 4);
+  const publishJobSteps = () => parseSteps(publishText, 6);
+  // The publish job cannot read steps.kind. Its gate is the output prepare
+  // forwarded, spelled the same positive way.
+  const PUBLISH_GATE = "needs.prepare.outputs.action_only == 'false'";
 
   // Every step that exists to protect or perform a publish, in the order
   // the workflow runs them. The gates (build, typecheck, lint, test) are
@@ -648,21 +661,32 @@ describe('.github/workflows/release.yml wiring', () => {
     'Check the corpus is fit to publish',
     'Check the corpus reaches the packed tarball',
     'Install the packed tarballs and run the shipped binary',
-    'Upgrade npm for OIDC trusted publishing',
-    'Publish to npm',
+    'Pack the publishable tarballs',
+    'Check the packed tarballs match their packages',
+    'Upload the packed tarballs',
   ];
 
-  // Every step from the decision to the end of the release job, gated or
-  // not, in order. The set assertion below cannot see a NEW ungated step
-  // -- that is what this list is for: inserting anything after the
-  // decision, named or unnamed, fails until somebody states which side of
-  // the gate it belongs on.
-  //
-  // It runs to the LAST step rather than stopping at tag resolution,
-  // because the steps after that point are the ones that publish a claim:
-  // a second publish step slipped in between "Resolve release tag" and
-  // "Create GitHub Release" would be past a window that ended earlier, and
-  // would run on an action-only release.
+  // Every step in the job that holds id-token, in order. Checkout and
+  // Node setup run for both kinds of release, because both still cut a
+  // GitHub Release. Everything that publishes or announces a publish is
+  // gated.
+  const PUBLISH_JOB_STEPS = [
+    'Checkout',
+    'Setup Node.js',
+    'Upgrade npm for OIDC trusted publishing',
+    'Download the packed tarballs',
+    'Publish to npm',
+    'Create GitHub Release',
+    'Create GitHub Release (action-only)',
+  ];
+
+  // Every step from the decision to the end of the prepare job, gated or
+  // not, in order. The set assertion below cannot see a NEW ungated step.
+  // That is what this list is for: inserting anything after the decision,
+  // named or unnamed, fails until somebody states which side of the gate
+  // it belongs on. The publish job has its own list, for the same reason:
+  // a step added there is past this job, and it is the job that holds the
+  // token.
   const STEPS_AFTER_DECISION = [
     'Install dependencies',
     'Build packages',
@@ -671,17 +695,27 @@ describe('.github/workflows/release.yml wiring', () => {
     'Run tests',
     ...GATED_STEPS,
     'Resolve release tag',
-    'Create GitHub Release',
-    'Create GitHub Release (action-only)',
   ];
 
   it('gates exactly the publish-side steps on the decision step output', () => {
     const gated = releaseJobSteps()
       .filter((step) => step.if === GATE)
       .map((step) => step.id);
+    expect(gated.sort()).toEqual([...GATED_STEPS].sort());
+
+    const publishGated = publishJobSteps()
+      .filter((step) => step.if === PUBLISH_GATE)
+      .map((step) => step.id);
     // "Create GitHub Release" carries the same gate and is asserted
     // separately below, with the body claim it guards.
-    expect(gated.sort()).toEqual([...GATED_STEPS, 'Create GitHub Release'].sort());
+    expect(publishGated.sort()).toEqual(
+      [
+        'Upgrade npm for OIDC trusted publishing',
+        'Download the packed tarballs',
+        'Publish to npm',
+        'Create GitHub Release',
+      ].sort()
+    );
   });
 
   it('runs the code gates on both kinds of release', () => {
@@ -698,6 +732,7 @@ describe('.github/workflows/release.yml wiring', () => {
     const from = ids.indexOf('Decide the release kind, and refuse a tag that is neither');
     expect(from).toBeGreaterThan(-1);
     expect(ids.slice(from + 1)).toEqual(STEPS_AFTER_DECISION);
+    expect(publishJobSteps().map((step) => step.id)).toEqual(PUBLISH_JOB_STEPS);
   });
 
   it('sees a step written as bare `- uses:` with no name', () => {
@@ -738,13 +773,13 @@ describe('.github/workflows/release.yml wiring', () => {
     const publishClaims = workflow.match(/Published `@vaultcompass\/dep-guard`/g) ?? [];
     expect(publishClaims).toHaveLength(1);
 
-    const release = releaseJobSteps().find((step) => step.id === 'Create GitHub Release');
-    expect(release.if).toBe(GATE);
+    const release = publishJobSteps().find((step) => step.id === 'Create GitHub Release');
+    expect(release.if).toBe(PUBLISH_GATE);
 
-    const actionOnlyRelease = releaseJobSteps().find(
+    const actionOnlyRelease = publishJobSteps().find(
       (step) => step.id === 'Create GitHub Release (action-only)'
     );
-    expect(actionOnlyRelease.if).toBe("steps.kind.outputs.action_only == 'true'");
+    expect(actionOnlyRelease.if).toBe("needs.prepare.outputs.action_only == 'true'");
     expect(workflow).toContain('Nothing was published to npm by this release.');
     expect(workflow).toContain('CHANGELOG.md');
   });
@@ -789,14 +824,51 @@ describe('.github/workflows/release.yml wiring', () => {
     );
     expect(decisionDirs.length).toBeGreaterThan(0);
 
-    const forDirMatch = workflow.match(/for dir in ([^;]+); do/);
-    expect(forDirMatch).not.toBeNull();
-    const publishDirs = forDirMatch[1]
-      .trim()
-      .split(/\s+/)
-      .map((dir) => dir.replace(/^packages\//, ''));
+    const publishDirs = [...workflow.matchAll(/^ {10}publish_one packages\/([a-z0-9_-]+) /gm)].map(
+      (match) => match[1]
+    );
+    expect(publishDirs.length).toBeGreaterThan(0);
 
     expect(new Set(publishDirs)).toEqual(new Set(decisionDirs));
+  });
+
+  // The text of one prepare step, from its "- name:" line to the next step.
+  function prepareStepText(name) {
+    const start = prepareText.indexOf(`\n    - name: ${name}\n`);
+    expect(start).toBeGreaterThan(-1);
+    const next = prepareText.indexOf('\n    - ', start + 1);
+    return prepareText.slice(start, next === -1 ? undefined : next);
+  }
+
+  it('packs each published package by directory, into an absolute destination', () => {
+    // On pnpm 9, the version packageManager pins, "pnpm --filter <name>
+    // pack" in this workspace exits 1 with "Unknown option: 'recursive'",
+    // so a filter-based pack step dies on every package tag before
+    // anything reaches npm. With --dir, a relative destination lands under
+    // the package directory rather than where the upload step looks.
+    const pack = prepareStepText('Pack the publishable tarballs');
+    expect(pack).not.toContain('--filter');
+    const order = ['core', 'cli'].map((dir) => {
+      const command = `pnpm --dir packages/${dir} pack --pack-destination "\${GITHUB_WORKSPACE}/pack-out/${dir}"`;
+      expect(pack).toContain(command);
+      return pack.indexOf(command);
+    });
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it('checks every packed tarball against the package it was packed from', () => {
+    const check = prepareStepText('Check the packed tarballs match their packages');
+    expect(check).toContain('set -euo pipefail');
+    expect(check).toContain('for dir in core cli; do');
+    expect(check).toContain('package/package.json');
+    expect(check).toContain("require('./packages/${dir}/package.json')");
+    expect(check).toContain('::error::');
+  });
+
+  it('keeps the publish token off the job that installs dependencies', () => {
+    expect(prepareText).not.toMatch(/^ {6}id-token:/m);
+    expect(publishText).toMatch(/^ {6}id-token: write$/m);
+    expect(publishText).toContain('needs: prepare');
   });
 
   it('calls the decision script from a step with the id the conditions read', () => {

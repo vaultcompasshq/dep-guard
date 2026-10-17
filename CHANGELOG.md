@@ -10,6 +10,16 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Security
+
+- The release workflow now installs, builds, tests and packs in a job that
+  has no npm publish token, then publishes the packed tarballs from a
+  separate job that holds the token and does not install this repository's
+  dependencies. The scope is the token only: the tarballs are still built
+  where dependency install scripts run, so the split keeps those scripts
+  away from the token and does not by itself guarantee the integrity of
+  what was built.
+
 ## [0.12.0] - 2026-10-14
 
 Fixes three gate bypasses an independent audit reproduced against 0.11.1.

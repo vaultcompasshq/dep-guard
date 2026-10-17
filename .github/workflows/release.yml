@@ -43,13 +43,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  # Install, build, and test live here, and this job has no id-token.
+  # The release job below publishes tarballs this job packed. It does not
+  # install this repository's dependencies. The scope of that split is the
+  # publish token only: the tarballs are still built in this job, where
+  # dependency install scripts run, so the split keeps those scripts away
+  # from the token and does not by itself guarantee the integrity of the
+  # built output.
+  prepare:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      id-token: write
+      contents: read
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
+      scanner_version: ${{ steps.kind.outputs.scanner_version }}
       # Exactly "true" or "false", written by the decision step, and only
       # after every condition in scripts/lib/release-kind.mjs held.
       #
@@ -101,7 +108,6 @@ jobs:
       with:
         node-version: 22.14.0
         cache: 'pnpm'
-        registry-url: 'https://registry.npmjs.org'
 
     # Runs this early -- right after Node setup, before install/build/test
     # and the ~10-15 minute, ~430-request corpus walk further down (see
@@ -406,46 +412,58 @@ jobs:
 
         echo "Install-and-run gate passed: react known, a hallucinated name unknown, --version prints ${EXPECTED_VERSION}."
 
-    # npm Trusted Publishing (OIDC): no NPM_TOKEN, auth via id-token: write
-    # plus a trusted publisher configured per @vaultcompass/* package.
-    # Requires npm CLI >= 11.5.1 (Node >= 22.14.0). Pin major 11 - npm@12
-    # needs a newer Node than this job runs. Mirrors vault-guard's
-    # release.yml, the model for this workflow.
-    - name: Upgrade npm for OIDC trusted publishing
-      if: steps.kind.outputs.action_only == 'false'
-      run: npm install -g npm@11
-
-    # dep-guard-cli depends on dep-guard-core via workspace:*, which pnpm
-    # rewrites to a real semver range at publish time - core still
-    # publishes first for a clean read of "what's live" if this fails
-    # partway through. Skips a package already on the registry at its
-    # current version, so a failed mid-release can be re-run without
-    # erroring on a duplicate version.
+    # pnpm pack rewrites workspace:* to a real range, the same rewrite
+    # publish used to do. Core is packed and later published before the
+    # CLI. An action-only tag packs nothing.
     #
-    # That skip is correct for exactly one situation -- re-running a
-    # release that failed partway, where the packages already published
-    # are done and only the rest need to happen -- and is a silent no-op
-    # for a different one it must never be asked to handle: a corrective
-    # re-release of a version that already went out broken. npm does not
-    # allow re-publishing a version once it exists, broken or not, so
-    # there is no version number this skip can be told to overwrite; the
-    # only way to ship a fix is a NEW version, bumped in both packages
-    # together (see the lockstep assertion above). A burned version number
-    # is never re-released -- it is superseded by the next one.
-    - name: Publish to npm
+    # "pnpm --dir", never "pnpm --filter": on pnpm 9, the version
+    # packageManager pins, "--filter ... pack" in this workspace exits 1
+    # with "Unknown option: 'recursive'". The destination is absolute
+    # because with --dir a relative one resolves under the package
+    # directory, not the repository root the upload step reads.
+    - name: Pack the publishable tarballs
       if: steps.kind.outputs.action_only == 'false'
       run: |
         set -euo pipefail
-        for dir in packages/core packages/cli; do
-          name="$(node -p "require('./${dir}/package.json').name")"
-          ver="$(node -p "require('./${dir}/package.json').version")"
-          if [[ "$(npm view "${name}@${ver}" version 2>/dev/null || true)" == "${ver}" ]]; then
-            echo "Skip ${name}@${ver} (already on registry)"
-            continue
+        mkdir -p pack-out/core pack-out/cli
+        pnpm --dir packages/core pack --pack-destination "${GITHUB_WORKSPACE}/pack-out/core"
+        pnpm --dir packages/cli pack --pack-destination "${GITHUB_WORKSPACE}/pack-out/cli"
+
+    # Each pack-out directory must hold exactly one tarball, and the
+    # package.json inside it must carry the name and version of the package
+    # it was packed from. A pack that silently produced nothing, or packed
+    # the wrong package, stops here, before anything leaves this job.
+    - name: Check the packed tarballs match their packages
+      if: steps.kind.outputs.action_only == 'false'
+      run: |
+        set -euo pipefail
+        for dir in core cli; do
+          shopt -s nullglob
+          tarballs=(pack-out/"${dir}"/*.tgz)
+          shopt -u nullglob
+          if [[ "${#tarballs[@]}" -ne 1 ]]; then
+            echo "::error::pack-out/${dir} holds ${#tarballs[@]} tarballs, expected exactly one."
+            exit 1
           fi
-          echo "Publishing ${name}@${ver}"
-          pnpm --filter "${name}" publish --access public --no-git-checks
+          want="$(node -p "const p = require('./packages/${dir}/package.json'); p.name + '@' + p.version")"
+          got="$(tar -xzOf "${tarballs[0]}" package/package.json | node -p "const p = JSON.parse(require('fs').readFileSync(0, 'utf8')); p.name + '@' + p.version")"
+          if [[ "${got}" != "${want}" ]]; then
+            echo "::error::pack-out/${dir} holds ${got}, expected ${want} from packages/${dir}/package.json."
+            exit 1
+          fi
+          echo "pack-out/${dir}: ${got}"
         done
+
+    - name: Upload the packed tarballs
+      if: steps.kind.outputs.action_only == 'false'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: npm-pack
+        path: |
+          pack-out/core/*.tgz
+          pack-out/cli/*.tgz
+        if-no-files-found: error
+        retention-days: 1
 
     - name: Resolve release tag
       id: meta
@@ -457,41 +475,104 @@ jobs:
           echo "tag=v$(node -p "require('./packages/cli/package.json').version")" >> "$GITHUB_OUTPUT"
         fi
 
-    # Two Release steps, one per release kind, rather than one step with a
-    # computed body. The body is the only difference between them, and it
-    # is the part that must not be wrong: "Published ... to npm" appears
-    # under exactly one condition, the same condition that let the publish
-    # step run at all, so an action-only release cannot announce a publish
-    # that did not happen. A single step with an interpolated body would
-    # put that claim one expression edit away from being unconditional.
-    - name: Create GitHub Release
-      if: steps.kind.outputs.action_only == 'false'
-      uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-      with:
-        tag_name: ${{ steps.meta.outputs.tag }}
-        target_commitish: ${{ github.sha }}
-        generate_release_notes: true
-        body: |
-          Published `@vaultcompass/dep-guard` and `@vaultcompass/dep-guard-core` to npm.
+  # Trusted publishing stays on this job only. It downloads the tarballs
+  # prepare packed and does not install this repository's dependencies.
+  # npm CLI >= 11.5.1 is required for OIDC; Node 22.14 does not ship it.
+  # Pin major 11: npm@12 needs a newer Node than this job runs.
+  release:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      tag: ${{ needs.prepare.outputs.tag }}
+      action_only: ${{ needs.prepare.outputs.action_only }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-    # The action-only body. It has to answer the question a reader of this
-    # Release page actually has -- "the tag moved, so what am I getting?"
-    # -- which is a scanner version that did not move with it. See
-    # docs/INVARIANTS.md, "The action tag and the scanner version are two
-    # numbers".
-    - name: Create GitHub Release (action-only)
-      if: steps.kind.outputs.action_only == 'true'
-      uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-      with:
-        tag_name: ${{ steps.meta.outputs.tag }}
-        target_commitish: ${{ github.sha }}
-        generate_release_notes: true
-        body: |
-          Action-only release. `${{ steps.meta.outputs.tag }}` moves the composite action; the scanner it installs stays at `${{ steps.kind.outputs.scanner_version }}`, which was already on npm before this tag.
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.14.0
+          registry-url: https://registry.npmjs.org
 
-          Nothing was published to npm by this release.
+      - name: Upgrade npm for OIDC trusted publishing
+        if: needs.prepare.outputs.action_only == 'false'
+        run: npm install -g npm@11
 
-          See CHANGELOG.md for what changed.
+      - name: Download the packed tarballs
+        if: needs.prepare.outputs.action_only == 'false'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-pack
+          path: pack-out
+
+      # Skips a package already on the registry at its current version, so
+      # a failed mid-release can be re-run without erroring on a duplicate
+      # version. That skip is correct for exactly one situation: re-running
+      # a release that failed partway. It must never be asked to republish a
+      # version that already went out broken. npm does not allow that, so
+      # the only way to ship a fix is a new version, bumped in both packages
+      # together. A burned version number is superseded by the next one.
+      # Core publishes before the CLI.
+      - name: Publish to npm
+        if: needs.prepare.outputs.action_only == 'false'
+        run: |
+          set -euo pipefail
+          publish_one() {
+            dir="$1"
+            pack_dir="$2"
+            name="$(node -p "require('./${dir}/package.json').name")"
+            ver="$(node -p "require('./${dir}/package.json').version")"
+            if [[ "$(npm view "${name}@${ver}" version 2>/dev/null || true)" == "${ver}" ]]; then
+              echo "Skip ${name}@${ver} (already on registry)"
+              return 0
+            fi
+            echo "Publishing ${name}@${ver}"
+            tarball="$(find "${pack_dir}" -name '*.tgz' -print)"
+            test -n "${tarball}"
+            npm publish "${tarball}" --access public
+          }
+          publish_one packages/core pack-out/core
+          publish_one packages/cli pack-out/cli
+
+      # Two Release steps, one per release kind, rather than one step with a
+      # computed body. The body is the only difference between them, and it
+      # is the part that must not be wrong: "Published ... to npm" appears
+      # under exactly one condition, the same condition that let the publish
+      # step run at all, so an action-only release cannot announce a publish
+      # that did not happen. A single step with an interpolated body would
+      # put that claim one expression edit away from being unconditional.
+      - name: Create GitHub Release
+        if: needs.prepare.outputs.action_only == 'false'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          body: |
+            Published `@vaultcompass/dep-guard` and `@vaultcompass/dep-guard-core` to npm.
+
+      # The action-only body. It has to answer the question a reader of this
+      # Release page actually has: the tag moved, so what am I getting? That
+      # answer is a scanner version that did not move with it. See
+      # docs/INVARIANTS.md, "The action tag and the scanner version are two
+      # numbers".
+      - name: Create GitHub Release (action-only)
+        if: needs.prepare.outputs.action_only == 'true'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          body: |
+            Action-only release. `${{ needs.prepare.outputs.tag }}` moves the composite action; the scanner it installs stays at `${{ needs.prepare.outputs.scanner_version }}`, which was already on npm before this tag.
+
+            Nothing was published to npm by this release.
+
+            See CHANGELOG.md for what changed.
 
   smoke-published:
     name: Smoke test published CLI
