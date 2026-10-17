@@ -15,6 +15,7 @@ import { NPM_LOCKFILE_V1_CODE } from './lockfiles/npm.js';
 import type { ParsedManifest } from './manifest.js';
 import type { PypiExistenceStats } from './online/pypi-existence.js';
 import { privatePinnedScope } from './online/registry-scope.js';
+import { isPythonManifestPath } from './python-manifest.js';
 import type { PythonExclusionClass } from './python-types.js';
 import type { Diagnostic } from './types.js';
 
@@ -30,6 +31,9 @@ export interface NpmEcosystemSummary {
   checked: number;
   notChecked: { privateScope: number };
   lockfile: NpmLockfileState;
+  // package.json files on the judged side that did not parse and were
+  // dropped because ignorePaths covers them (manifest-unparsed).
+  notParsed: number;
 }
 
 export interface PypiNotChecked {
@@ -57,6 +61,9 @@ export interface PypiEcosystemSummary {
   // not one dep-guard compares.
   requirements: number;
   pinned: number;
+  // Python manifests on the judged side that did not parse and were
+  // dropped because ignorePaths covers them (manifest-unparsed).
+  notParsed: number;
 }
 
 // go.mod and go.sum seen on the judged side. dep-guard reads neither, so
@@ -114,12 +121,15 @@ function fileList(paths: readonly string[]): string {
 /**
  * Builds run.ecosystems. `judgedManifests` is null for checkSingle, which
  * has no repository behind it. `pypiStats` is null on an offline run.
+ * `notParsed` lists the judged side's manifests dropped under ignorePaths.
  */
 export function summarizeEcosystems(
   ctx: CheckContext,
   judgedManifests: readonly ParsedManifest[] | null,
-  pypiStats: PypiExistenceStats | null
+  pypiStats: PypiExistenceStats | null,
+  notParsed: readonly string[] = []
 ): EcosystemsSummary {
+  const pythonNotParsed = notParsed.filter(isPythonManifestPath).length;
   const names = newNames(ctx);
   const npmNames = [...new Set(names.npm.map((entry) => entry.registryName))];
   const privateScope = npmNames.filter(
@@ -144,6 +154,7 @@ export function summarizeEcosystems(
       checked: npmNames.length - privateScope,
       notChecked: { privateScope },
       lockfile: npmLockfileState(ctx, judgedManifests !== null),
+      notParsed: notParsed.length - pythonNotParsed,
     },
     pypi: {
       manifests: python?.manifests ?? 0,
@@ -162,6 +173,7 @@ export function summarizeEcosystems(
       excluded: { ...names.excluded },
       requirements: pythonDeps.length,
       pinned: pythonDeps.filter((dep) => isExactPin(dep.specifier)).length,
+      notParsed: pythonNotParsed,
     },
     go: { files: ctx.delta.go?.files ?? 0 },
   };

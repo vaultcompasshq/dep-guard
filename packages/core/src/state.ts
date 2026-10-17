@@ -103,6 +103,10 @@ export interface RepoState {
   // coverage statement can say Go was seen and not read. Absent on a state
   // built by hand.
   goFiles?: string[];
+  // Manifests on this side that did not parse and were dropped because
+  // ignorePaths covers them (manifest-unparsed), counted in
+  // run.ecosystems.*.notParsed. Absent on a state built by hand.
+  notParsed?: string[];
 }
 
 const SCOPE_PIN_SUFFIX = ':registry';

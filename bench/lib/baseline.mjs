@@ -8,6 +8,8 @@
 // comparison meaningless -- a repository that was not scanned, one that was
 // not in the baseline, and above all a pin that moved.
 
+import { canonicalConfig } from './row-config.mjs';
+
 export function flattenCounts(counts, prefix = '') {
   const flat = {};
   for (const [key, value] of Object.entries(counts ?? {})) {
@@ -73,8 +75,21 @@ export function compareToBaseline(run, baseline, targets = []) {
 
   const before = indexRepos(baseline.repos);
   const after = indexRepos(run.repos);
+  const listed = indexRepos(targets);
 
   for (const [name, baseEntry] of before) {
+    // A bench config filters findings under its paths, so counts recorded
+    // with one config say nothing about a run with another. A row with
+    // config against a baseline row without configApplied is drift, and so
+    // is the reverse.
+    const target = listed.get(name);
+    if (target !== undefined) {
+      const rowConfig = target.config ?? null;
+      const applied = baseEntry.configApplied ?? null;
+      if (canonicalConfig(rowConfig) !== canonicalConfig(applied)) {
+        drift.push({ repo: name, kind: 'config-changed', before: applied, after: rowConfig });
+      }
+    }
     const runEntry = after.get(name);
     if (runEntry === undefined) {
       drift.push({ repo: name, kind: 'not-run' });
@@ -178,6 +193,13 @@ export function formatComparison(comparison) {
         lines.push(
           `  ${item.repo}  could not be scanned (${item.actual}); the repository list ` +
             (item.expected === null ? 'expects it to scan' : `expects ${item.expected}`)
+        );
+        break;
+      case 'config-changed':
+        lines.push(
+          `  ${item.repo}  the baseline was recorded with config ${item.before === null ? 'none' : canonicalConfig(item.before)} ` +
+            `and the repository list now applies ${item.after === null ? 'none' : canonicalConfig(item.after)}; ` +
+            're-record the baseline'
         );
         break;
       case 'expected-skip-scanned':

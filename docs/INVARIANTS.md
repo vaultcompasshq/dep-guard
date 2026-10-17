@@ -1262,10 +1262,15 @@ not scanned. A directory named `node_modules`, `.venv`, `venv`, `dist`,
 `build`, `vendor` or `vendored` drops only an undeclared stray manifest
 under it, named in `manifest-skipped-dirname` (`node_modules` and `.git`
 are dropped without a note); a `package.json` a workspace pattern resolved,
-a manifest with any recognised lockfile in the same directory, a
-`package.json` the workspace patterns of such an install root name, and a
-lockfile at any depth are read whatever directory names are on their path,
-except that nothing under `node_modules` is promoted this way.
+a manifest with an npm-family lockfile in the same directory, a
+`package.json` the workspace patterns of such an install root name, the
+target of a `file:`, `link:` or `portal:` dependency or of an npm lockfile
+link entry, and an npm-family lockfile at any depth are read whatever
+directory names are on their path, except that nothing under
+`node_modules` is promoted this way. A Python lockfile under a skipped
+directory name is not read, though it still makes the manifest beside it a
+project (below), and that manifest is parsed only to decide whether it
+stops the scan; its dependencies are not read.
 "Read" here means the manifest's lines reach the name checks; before
 2026-10-13 a lockfile under such a directory was read while the manifest
 beside it was dropped, so none of its names were checked (see "A manifest
@@ -1273,41 +1278,138 @@ beside a lockfile is a project" below). Every other `package.json` git tracks is
 templates included; `ignorePaths` on the comparison side is how one is
 dropped. `pyproject.toml` is parsed as TOML and dependencies come from
 `project.dependencies`, `project.optional-dependencies` and the poetry
-tables only. A stray manifest of any ecosystem that does not parse is a
-could-not-run (`manifest-parse`) that names the path unless `ignorePaths`
-read from the comparison side (the trust base's on a `--trust-base` run)
-covers it, in which case it is dropped with a `manifest-unparsed` note and
-the scan goes on; a head that adds the entry for its own broken file still
-exits 2. On a scan of the repository root, the root `package.json`, a
-workspace member, and a `package.json` an install root vouches for (a
-lockfile in its directory, or that root's workspace patterns name it) stay
-fatal whatever `ignorePaths` says. On `dep-guard scan <path>` the root
-manifest is read only when it is under the prefix and install roots come
-from the files under it, so a broken root-workspace member inside the
-prefix that `ignorePaths` covers is dropped with the note; the well-formed
-file would have had its findings filtered by the same entry. Before
-this fix only a Python manifest could be dropped, so from 0.11.0 a broken
-fixture `package.json` (npm/cli and eslint both carry one) was exit 2 with
-no way to clear it. Tests (`nested-manifests.test.ts`): `an unreadable
-stray package.json on an ignorePaths path does not exit 2`, `an unreadable
-stray package.json with no ignore entry exits 2 and names the path`, `under
+tables only.
+
+Manifests that do not parse (0.15.0; design
+`docs/design/2026-10-18-unparseable-stray-manifests.md`):
+
+- A manifest that does not parse is exit 2 (`manifest-parse`) unless it is
+  a stray that `ignorePaths` covers (read from the trust base on a
+  `--trust-base` run, otherwise the config on disk), in which case it is
+  dropped with `manifest-unparsed` and counted in
+  `run.ecosystems.*.notParsed`. There is no default drop. Reason, as
+  measured in review: bun 1.3.10 installs from a `package.json` with
+  comments, trailing commas, single quotes, hex or leading-dot numbers, and
+  arbitrary text after the first complete value, all of which fail
+  `JSON.parse` and the last of which fails any JSONC reader; npm 10.9.8
+  and pnpm 9.15.9 refuse all of them. "Not JSON" is therefore not "not
+  installable", and no syntax test separates a broken fixture from a file
+  bun installs from. A head that adds the entry for its own broken file
+  still exits 2 under `--trust-base`.
+- A manifest is a project, and stops the scan when it does not parse
+  whatever `ignorePaths` says, when it is the root `package.json`; a root
+  workspace member; in a directory with a lockfile dep-guard recognises, of
+  any ecosystem (npm, pnpm, yarn, bun, `uv.lock`, `poetry.lock`,
+  `pdm.lock`, `Pipfile.lock`); named by the workspace patterns of such an
+  install root, or by `[tool.uv.workspace].members` and not `exclude` of a
+  `pyproject.toml` beside `uv.lock`; or the target of a `file:`, `link:` or
+  `portal:` specifier or of a `"link": true` npm lockfile entry. pnpm
+  `importers` and `yarn.lock` workspace entries are not inputs. Nothing
+  under `node_modules` is a project this way. Every input is subject
+  content and can only add a project path (`classifySide`, `git-source.ts`).
+  A failure at the root manifest or at a member the root workspace walk
+  read is a project by its parse site, whatever the classification says:
+  the walk can reach a member the listing shows under no pattern (a
+  symlinked member directory resolves to its real path on the working
+  tree, a gitignored directory on disk is listed by readdir and not by
+  git, case-insensitive expansion under `core.ignorecase`), so the root
+  manifest and every root workspace member stop the scan whatever
+  `ignorePaths` says.
+- A manifest under a skipped directory name that is a project only through
+  a Python lockfile beside it, or as a uv workspace member, is parsed only
+  to decide whether it stops the scan; its dependencies are not read, and
+  its `manifest-skipped-dirname` note says so.
+- Each side computes its own project paths. A judged-side error is fatal
+  when the judged side or the `--base` or `HEAD` comparison side counts the
+  path as a project; a comparison-side error only when that side does. The
+  trust base contributes `ignorePaths` only, never project paths; its own
+  errors are decided by its own projects (`settleParseFailures`).
+- The project set is computed from the whole listing whatever the scan
+  prefix; out-of-prefix files are read for classification only and raise
+  no diagnostics except `classification-input-unread`, and an unreadable
+  input that would stop a root scan makes every manifest under the prefix a
+  project. An out-of-prefix stray a root scan would drop contributes
+  nothing.
+- Every fatal manifest parse error of every side and every parse site (the
+  root manifest, a root workspace member, every other manifest) is reported
+  in one exit 2, ten paths at most, judged side first, then root, members
+  and the rest, then path. A lockfile parse error keeps its own throw and
+  code. No exit 2 message carries parser text or a raw key from the file: a
+  non-string specifier prints the key's leading npm name characters
+  (`npmNameFragment`, `manifest.ts`), and the syntax or shape class is
+  decided after the byte order mark is stripped.
+- An `ignorePaths` entry whose only effect is dropping a manifest that does
+  not parse, on the judged or the comparison side, is a match and is not
+  reported as `ignore-path-unmatched` (`scan.ts`).
+- The paths that reach an out-of-prefix read quietly or meet a symlinked
+  out-of-prefix input are tested: a tracked directory replaced on disk by a
+  symlink out of the repository makes a classification read hit
+  `path-outside-root`, which a subdirectory scan does not report; a
+  symlinked out-of-prefix `package.json` is unread on the judged side and
+  contributes nothing on a comparison side.
+
+Tests (`nested-manifests.test.ts`): the 0.14.0 tests `an unreadable stray
+package.json on an ignorePaths path does not exit 2`, `an unreadable stray
+package.json with no ignore entry exits 2 and names the path`, `under
 --trust-base, a head that adds the ignorePaths entry for its own broken
-package.json still exits 2`; controls `an ignored package.json beside its
-own lockfile that does not parse still exits 2`, `an ignored member a
-nested install root's workspace patterns name that does not parse still
-exits 2` and `an ignored workspace member that does not parse still exits
-2` (the last is parsed before the catch, by the root workspace walk, so it
-pins that walk and not the install-root guard). Mutation-checked, each
-mutation on the catch's condition in `loadState`: restoring the
-Python-only condition turns only the first red; dropping the install-root
-guard (`if (!isIgnoredPath(relPath)) throw`) turns the lockfile control and
-the nested-member control red; narrowing the guard to a lockfile in the
-same directory (`installRootSet.has(parentDir(relPath))`) turns only the
-nested-member control red; keeping only the guard (`if (vouchedFor)
-throw`, so every non-vouched parse error is swallowed) turns the two
-no-entry tests and the pyproject no-entry test red; and reading ignorePaths
-from disk instead of the trust base (in `scan.ts`) turns only the
-`--trust-base` test red. Lockfile
+package.json still exits 2`, `an ignored package.json beside its own
+lockfile that does not parse still exits 2`, `an ignored member a nested
+install root's workspace patterns name that does not parse still exits 2`
+and `an ignored workspace member that does not parse still exits 2`,
+unchanged; and the describe blocks `vouched positions (0.15.0)` (T1, T4,
+T5, T7), `Python manifests beside a lockfile (0.15.0)` (P1 to P4), `an
+ignorePaths entry that only drops an unparsed manifest (0.15.0)`, `which
+side decides (0.15.0)` (T11, T11b, T12, T13: a separate trust base that
+alone counts a path as a project does not make it fatal, with a control),
+`a root workspace member the walk reaches is always a project (0.15.0)`
+(a symlinked member under `--base` and `--trust-base`, a gitignored member
+present on disk), `subdirectory scans (0.15.0)` (S1 to S10), `every fatal
+parse error in one exit 2 (0.15.0)` (E1 to E3) and `manifest-parse
+messages carry no file content (0.15.0)` (M1 to M3). Bench tests
+(`bench/tests/row-config.test.mjs`): B1 to B4.
+
+Mutation-checked, each applied, shown red, and reverted (2026-10-18): any
+default drop for a syntax failure turns T7, E1, E2 and the three 0.14.0
+no-entry and `--trust-base` tests red; limiting projects to `package.json`
+turns P1 (all six rows), P2, P3 and the ignored P4 row red; pairing rule 3 by ecosystem
+turns only the P1 `package-lock.json` row red; building rule 3 from the
+npm-family lockfile names only turns the five Python-lock P1 rows, P2, P3,
+both P4 rows, the P4 control (its note) and the S6 `uv.lock` row red; not parsing a project under a skipped
+directory name that is not promoted (rule 3 after the directory-name
+filter) turns both P4 rows red; dropping uv members turns only P2 red;
+dropping rule 5 specifiers turns T4 (three rows), S4 and the M3 `file:`
+rows red; dropping rule 5 link entries turns T5, S5 and the M3 link rows
+red; the judged side's projects only turns both T11 rows and the T13
+control red; applying the union to comparison-side errors turns only T11b
+red; classifying from the files under the prefix turns S1 to S6, S8 and
+the S10 judged-side row red; taking a root workspace member's position
+from the classification instead of its parse site turns the symlinked and
+the gitignored member tests red; never splicing the quiet reads'
+diagnostics turns only the S9 `path-outside-root` test red; a symlinked
+out-of-prefix input stopping on every side turns only the S10
+comparison-side row red, and never stopping turns only the S10 judged-side
+row red; an unreadable
+out-of-prefix input contributing nothing turns S3 (both) and S6 (three
+rows) red; failing closed on an out-of-prefix input a root scan would drop
+turns only S7 red; emitting scanned-file diagnostics for out-of-prefix
+files turns only S9 red; listing only the first fatal error turns E1 and
+E2 red; settling the comparison side before the judged side is loaded
+turns only E1 red; folding a lockfile parse error into the manifest list
+turns only E3 red; deciding the class before stripping the byte order mark
+turns only M1 red; printing the raw dependency key turns only M2 red;
+echoing `JSON.parse` text turns the six M3 rows of the body the parser
+quotes red (the npm/cli shape alone does not, since V8 does not quote that
+input); not collecting the root manifest's failure turns E1 and the two M3
+root rows red, and not collecting a root workspace member's turns E1, the
+two M3 member rows and the 0.14.0 workspace-member test red; reading
+`ignorePaths` from disk instead of the trust base (in `scan.ts`) turns only
+the `--trust-base` test red. Bench: accepting a `config` without
+`configNote` turns B1 red, allowing any config key turns B2 red, checking
+only `.dep-guard.json` turns the B3 `.dep-guard.local.json` row red, and
+treating a missing `configApplied` as no drift turns both B4 direction
+tests red.
+
+Lockfile
 coverage is judged per directory: an unread root lockfile that changed is a
 downgrade only when the root had a read lockfile with entries on the
 comparison side, and a directory whose read lockfile is gone on the judged
@@ -1588,7 +1690,7 @@ is correct.
 
 Current diagnostic codes: `audit-anchor-differs`,
 `audit-no-tamper-comparison`, `check-single-name-only`,
-`delta-ambiguous-lock-entry`, `delta-new-lock-entries`,
+`classification-input-unread`, `delta-ambiguous-lock-entry`, `delta-new-lock-entries`,
 `ignore-path-dropped`,
 `ignore-path-unmatched`, `lockfile-binary-skipped`,
 `lockfile-downgrade-acknowledged`, `lockfile-format-manifest-only`,

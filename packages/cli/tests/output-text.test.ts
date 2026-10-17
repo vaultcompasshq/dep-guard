@@ -3,11 +3,12 @@ import type { EcosystemsSummary, ScanResult } from '@vaultcompass/dep-guard-core
 
 function ecosystems(): EcosystemsSummary {
   return {
-    npm: { manifests: 1, candidates: 0, checked: 0, notChecked: { privateScope: 0 }, lockfile: 'read' },
+    npm: { manifests: 1, candidates: 0, checked: 0, notChecked: { privateScope: 0 }, lockfile: 'read', notParsed: 0 },
     go: { files: 0 },
     pypi: {
       requirements: 0,
       pinned: 0,
+      notParsed: 0,
       manifests: 0,
       lockfiles: 0,
       candidates: 0,
@@ -55,7 +56,7 @@ const ONLINE = { ...OFFLINE, enabled: true, budgetMs: 20000, lookupsAttempted: 7
 // Python manifests, one vcs requirement excluded.
 function sample(existenceChecked: number, notChecked: Partial<EcosystemsSummary['pypi']['notChecked']>): EcosystemsSummary {
   const base = ecosystems();
-  base.npm = { manifests: 2, candidates: 3, checked: 3, notChecked: { privateScope: 0 }, lockfile: 'read' };
+  base.npm = { manifests: 2, candidates: 3, checked: 3, notChecked: { privateScope: 0 }, lockfile: 'read', notParsed: 0 };
   base.pypi.manifests = 2;
   base.pypi.lockfiles = 1;
   base.pypi.candidates = 7;

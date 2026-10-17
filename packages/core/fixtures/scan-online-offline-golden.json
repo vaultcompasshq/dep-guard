@@ -75,7 +75,8 @@
         "candidates": 2,
         "checked": 2,
         "notChecked": { "privateScope": 0 },
-        "lockfile": "missing"
+        "lockfile": "missing",
+        "notParsed": 0
       },
       "pypi": {
         "manifests": 0,
@@ -102,7 +103,8 @@
           "unrecognised": 0
         },
         "requirements": 0,
-        "pinned": 0
+        "pinned": 0,
+        "notParsed": 0
       },
       "go": { "files": 0 }
     }

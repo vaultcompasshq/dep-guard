@@ -6,9 +6,9 @@ import { parse as parseYaml } from 'yaml';
 import { MissingPackagesMapError, parseNpmLockfile } from './lockfiles/npm.js';
 import { parseOnlyBuilt, parsePnpmLockfile } from './lockfiles/pnpm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
-import { parseManifest, workspacePatternsOf, type ParsedManifest } from './manifest.js';
+import { isReadableJson, parseManifest, workspacePatternsOf, type ParsedManifest } from './manifest.js';
 import { isPythonLockfilePath, parsePythonLockfile, pythonLockfileFormat } from './python-lockfiles.js';
-import { isPythonManifestPath, parsePythonManifest, parseRequirements } from './python-manifest.js';
+import { isPythonManifestPath, isReadableToml, parsePythonManifest, parseRequirements } from './python-manifest.js';
 import { isArchiveFile } from './python-requirement.js';
 import { pathFragment } from './python-names.js';
 import type { PythonLockfile, PythonManifestInfo } from './python-types.js';
@@ -1547,7 +1547,10 @@ async function loadLockfiles(
   // side); they are never read. Paths are repository-relative.
   unread: ReadonlySet<string>,
   role: SideRole,
-  directory = ''
+  directory = '',
+  // npm lockfiles this side already parsed for classification, reused
+  // rather than parsed twice.
+  parsedNpm: ReadonlyMap<string, ParsedLockfile> = new Map()
 ): Promise<{ lockfile: ParsedLockfile | null; extraLockfiles: ParsedLockfile[] }> {
   const loaded: ParsedLockfile[] = [];
   for (const [base, load] of LOCKFILE_CANDIDATES) {
@@ -1562,7 +1565,7 @@ async function loadLockfiles(
       continue;
     }
     try {
-      loaded.push(load(name, content));
+      loaded.push((load === parseNpmLockfile ? parsedNpm.get(name) : undefined) ?? load(name, content));
     } catch (err) {
       // An npm lockfile whose version promises a packages map it does not
       // have is refused on the judged side. On a comparison side it is an
@@ -1877,76 +1880,642 @@ export function reconfirmWorkspaceLocalNames(
   };
 }
 
-async function loadState(
+// ---------------------------------------------------------------------------
+// Which manifests are projects
+//
+// A manifest that does not parse stops the scan (manifest-parse) unless it
+// is a stray that ignorePaths covers. There is no default drop for a file
+// that is not JSON: bun installs from package.json files with comments,
+// trailing commas and text after the value, so "not JSON" is not "not
+// installable". A manifest is a project, and stops the scan when it does
+// not parse whatever ignorePaths says, when on this side's listing it is:
+//
+//   1. the root package.json;
+//   2. a member named by the root package.json "workspaces" or the root
+//      pnpm-workspace.yaml;
+//   3. in a directory that also holds a lockfile this tool recognises, of
+//      any ecosystem (npm, pnpm, yarn, bun, uv.lock, poetry.lock, pdm.lock,
+//      Pipfile.lock). The kinds do not have to match;
+//   4. a package.json named by the workspace patterns of such an install
+//      root, or a pyproject.toml named by [tool.uv.workspace].members and
+//      not exclude of a pyproject.toml beside uv.lock;
+//   5. the package.json in the directory a file:, link: or portal:
+//      specifier of a parsed package.json resolves to, or in the resolved
+//      directory of a "link": true entry of a parsed npm lockfile.
+//
+// Nothing under node_modules is a project this way. Every input is subject
+// content, and a claim in one can only add a path to the set, which makes a
+// parse error fatal; none can remove one. The set is computed from the whole
+// listing whatever the scan prefix: a file outside the prefix is read for
+// this and nothing else, raises no diagnostic of its own, and when it cannot
+// be read (and a root scan would have stopped on it) every manifest under
+// the prefix is treated as a project, with classification-input-unread.
+// See docs/design/2026-10-18-unparseable-stray-manifests.md.
+
+const CLASSIFICATION_INPUT_UNREAD = 'classification-input-unread';
+const UV_LOCK = 'uv.lock';
+const LOCAL_SPECIFIER_PREFIXES = ['file:', 'link:', 'portal:'];
+// How many manifests the one manifest-parse error names before it counts.
+const MAX_LISTED_PARSE_FAILURES = 10;
+
+type ProtectedPosition =
+  | 'root'
+  | 'root-member'
+  | 'install-root-member'
+  | 'uv-member'
+  | 'beside-lockfile'
+  | 'reference-target'
+  | 'link-target';
+
+const POSITION_TEXT: Readonly<Record<ProtectedPosition, string>> = {
+  root: 'the root package.json',
+  'root-member': 'a root workspace member',
+  'install-root-member': "a member named by a nested install root's workspace patterns",
+  'uv-member': 'a uv workspace member',
+  'beside-lockfile': 'a manifest beside a lockfile',
+  'reference-target': 'the target of a file:, link: or portal: dependency',
+  'link-target': 'the target of an npm lockfile link entry',
+};
+
+// The listing order of the one manifest-parse error: the root, then
+// members, then the rest.
+const POSITION_RANK: Readonly<Record<ProtectedPosition, number>> = {
+  root: 0,
+  'root-member': 1,
+  'install-root-member': 1,
+  'uv-member': 1,
+  'beside-lockfile': 2,
+  'reference-target': 2,
+  'link-target': 2,
+};
+
+interface ClassificationInputFailure {
+  path: string;
+  // 'manifest': a manifest that did not parse, which a root scan drops when
+  // it is a stray ignorePaths covers. 'symlink': a symlinked input, which a
+  // root scan refuses on the judged side and treats as absent on a
+  // comparison side. 'other': anything else, which a root scan stops on.
+  kind: 'manifest' | 'symlink' | 'other';
+}
+
+interface SideClassification {
+  // Every project manifest path on this side, with the first rule that
+  // makes it one.
+  positions: Map<string, ProtectedPosition>;
+  // The paths read past the skipped-directory-name filter. A manifest that
+  // is a project only through a Python lockfile beside it, or as a uv
+  // workspace member, is not: whether its names are read is its own change
+  // (open point 2 of the design), so it is parsed only to decide whether it
+  // stops the scan.
+  promoted: Set<string>;
+  // Inputs outside the scan prefix that could not be read.
+  inputFailures: ClassificationInputFailure[];
+}
+
+interface ParseFailure {
+  path: string;
+  // The parser's own fixed text, without the path.
+  reason: string;
+  // Whether the file failed on syntax (it is not JSON or not TOML once a
+  // byte order mark is stripped) or on shape (it is, and a field in it is
+  // not what this tool reads).
+  syntax: boolean;
+  // Set by the parse sites that reach a file only because it is a project:
+  // the root manifest, and every member the root workspace walk read. The
+  // walk can reach a member the listing does not show under any pattern (a
+  // symlinked member directory resolves to its real path on the working
+  // tree; a gitignored directory on disk is listed by readdir, not by git;
+  // case-insensitive expansion under core.ignorecase), so the position is
+  // taken from the site, never from the classification.
+  position?: ProtectedPosition;
+}
+
+// One side, loaded, with what decides its parse failures. Nothing is
+// judged until every side the run loads is here (settleParseFailures).
+interface LoadedSide {
+  state: RepoState;
+  role: SideRole;
+  isIgnoredPath: (relPath: string) => boolean;
+  classification: SideClassification;
+  failures: ParseFailure[];
+}
+
+type ParseOutcome = { manifest: ParsedManifest } | { error: DepGuardError };
+type ManifestParser = (relPath: string, content: string) => ParseOutcome;
+
+// Each manifest on a side is parsed once, whether classification or the
+// scan reaches it first.
+function manifestParser(): ManifestParser {
+  const cache = new Map<string, ParseOutcome>();
+  return (relPath, content) => {
+    let outcome = cache.get(relPath);
+    if (outcome === undefined) {
+      try {
+        outcome = { manifest: parseProjectManifest(relPath, content) };
+      } catch (err) {
+        if (!(err instanceof DepGuardError) || err.code !== 'manifest-parse') {
+          throw err;
+        }
+        outcome = { error: err };
+      }
+      cache.set(relPath, outcome);
+    }
+    return outcome;
+  };
+}
+
+// Each path on a side is read once. A read that throws is not cached.
+function cachingSource(source: FileSource): FileSource {
+  const cache = new Map<string, string | null>();
+  return {
+    ...source,
+    async read(relPath: string): Promise<string | null> {
+      if (cache.has(relPath)) {
+        return cache.get(relPath) ?? null;
+      }
+      const content = await source.read(relPath);
+      cache.set(relPath, content);
+      return content;
+    },
+    async readMany(relPaths: string[]): Promise<Map<string, string | null>> {
+      const missing = relPaths.filter((relPath) => !cache.has(relPath));
+      if (missing.length > 0) {
+        for (const [relPath, content] of await source.readMany(missing)) {
+          cache.set(relPath, content);
+        }
+      }
+      return new Map(relPaths.map((relPath) => [relPath, cache.get(relPath) ?? null]));
+    },
+  };
+}
+
+function isRecognisedLockfilePath(relPath: string): boolean {
+  return isLockfileName(relPath) || isPythonLockfilePath(relPath);
+}
+
+function underNodeModules(relPath: string): boolean {
+  return relPath.split('/').includes(NEVER_A_PACKAGE_DIR);
+}
+
+function joinRepoPath(dir: string, name: string): string {
+  return dir === '' ? name : `${dir}/${name}`;
+}
+
+function dirRelativeTo(root: string, dir: string): string | null {
+  if (root === '') {
+    return dir;
+  }
+  if (dir === root) {
+    return '';
+  }
+  return dir.startsWith(`${root}/`) ? dir.slice(root.length + 1) : null;
+}
+
+// The repository directory a local specifier or a link entry names,
+// relative to the directory it is written in, or null when it leaves the
+// repository or is absolute.
+function localTargetDir(fromDir: string, target: string): string | null {
+  const cleaned = target.replace(/\\/g, '/');
+  if (cleaned.startsWith('//') || cleaned.startsWith('~') || path.posix.isAbsolute(cleaned) || /^[a-zA-Z]:/.test(cleaned)) {
+    return null;
+  }
+  const joined = path.posix.normalize(fromDir === '' ? cleaned || '.' : `${fromDir}/${cleaned}`);
+  if (joined === '..' || joined.startsWith('../')) {
+    return null;
+  }
+  return joined === '.' ? '' : joined.replace(/\/+$/, '');
+}
+
+// pnpm-workspace.yaml "packages", or null when the file is not YAML.
+function workspaceYamlPatterns(content: string): string[] | null {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(withoutByteOrderMark(content));
+  } catch {
+    return null;
+  }
+  return isPlainObject(parsed) ? stringArray(parsed.packages) : [];
+}
+
+// Reads classification inputs. A read that throws contributes nothing and
+// is returned in `failed`; outside the scan prefix the reads raise no
+// diagnostics (`quiet`), since a file read only to classify is not scanned.
+async function readClassificationInputs(
   source: FileSource,
+  relPaths: string[],
+  diagnostics: Diagnostic[],
+  quiet: boolean
+): Promise<{ contents: Map<string, string | null>; failed: string[] }> {
+  const mark = diagnostics.length;
+  const failed: string[] = [];
+  let contents: Map<string, string | null>;
+  try {
+    contents = await source.readMany(relPaths);
+  } catch {
+    contents = new Map();
+    for (const relPath of relPaths) {
+      try {
+        contents.set(relPath, await source.read(relPath));
+      } catch {
+        failed.push(relPath);
+      }
+    }
+  }
+  if (quiet) {
+    diagnostics.splice(mark);
+  }
+  return { contents, failed };
+}
+
+// Rules 1 to 5 over one side's whole listing.
+async function classifySide(
+  source: FileSource,
+  listedFiles: readonly string[],
+  prefix: string,
+  role: SideRole,
+  diagnostics: Diagnostic[],
+  parse: ManifestParser,
+  npmLockfiles: Map<string, ParsedLockfile>
+): Promise<SideClassification> {
+  const listed = new Set(listedFiles);
+  const packageJsons = listedFiles.filter((relPath) => isPackageJsonPath(relPath) && !underNodeModules(relPath));
+  const lockfilePaths = listedFiles.filter(
+    (relPath) => isRecognisedLockfilePath(relPath) && !underNodeModules(relPath)
+  );
+  const lockDirs = uniquePaths(lockfilePaths.map(parentDir));
+  const lockDirSet = new Set(lockDirs);
+  const npmFamilyLockDirs = new Set(lockfilePaths.filter(isLockfileName).map(parentDir));
+  const uvRootPaths = uniquePaths(lockfilePaths.filter((relPath) => baseName(relPath) === UV_LOCK).map(parentDir))
+    .map((dir) => joinRepoPath(dir, PYPROJECT_TOML))
+    .filter((relPath) => listed.has(relPath));
+  const yamlInputs = uniquePaths(['', ...lockDirs].map((dir) => joinRepoPath(dir, WORKSPACE_YAML))).filter(
+    (relPath) => listed.has(relPath)
+  );
+  const npmLockInputs = lockfilePaths.filter((relPath) => NPM_LOCKFILE_NAMES.has(baseName(relPath)));
+  const inputs = uniquePaths([...packageJsons, ...yamlInputs, ...uvRootPaths, ...npmLockInputs]).sort();
+
+  const failures = new Map<string, ClassificationInputFailure['kind']>();
+  // Only an input outside the prefix is recorded: one under it is scanned,
+  // and the scan reports it exactly as before.
+  const fail = (relPath: string, kind: ClassificationInputFailure['kind']): void => {
+    if (!underPrefix(relPath, prefix) && !failures.has(relPath)) {
+      failures.set(relPath, kind);
+    }
+  };
+
+  const readable: string[] = [];
+  for (const relPath of inputs) {
+    if (await source.isSymlink(relPath)) {
+      fail(relPath, 'symlink');
+      continue;
+    }
+    readable.push(relPath);
+  }
+  const contents = new Map<string, string | null>();
+  for (const quiet of [false, true]) {
+    const batch = readable.filter((relPath) => underPrefix(relPath, prefix) !== quiet);
+    const read = await readClassificationInputs(source, batch, diagnostics, quiet);
+    for (const [relPath, content] of read.contents) {
+      contents.set(relPath, content);
+    }
+    for (const relPath of read.failed) {
+      fail(relPath, 'other');
+    }
+  }
+  const text = (relPath: string): string | null => contents.get(relPath) ?? null;
+  const manifestOf = (relPath: string): ParsedManifest | null => {
+    const content = text(relPath);
+    if (content === null) {
+      return null;
+    }
+    const outcome = parse(relPath, content);
+    if ('error' in outcome) {
+      fail(relPath, 'manifest');
+      return null;
+    }
+    return outcome.manifest;
+  };
+  const yamlPatterns = (relPath: string): string[] => {
+    const content = text(relPath);
+    if (content === null) {
+      return [];
+    }
+    const patterns = workspaceYamlPatterns(content);
+    if (patterns === null) {
+      fail(relPath, 'other');
+      return [];
+    }
+    return patterns;
+  };
+
+  const positions = new Map<string, ProtectedPosition>();
+  const promoted = new Set<string>();
+  const mark = (relPath: string, position: ProtectedPosition, promote: boolean): void => {
+    if (underNodeModules(relPath)) {
+      return;
+    }
+    if (!positions.has(relPath)) {
+      positions.set(relPath, position);
+    }
+    if (promote) {
+      promoted.add(relPath);
+    }
+  };
+  const markMembers = (rootDir: string, patterns: string[], position: ProtectedPosition, promote: boolean): void => {
+    if (patterns.length === 0) {
+      return;
+    }
+    for (const relPath of packageJsons) {
+      const relDir = dirRelativeTo(rootDir, parentDir(relPath));
+      // A pattern this module cannot match exactly covers: it can only make
+      // more files fatal.
+      if (relDir !== null && relDir !== '' && workspacePatternsCover(patterns, relDir, 'covers')) {
+        mark(relPath, position, promote);
+      }
+    }
+  };
+
+  const parsedPackageJsons = new Map<string, ParsedManifest>();
+  for (const relPath of packageJsons) {
+    const manifest = manifestOf(relPath);
+    if (manifest !== null) {
+      parsedPackageJsons.set(relPath, manifest);
+    }
+  }
+
+  // Rule 1.
+  mark(ROOT_MANIFEST, 'root', true);
+  // Rule 2. The workspaces field is read as JSON, as the workspace walk
+  // reads it, so a manifest that is JSON and fails only on shape still
+  // names its members.
+  markMembers(
+    '',
+    [...workspaceGlobsFromManifest(text(ROOT_MANIFEST)), ...yamlPatterns(WORKSPACE_YAML)],
+    'root-member',
+    true
+  );
+  // Rule 3.
+  for (const relPath of listedFiles) {
+    const dir = parentDir(relPath);
+    if (isProjectManifestPath(relPath) && lockDirSet.has(dir)) {
+      mark(relPath, 'beside-lockfile', npmFamilyLockDirs.has(dir));
+    }
+  }
+  // Rule 4.
+  for (const dir of lockDirs) {
+    if (dir === '') {
+      continue; // the root's members are rule 2
+    }
+    markMembers(
+      dir,
+      [...workspaceGlobsFromManifest(text(manifestPathIn(dir))), ...yamlPatterns(joinRepoPath(dir, WORKSPACE_YAML))],
+      'install-root-member',
+      npmFamilyLockDirs.has(dir)
+    );
+  }
+  for (const rootPath of uvRootPaths) {
+    const workspace = manifestOf(rootPath)?.python?.uvWorkspace;
+    if (workspace === undefined) {
+      continue;
+    }
+    const rootDir = parentDir(rootPath);
+    for (const relPath of listedFiles) {
+      if (baseName(relPath) !== PYPROJECT_TOML || relPath === rootPath) {
+        continue;
+      }
+      const relDir = dirRelativeTo(rootDir, parentDir(relPath));
+      if (relDir !== null && relDir !== '' && uvWorkspaceCovers(workspace.members, workspace.exclude, relDir)) {
+        mark(relPath, 'uv-member', false);
+      }
+    }
+  }
+  // Rule 5.
+  for (const [relPath, manifest] of parsedPackageJsons) {
+    for (const dep of manifest.deps) {
+      const used = LOCAL_SPECIFIER_PREFIXES.find((specPrefix) => dep.specifier.startsWith(specPrefix));
+      if (used === undefined) {
+        continue;
+      }
+      const target = localTargetDir(parentDir(relPath), dep.specifier.slice(used.length));
+      if (target !== null) {
+        mark(manifestPathIn(target), 'reference-target', true);
+      }
+    }
+  }
+  for (const lockPath of npmLockInputs) {
+    const content = text(lockPath);
+    if (content === null) {
+      continue;
+    }
+    let parsed = npmLockfiles.get(lockPath);
+    if (parsed === undefined) {
+      try {
+        parsed = parseNpmLockfile(lockPath, content);
+      } catch (err) {
+        // A comparison side reads an npm lockfile with no packages map as
+        // an unread lockfile there, so a root scan would not stop on it.
+        if (!(role.kind === 'comparison' && err instanceof MissingPackagesMapError)) {
+          fail(lockPath, 'other');
+        }
+        continue;
+      }
+      npmLockfiles.set(lockPath, parsed);
+    }
+    for (const link of parsed.workspaceLinks ?? []) {
+      if (link.resolved === undefined) {
+        continue;
+      }
+      const target = localTargetDir(parentDir(lockPath), link.resolved);
+      if (target !== null) {
+        mark(manifestPathIn(target), 'link-target', true);
+      }
+    }
+  }
+
+  return {
+    positions,
+    promoted,
+    inputFailures: [...failures].map(([relPath, kind]) => ({ path: relPath, kind })),
+  };
+}
+
+function parseFailureReason(relPath: string, err: DepGuardError): string {
+  const lead = `${relPath}: `;
+  return err.message.startsWith(lead) ? err.message.slice(lead.length) : err.message;
+}
+
+function classClause(failure: ParseFailure): string | null {
+  if (isPackageJsonPath(failure.path)) {
+    return failure.syntax
+      ? 'some package managers accept JSON with comments, trailing commas or text after the value, so this file may still install'
+      : 'it is valid JSON, so a package manager may install from it';
+  }
+  return failure.syntax ? null : 'it is valid TOML, so a package manager may install from it';
+}
+
+/**
+ * Decides every parse failure of every side the run loaded, after all of
+ * them are loaded, and throws one manifest-parse error listing the fatal
+ * ones. A judged-side failure is fatal when the judged side or a comparison
+ * side counts the path as a project, or when ignorePaths does not cover it.
+ * A comparison-side failure is fatal when that side counts it as a project,
+ * or when ignorePaths does not cover it: the judged side never makes a
+ * comparison-side failure fatal. Every other failure is dropped with
+ * manifest-unparsed.
+ */
+function settleParseFailures(sides: readonly LoadedSide[], prefix: string, diagnostics: Diagnostic[]): void {
+  const comparisons = sides.filter((side) => side.role.kind === 'comparison');
+  const ordered = [...sides.filter((side) => side.role.kind === 'judged'), ...comparisons];
+
+  // Would a scan of the repository root stop on this parse failure?
+  const stopsRootScan = (side: LoadedSide, relPath: string): boolean =>
+    side.classification.positions.has(relPath) ||
+    (side.role.kind === 'judged' && comparisons.some((other) => other.classification.positions.has(relPath))) ||
+    !side.isIgnoredPath(relPath);
+
+  const unreadBySide = new Map<LoadedSide, string[]>();
+  for (const side of ordered) {
+    const unread: string[] = [];
+    for (const failure of side.classification.inputFailures) {
+      const lookedAt = !pathSkipped(failure.path) || side.classification.positions.has(failure.path);
+      const stops =
+        failure.kind === 'other' ||
+        (failure.kind === 'symlink' && side.role.kind === 'judged' && lookedAt) ||
+        (failure.kind === 'manifest' && lookedAt && stopsRootScan(side, failure.path));
+      if (stops) {
+        unread.push(failure.path);
+        diagnostics.push({
+          code: CLASSIFICATION_INPUT_UNREAD,
+          message:
+            `${failure.path}: outside the scanned directory ${prefix} and could not be read to decide which ` +
+            `manifests are projects, so every manifest under ${prefix} was treated as a project for this scan`,
+        });
+      }
+    }
+    unreadBySide.set(side, unread);
+  }
+
+  const protectionOn = (side: LoadedSide, relPath: string): { text: string; rank: number } | null => {
+    const position = side.classification.positions.get(relPath);
+    if (position !== undefined) {
+      return { text: POSITION_TEXT[position], rank: POSITION_RANK[position] };
+    }
+    const unread = unreadBySide.get(side) ?? [];
+    if (unread.length > 0 && prefix !== '' && underPrefix(relPath, prefix)) {
+      return {
+        text: `every manifest under ${prefix}, because ${unread.join(', ')} outside it could not be read,`,
+        rank: 2,
+      };
+    }
+    return null;
+  };
+
+  const fatal: Array<{ sideOrder: number; rank: number; path: string; entry: string }> = [];
+  ordered.forEach((side, sideOrder) => {
+    const notParsed: string[] = [];
+    for (const failure of side.failures) {
+      let protection =
+        failure.position === undefined
+          ? protectionOn(side, failure.path)
+          : { text: POSITION_TEXT[failure.position], rank: POSITION_RANK[failure.position] };
+      if (protection === null && side.role.kind === 'judged') {
+        for (const other of comparisons) {
+          const found = protectionOn(other, failure.path);
+          if (found !== null && other.role.kind === 'comparison') {
+            protection = { text: `${found.text} on ${other.role.label}`, rank: found.rank };
+            break;
+          }
+        }
+      }
+      if (protection === null && side.isIgnoredPath(failure.path)) {
+        diagnostics.push({ code: MANIFEST_UNPARSED, message: `${failure.path}: not parsed; covered by ignorePaths` });
+        notParsed.push(failure.path);
+        continue;
+      }
+      const sideName = side.role.kind === 'judged' ? 'judged side' : side.role.label;
+      const tail =
+        protection !== null
+          ? `${protection.text} is a project and stops the scan whatever ignorePaths says`
+          : side.role.kind === 'comparison'
+            ? 'fix the file on the base branch, or cover it with ignorePaths there'
+            : comparisons.length > 0
+              ? 'fix the file, or cover it with ignorePaths on the base branch'
+              : 'fix the file, or cover it with ignorePaths';
+      const clauses = [classClause(failure), tail].filter((clause): clause is string => clause !== null);
+      fatal.push({
+        sideOrder,
+        rank: protection?.rank ?? 2,
+        path: failure.path,
+        entry: `${failure.path} (${sideName}): ${failure.reason}; ${clauses.join('; ')}.`,
+      });
+    }
+    side.state.notParsed = notParsed;
+  });
+  if (fatal.length === 0) {
+    return;
+  }
+  fatal.sort(
+    (a, b) => a.sideOrder - b.sideOrder || a.rank - b.rank || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  );
+  const shown = fatal.slice(0, MAX_LISTED_PARSE_FAILURES).map((item) => item.entry);
+  const rest = fatal.length - shown.length;
+  const lead =
+    fatal.length === 1
+      ? '1 manifest does not parse and stops the scan: '
+      : `${fatal.length} manifests do not parse and stop the scan: `;
+  throw new DepGuardError(`${lead}${[...shown, ...(rest > 0 ? [`and ${rest} more`] : [])].join(' | ')}`, 'manifest-parse');
+}
+
+async function loadState(
+  rawSource: FileSource,
   diagnostics: Diagnostic[],
   role: SideRole,
   prefix: string,
   isIgnoredPath: (relPath: string) => boolean = () => false
-): Promise<RepoState> {
+): Promise<LoadedSide> {
+  const source = cachingSource(rawSource);
   const listedFiles = await source.listFiles();
   const filesInPrefix = listedFiles.filter((relPath) => underPrefix(relPath, prefix));
   // A [tool.uv.sources] path to an archive exempts only when the file is
   // really on this side (python-sources.ts, pathTargetConfirms).
   const pythonArchiveFiles = listedFiles.filter(isArchiveFile);
+  const parse = manifestParser();
+  const npmLockfiles = new Map<string, ParsedLockfile>();
   // Lockfiles are never dropped for a directory name, and neither is a
-  // manifest with a lockfile beside it: that directory is an install root,
-  // a project of its own, whatever it is called. Reading its lockfile while
-  // dropping its manifest meant its entries were read and its names never
-  // checked, since the name checks run over manifest lines; a build/ project
-  // declaring a known-malicious name scanned clean that way.
-  //
-  // The same holds for the install root's own workspace members: the
-  // lockfile records what they install, so a member under a skipped name
-  // (build/app, declared by build/package.json's "workspaces", or by a
-  // pnpm-workspace.yaml beside the lockfile) is read too. Members are found
-  // by matching the root's patterns against the listed paths
-  // (workspacePatternsCover), never by walking, and a pattern this module
-  // cannot match exactly reads more rather than less.
+  // manifest that is a project (classifySide): a manifest with an
+  // npm-family lockfile beside it, that install root's workspace members,
+  // a root workspace member, and the target of a local reference are read
+  // whatever directory names are on their path. Reading a lockfile while
+  // dropping the manifest beside it meant its entries were read and its
+  // names never checked, since the name checks run over manifest lines; a
+  // build/ project declaring a known-malicious name scanned clean that way.
+  // The classification reads the whole listing, so a subdirectory scan
+  // promotes exactly what a root scan does.
   //
   // node_modules is the one exception: nothing is installed FROM inside it,
   // and a committed node_modules package that ships its own lockfile is a
   // dependency's file, not a project of this repository's. Only a stray
-  // manifest outside every install root is dropped, and is announced below.
-  const listedSet = new Set(filesInPrefix);
-  const installRoots = uniquePaths(filesInPrefix.filter(isLockfileName).map(parentDir)).filter(
-    (dir) => !dir.split('/').includes(NEVER_A_PACKAGE_DIR)
-  );
-  const installRootSet = new Set(installRoots);
-  const installRootPatterns = new Map<string, string[]>();
-  for (const dir of installRoots) {
-    const patterns: string[] = [];
-    const manifestPath = manifestPathIn(dir);
-    if (listedSet.has(manifestPath) && !(await source.isSymlink(manifestPath))) {
-      patterns.push(...workspaceGlobsFromManifest(await source.read(manifestPath)));
+  // manifest is dropped, and is announced below.
+  const classification = await classifySide(source, listedFiles, prefix, role, diagnostics, parse, npmLockfiles);
+  const failures: ParseFailure[] = [];
+  const attempted = new Set<string>();
+  // Every parse site collects its failure here and the load goes on;
+  // settleParseFailures decides each one once every side is loaded.
+  const collect = (relPath: string, content: string, position?: ProtectedPosition): ParsedManifest | null => {
+    attempted.add(relPath);
+    const outcome = parse(relPath, content);
+    if ('manifest' in outcome) {
+      return outcome.manifest;
     }
-    const yamlPath = dir === '' ? WORKSPACE_YAML : `${dir}/${WORKSPACE_YAML}`;
-    if (listedSet.has(yamlPath) && !(await source.isSymlink(yamlPath))) {
-      patterns.push(...workspaceGlobsFromWorkspaceYaml(await source.read(yamlPath)));
-    }
-    if (patterns.length > 0) {
-      installRootPatterns.set(dir, patterns);
-    }
-  }
-  const readDespiteSkippedName = (relPath: string): boolean => {
-    if (!isProjectManifestPath(relPath) || relPath.split('/').includes(NEVER_A_PACKAGE_DIR)) {
-      return false;
-    }
-    const dir = parentDir(relPath);
-    if (installRootSet.has(dir)) {
-      return true;
-    }
-    if (!isPackageJsonPath(relPath)) {
-      return false;
-    }
-    for (const [root, patterns] of installRootPatterns) {
-      const relDir = root === '' ? dir : dir.startsWith(`${root}/`) ? dir.slice(root.length + 1) : null;
-      if (relDir !== null && workspacePatternsCover(patterns, relDir, 'covers')) {
-        return true;
-      }
-    }
-    return false;
+    failures.push({
+      path: relPath,
+      reason: parseFailureReason(relPath, outcome.error),
+      syntax: isPythonManifestPath(relPath) ? !isReadableToml(content) : !isReadableJson(content),
+      ...(position === undefined ? {} : { position }),
+    });
+    return null;
   };
+  const readDespiteSkippedName = (relPath: string): boolean => classification.promoted.has(relPath);
   const files = filesInPrefix.filter(
     (relPath) => isLockfileName(relPath) || !pathSkipped(relPath) || readDespiteSkippedName(relPath)
   );
@@ -1972,7 +2541,10 @@ async function loadState(
 
   const manifests: ParsedManifest[] = [];
   if (rootManifestContent !== null) {
-    manifests.push(parseManifest(ROOT_MANIFEST, rootManifestContent));
+    const parsedRoot = collect(ROOT_MANIFEST, rootManifestContent, 'root');
+    if (parsedRoot !== null) {
+      manifests.push(parsedRoot);
+    }
   }
 
   // Every discovered directory is taken by identity, never by the spelling
@@ -2046,11 +2618,23 @@ async function loadState(
     if (segment !== null && SILENT_SKIP_DIR_NAMES.has(segment)) {
       continue;
     }
+    const position = classification.positions.get(relPath);
     diagnostics.push({
       code: MANIFEST_SKIPPED_DIRNAME,
       message:
-        `${relPath}: not scanned; a manifest under a directory named ${segment ?? 'unknown'} is skipped ` +
-        'unless a workspace pattern names it or a lockfile sits beside it, and this one has neither',
+        position === undefined
+          ? `${relPath}: not scanned; a manifest under a directory named ${segment ?? 'unknown'} is skipped ` +
+            'unless a workspace pattern names it or a lockfile sits beside it, and this one has neither'
+          : `${relPath}: its dependencies were not read; a manifest under a directory named ${segment ?? 'unknown'} ` +
+            'is read only when an npm-family lockfile sits beside it or a workspace pattern names it. It is a ' +
+            `project (${
+              position === 'uv-member'
+                ? 'a uv workspace member'
+                : position === 'install-root-member'
+                  ? 'named by the workspace patterns of a directory whose lockfile is a Python lockfile'
+                  : 'a Python lockfile beside it'
+            }), so ` +
+            'it was parsed only to decide whether it stops the scan',
     });
   }
   const contents = await source.readMany(readPaths);
@@ -2060,7 +2644,10 @@ async function loadState(
     }
     const content = contents.get(manifestPath) ?? null;
     if (content !== null) {
-      manifests.push(parseManifest(manifestPath, content));
+      const member = collect(manifestPath, content, 'root-member');
+      if (member !== null) {
+        manifests.push(member);
+      }
     }
   }
 
@@ -2069,7 +2656,7 @@ async function loadState(
   // are skipped so a workspace member is not read twice.
   const seenManifests = new Set(manifests.map((manifest) => manifest.path));
   const extraManifestPaths = listedManifests.filter(
-    (relPath) => !seenManifests.has(relPath) && !unread.has(relPath)
+    (relPath) => !seenManifests.has(relPath) && !attempted.has(relPath) && !unread.has(relPath)
   );
   const extraContents = await source.readMany(extraManifestPaths);
   for (const relPath of extraManifestPaths) {
@@ -2077,27 +2664,34 @@ async function loadState(
     if (content === null) {
       continue;
     }
-    // A stray manifest of any ecosystem that does not parse is a per-file
-    // failure. When ignorePaths from the comparison side covers it, the file
-    // is skipped with a note and the scan goes on; otherwise the failure
-    // stands, so a change cannot clear its own parse error. A package.json
-    // that an install root vouches for (a lockfile beside it, or that
-    // root's workspace patterns name it) is a project, not a stray, and
-    // stays fatal whatever ignorePaths says, as the root manifest and the
-    // root's workspace members (parsed above) do. A file that parses is
-    // read whether or not it is ignored: its findings are filtered later,
-    // like any other path under ignorePaths.
-    try {
-      manifests.push(parseProjectManifest(relPath, content));
-    } catch (err) {
-      const vouchedFor = isPackageJsonPath(relPath) && readDespiteSkippedName(relPath);
-      if (vouchedFor || !isIgnoredPath(relPath)) {
-        throw err;
-      }
-      diagnostics.push({
-        code: MANIFEST_UNPARSED,
-        message: `${relPath}: not parsed; covered by ignorePaths`,
-      });
+    // A file that parses is read whether or not it is ignored: its
+    // findings are filtered later, like any other path under ignorePaths.
+    // One that does not is collected, and settleParseFailures decides it.
+    const parsed = collect(relPath, content);
+    if (parsed !== null) {
+      manifests.push(parsed);
+    }
+  }
+  // A project manifest under a skipped directory name that is not read for
+  // names (a pyproject.toml beside vendor/x/uv.lock, a uv workspace member
+  // under build/) is still parsed, so that one that does not parse stops
+  // the scan as it would anywhere else. Its dependencies are not read.
+  const fatalityOnly: string[] = [];
+  for (const relPath of filesInPrefix) {
+    if (
+      isProjectManifestPath(relPath) &&
+      classification.positions.has(relPath) &&
+      !attempted.has(relPath) &&
+      !(await source.isSymlink(relPath))
+    ) {
+      fatalityOnly.push(relPath);
+    }
+  }
+  const fatalityContents = await source.readMany(fatalityOnly);
+  for (const relPath of fatalityOnly) {
+    const content = fatalityContents.get(relPath) ?? null;
+    if (content !== null) {
+      collect(relPath, content);
     }
   }
   await followRequirementIncludes(source, manifests);
@@ -2117,7 +2711,7 @@ async function loadState(
   });
   const merged: ParsedLockfile[] = [];
   for (const directory of lockfileDirs) {
-    const loaded = await loadLockfiles(source, diagnostics, unread, role, directory);
+    const loaded = await loadLockfiles(source, diagnostics, unread, role, directory, npmLockfiles);
     if (loaded.lockfile !== null) {
       merged.push(loaded.lockfile);
     }
@@ -2178,7 +2772,7 @@ async function loadState(
     diagnostics
   );
 
-  return {
+  const state: RepoState = {
     manifests,
     lockfile,
     extraLockfiles,
@@ -2201,6 +2795,7 @@ async function loadState(
     pythonArchiveFiles,
     goFiles: files.filter(isGoModuleFile).sort(),
   };
+  return { state, role, isIgnoredPath, classification, failures };
 }
 
 // Both sides of a scan usually read the same workspace configuration, so
@@ -2411,7 +3006,7 @@ export async function loadRefState(
   }
   const root = await resolveRepoRoot(repoRoot);
   const diagnostics: Diagnostic[] = [];
-  const state = await loadState(
+  const side = await loadState(
     refSource(root, ref),
     diagnostics,
     {
@@ -2421,8 +3016,14 @@ export async function loadRefState(
     prefix,
     isIgnoredPath
   );
-  notes?.push(...diagnostics.filter((d) => COMPARISON_SIDE_CODES.has(d.code)));
-  return state;
+  // The trust base's own parse failures are decided by its own projects
+  // only. It contributes control input (ignorePaths) to the other sides,
+  // never project paths.
+  settleParseFailures([side], prefix, diagnostics);
+  notes?.push(
+    ...diagnostics.filter((d) => COMPARISON_SIDE_CODES.has(d.code) || d.code === CLASSIFICATION_INPUT_UNREAD)
+  );
+  return side.state;
 }
 
 /**
@@ -2462,13 +3063,16 @@ export async function loadStates(
       prefix,
       isIgnoredPath
     );
-    return { before: null, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
+    settleParseFailures([after], prefix, diagnostics);
+    return { before: null, after: after.state, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
 
   const root = await resolveRepoRoot(repoRoot);
   const prefix = await relativeScanPrefix(repoRoot, root);
   await noteAnchorDifference(repoRoot, root, diagnostics);
 
+  // Every side is loaded before any parse failure is decided, so one exit 2
+  // lists them all and a comparison-side failure never hides a judged one.
   if (mode.kind === 'staged') {
     const before = (await hasCommittedHead(root))
       ? await loadState(
@@ -2480,7 +3084,8 @@ export async function loadStates(
         )
       : null;
     const after = await loadState(indexSource(root), diagnostics, JUDGED, prefix, isIgnoredPath);
-    return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
+    settleParseFailures(before === null ? [after] : [after, before], prefix, diagnostics);
+    return { before: before?.state ?? null, after: after.state, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
 
   if (!isUsableRef(mode.ref)) {
@@ -2503,5 +3108,6 @@ export async function loadStates(
     prefix,
     isIgnoredPath
   );
-  return { before, after, mode, diagnostics: dedupeDiagnostics(diagnostics) };
+  settleParseFailures([after, before], prefix, diagnostics);
+  return { before: before.state, after: after.state, mode, diagnostics: dedupeDiagnostics(diagnostics) };
 }

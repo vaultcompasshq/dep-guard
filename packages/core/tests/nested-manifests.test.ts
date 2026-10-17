@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -591,6 +591,726 @@ describe('an ignored Python manifest that parses is still read', () => {
       )
     ).toBeUndefined();
     expect(states.after.manifests.map((entry) => entry.path)).toContain('backend/requirements.txt');
+  });
+});
+
+// 0.15.0: one fatal set of project manifests for every position, side and
+// scan prefix (docs/design/2026-10-18-unparseable-stray-manifests.md).
+
+async function ignore(...paths: string[]): Promise<void> {
+  await write('.dep-guard.json', JSON.stringify({ ignorePaths: paths }));
+}
+
+async function auditError(at = repo): Promise<DepGuardError> {
+  return scanError(() => scan({ repoRoot: at, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS }));
+}
+
+function linkLock(target: string): string {
+  return npmLock({
+    [target]: { name: 'x', version: '1.0.0' },
+    'node_modules/x': { resolved: target, link: true },
+  });
+}
+
+const UV_LOCK = 'version = 1\n';
+
+describe('vouched positions (0.15.0)', () => {
+  test('T1 an ignored build/package.json that does not parse beside build/package-lock.json exits 2', async () => {
+    await ignore('build');
+    await write('package.json', manifestJson({}));
+    await write('build/package.json', BROKEN_PACKAGE_JSON);
+    await write('build/package-lock.json', npmLock({}));
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('build/package.json');
+  });
+
+  test.each([
+    ['file:', 'file:./tools/x'],
+    ['link:', 'link:./tools/x'],
+    ['portal:', 'portal:tools/x'],
+  ])('T4 an ignored package.json named by a %s specifier that does not parse exits 2', async (_label, spec) => {
+    await ignore('tools');
+    await write('package.json', manifestJson({ x: spec }));
+    await write('tools/x/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('tools/x/package.json');
+    expect(error.message).toContain('file:, link: or portal:');
+  });
+
+  test('T5 an ignored package.json recorded as the resolved directory of a lockfile link entry exits 2', async () => {
+    await ignore('tools');
+    await write('package.json', manifestJson({}));
+    await write('package-lock.json', linkLock('tools/x'));
+    await write('tools/x/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('tools/x/package.json');
+    expect(error.message).toContain('lockfile link entry');
+  });
+
+  test('T7 the measured bun shape, text after the value, as an unignored stray exits 2', async () => {
+    await write('package.json', manifestJson({}));
+    await write('tools/x/package.json', '{"dependencies": {"reqeusts": "1.0.0"}} x');
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('tools/x/package.json');
+    expect(error.message).not.toContain('reqeusts');
+  });
+});
+
+describe('Python manifests beside a lockfile (0.15.0)', () => {
+  test.each([
+    ['pyproject.toml', 'uv.lock', BROKEN_PYPROJECT, UV_LOCK],
+    ['pyproject.toml', 'poetry.lock', BROKEN_PYPROJECT, ''],
+    ['pyproject.toml', 'pdm.lock', BROKEN_PYPROJECT, ''],
+    ['Pipfile', 'Pipfile.lock', '[[source]\n', '{}'],
+    ['uv.toml', 'uv.lock', 'index-url = \n', UV_LOCK],
+    ['pyproject.toml', 'package-lock.json', BROKEN_PYPROJECT, npmLock({})],
+  ])('P1 an ignored %s that is not TOML beside %s exits 2', async (manifest, lockName, content, lockContent) => {
+    await ignore('py');
+    await write('package.json', manifestJson({}));
+    await write(`py/x/${manifest}`, content);
+    await write(`py/x/${lockName}`, lockContent);
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain(`py/x/${manifest}`);
+    expect(error.message).toContain('a manifest beside a lockfile');
+  });
+
+  const UV_ROOT = ['[project]', 'name = "root"', 'version = "0"', '[tool.uv.workspace]', 'members = ["libs/*"]', ''].join('\n');
+
+  test('P2 an ignored uv workspace member that is not TOML exits 2', async () => {
+    await ignore('py/libs');
+    await write('package.json', manifestJson({}));
+    await write('py/pyproject.toml', UV_ROOT);
+    await write('py/uv.lock', UV_LOCK);
+    await write('py/libs/a/pyproject.toml', BROKEN_PYPROJECT);
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('py/libs/a/pyproject.toml');
+    expect(error.message).toContain('a uv workspace member');
+  });
+
+  test('P2 control: an ignored pyproject.toml that is not a uv member is dropped', async () => {
+    await ignore('py/tools');
+    await write('package.json', manifestJson({}));
+    await write('py/pyproject.toml', UV_ROOT);
+    await write('py/uv.lock', UV_LOCK);
+    await write('py/tools/b/pyproject.toml', BROKEN_PYPROJECT);
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.exitCode).not.toBe(2);
+    expect(result.run.diagnostics.find((entry) => entry.code === 'manifest-unparsed')?.message).toContain(
+      'py/tools/b/pyproject.toml'
+    );
+    expect(result.run.ecosystems.pypi.notParsed).toBe(1);
+    expect(result.run.ecosystems.npm.notParsed).toBe(0);
+  });
+
+  test('P3 an ignored shape-broken pyproject.toml beside uv.lock exits 2 and names the shape class', async () => {
+    await ignore('py');
+    await write('package.json', manifestJson({}));
+    await write('py/pyproject.toml', '[dependency-groups]\ndev = "x"\n');
+    await write('py/uv.lock', UV_LOCK);
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('py/pyproject.toml');
+    expect(error.message).toContain('it is valid TOML, so a package manager may install from it');
+  });
+
+  test.each([
+    ['ignored', true],
+    ['not ignored', false],
+  ])('P4 a vendor/x/pyproject.toml that is not TOML beside vendor/x/uv.lock exits 2 (%s)', async (_label, ignored) => {
+    if (ignored) {
+      await ignore('vendor');
+    }
+    await write('package.json', manifestJson({}));
+    await write('vendor/x/pyproject.toml', BROKEN_PYPROJECT);
+    await write('vendor/x/uv.lock', UV_LOCK);
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('vendor/x/pyproject.toml');
+  });
+
+  test('P4 control: a vendor/x/pyproject.toml that parses beside vendor/x/uv.lock is still not read for names', async () => {
+    await write('package.json', manifestJson({}));
+    await write('vendor/x/pyproject.toml', '[project]\nname = "x"\nversion = "0"\ndependencies = ["reqeusts"]\n');
+    await write('vendor/x/uv.lock', UV_LOCK);
+
+    const states = await loadStates(repo, { kind: 'audit' });
+
+    expect(states.after.manifests.map((entry) => entry.path)).not.toContain('vendor/x/pyproject.toml');
+    const note = states.diagnostics.find((entry) => entry.message.startsWith('vendor/x/pyproject.toml'));
+    expect(note?.code).toBe('manifest-skipped-dirname');
+    expect(note?.message).not.toContain('this one has neither');
+    expect(note?.message).toContain('a Python lockfile beside it');
+    expect(note?.message).toContain('parsed only to decide whether it stops the scan');
+  });
+});
+
+describe('an ignorePaths entry that only drops an unparsed manifest (0.15.0)', () => {
+  test('is a match, so it is not reported as ignore-path-unmatched', async () => {
+    await ignore('test/fixtures/bad', 'nowhere');
+    await write('package.json', manifestJson({ 'reeact-definitely-not-real': '1.0.0' }));
+    await write('test/fixtures/bad/package.json', BROKEN_PACKAGE_JSON);
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.findings.length).toBeGreaterThan(0);
+    const unmatched = result.run.diagnostics.filter((entry) => entry.code === 'ignore-path-unmatched');
+    expect(unmatched.map((entry) => entry.message)).toEqual([
+      'ignorePaths entry "nowhere" did not match any finding\'s manifestPath in this scan',
+    ]);
+  });
+
+  test('a drop on the base side counts as a match too', async () => {
+    await ignore('tools/x', 'nowhere');
+    await write('package.json', manifestJson({}));
+    await write('tools/x/package.json', BROKEN_PACKAGE_JSON);
+    await commitAll('base');
+    await git('tag', 'base');
+    await write('package.json', manifestJson({ 'reeact-definitely-not-real': '1.0.0' }));
+    await rm(path.join(repo, 'tools'), { recursive: true });
+    await commitAll('head');
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'base' }, corpusDir: FIXTURE_CORPUS });
+
+    const unmatched = result.run.diagnostics.filter((entry) => entry.code === 'ignore-path-unmatched');
+    expect(unmatched.map((entry) => entry.message)).toEqual([
+      'ignorePaths entry "nowhere" did not match any finding\'s manifestPath in this scan',
+    ]);
+  });
+});
+
+describe('which side decides (0.15.0)', () => {
+  async function unvouchThenBreak(): Promise<void> {
+    await ignore('packages/a');
+    await write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/*'] }));
+    await write('packages/a/package.json', manifestJson({}));
+    await commitAll('base');
+    await git('tag', 'base');
+    await write('package.json', manifestJson({}));
+    await write('packages/a/package.json', BROKEN_PACKAGE_JSON);
+    await commitAll('head');
+  }
+
+  test('T11 a head that removes a member from the base workspaces and breaks it exits 2 under --base', async () => {
+    await unvouchThenBreak();
+
+    const error = await scanError(() =>
+      scan({ repoRoot: repo, mode: { kind: 'base', ref: 'base' }, corpusDir: FIXTURE_CORPUS })
+    );
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('packages/a/package.json (judged side)');
+    expect(error.message).toContain('a root workspace member on the --base ref "base"');
+  });
+
+  test('T11 the same exits 2 under --trust-base', async () => {
+    await unvouchThenBreak();
+
+    const error = await scanError(() =>
+      scan({ repoRoot: repo, mode: { kind: 'base', ref: 'base' }, corpusDir: FIXTURE_CORPUS, trustBase: 'base' })
+    );
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('packages/a/package.json');
+  });
+
+  test('T11 an audit of the head alone drops it', async () => {
+    await unvouchThenBreak();
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.exitCode).not.toBe(2);
+    expect(result.run.diagnostics.find((entry) => entry.code === 'manifest-unparsed')?.message).toContain(
+      'packages/a/package.json'
+    );
+    expect(result.run.ecosystems.npm.notParsed).toBe(1);
+  });
+
+  test('T11b a head that fixes a base-side broken stray and adds a lockfile beside it does not exit 2', async () => {
+    await ignore('tools/x');
+    await write('package.json', manifestJson({}));
+    await write('tools/x/package.json', BROKEN_PACKAGE_JSON);
+    await commitAll('base');
+    await git('tag', 'base');
+    await write('tools/x/package.json', manifestJson({ 'left-pad': '1.0.0' }));
+    await write('tools/x/package-lock.json', npmLock({ 'node_modules/left-pad': CLEAN }));
+    await commitAll('head');
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'base', ref: 'base' }, corpusDir: FIXTURE_CORPUS });
+    const states = await loadStates(repo, { kind: 'base', ref: 'base' }, {
+      isIgnoredPath: (relPath) => relPath.startsWith('tools/x/'),
+    });
+    const delta = computeDelta(states.before, states.after);
+
+    expect(result.exitCode).not.toBe(2);
+    expect(result.run.diagnostics.find((entry) => entry.code === 'manifest-unparsed')?.message).toContain(
+      'tools/x/package.json'
+    );
+    expect(delta.changes).toContainEqual(
+      expect.objectContaining({ name: 'left-pad', kind: 'added', manifestPath: 'tools/x/package.json' })
+    );
+  });
+
+  // The trust base contributes ignorePaths only. tools/x has a lockfile
+  // beside it on the trust base and on neither --base nor the head, so only
+  // the trust base would call it a project.
+  async function trustBaseProtectsOnly(baseKeepsLockfile: boolean): Promise<void> {
+    await ignore('tools/x');
+    await write('package.json', manifestJson({}));
+    await write('tools/x/package.json', manifestJson({}));
+    await write('tools/x/package-lock.json', npmLock({}));
+    await commitAll('trust');
+    await git('tag', 'trust');
+    if (!baseKeepsLockfile) {
+      await rm(path.join(repo, 'tools/x/package-lock.json'));
+    }
+    await write('README.md', 'base\n');
+    await commitAll('base');
+    await git('tag', 'base');
+    await rm(path.join(repo, 'tools/x/package-lock.json'), { force: true });
+    await write('tools/x/package.json', BROKEN_PACKAGE_JSON);
+    await commitAll('head');
+  }
+
+  test('T13 a separate trust base that alone counts a path as a project does not make it fatal', async () => {
+    await trustBaseProtectsOnly(false);
+
+    const result = await scan({
+      repoRoot: repo,
+      mode: { kind: 'base', ref: 'base' },
+      corpusDir: FIXTURE_CORPUS,
+      trustBase: 'trust',
+    });
+
+    expect(result.exitCode).not.toBe(2);
+    expect(result.run.diagnostics.find((entry) => entry.code === 'manifest-unparsed')?.message).toContain(
+      'tools/x/package.json'
+    );
+  });
+
+  test('T13 control: the same path is fatal when the --base side counts it as a project', async () => {
+    await trustBaseProtectsOnly(true);
+
+    const error = await scanError(() =>
+      scan({ repoRoot: repo, mode: { kind: 'base', ref: 'base' }, corpusDir: FIXTURE_CORPUS, trustBase: 'trust' })
+    );
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('a manifest beside a lockfile on the --base ref "base"');
+  });
+
+  test('T12 a head that fixes an ignored base-side broken stray has its dependencies judged', async () => {
+    await ignore('tools/x');
+    await write('package.json', manifestJson({}));
+    await write('tools/x/package.json', BROKEN_PACKAGE_JSON);
+    await commitAll('base');
+    await git('tag', 'base');
+    await write('tools/x/package.json', manifestJson({ reqeusts: '1.0.0' }));
+    await commitAll('head');
+
+    const states = await loadStates(repo, { kind: 'base', ref: 'base' }, {
+      isIgnoredPath: (relPath) => relPath.startsWith('tools/x/'),
+    });
+    const delta = computeDelta(states.before, states.after);
+
+    expect(delta.changes).toContainEqual(
+      expect.objectContaining({ name: 'reqeusts', kind: 'added', manifestPath: 'tools/x/package.json' })
+    );
+  });
+});
+
+describe('a root workspace member the walk reaches is always a project (0.15.0)', () => {
+  // The workspace walk reaches members the listing does not show under a
+  // pattern: a symlinked member directory resolves to its real path, and a
+  // gitignored directory present on disk is listed by readdir, not by git.
+  // Either failure is still a root workspace member and stops the scan.
+  test('a symlinked member directory pointing at an ignored broken manifest exits 2 under --base and --trust-base', async () => {
+    await ignore('fixtures');
+    await write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/*'] }));
+    await write('packages/ok/package.json', manifestJson({}));
+    await commitAll('base');
+    await git('tag', 'base');
+    await write('fixtures/evil/package.json', '{"dependencies": {"reqeusts": "1.0.0"}} x');
+    await symlink('../fixtures/evil', path.join(repo, 'packages', 'evil'));
+    await commitAll('head');
+
+    const error = await scanError(() =>
+      scan({ repoRoot: repo, mode: { kind: 'base', ref: 'base' }, corpusDir: FIXTURE_CORPUS, trustBase: 'base' })
+    );
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('fixtures/evil/package.json (judged side)');
+    expect(error.message).toContain('a root workspace member is a project');
+  });
+
+  test('a gitignored member directory present on disk with an ignored broken manifest exits 2', async () => {
+    await ignore('packages/hidden');
+    await write('.gitignore', 'packages/hidden/\n');
+    await write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/*'] }));
+    await write('packages/hidden/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('packages/hidden/package.json');
+    expect(error.message).toContain('a root workspace member is a project');
+  });
+});
+
+describe('subdirectory scans (0.15.0)', () => {
+  test('S1 a broken ignored root workspace member is fatal on scan packages', async () => {
+    await ignore('packages/a');
+    await write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/*'] }));
+    await write('packages/a/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError(path.join(repo, 'packages'));
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('packages/a/package.json');
+  });
+
+  test('S2 a broken ignored root workspace member is fatal on a scan of its own directory', async () => {
+    await ignore('packages/a');
+    await write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/a'] }));
+    await write('package-lock.json', npmLock({}));
+    await write('packages/a/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError(path.join(repo, 'packages', 'a'));
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('packages/a/package.json');
+  });
+
+  test('S3 an unreadable root package.json makes every manifest under the scanned path a project', async () => {
+    await ignore('tools/y');
+    await write('package.json', BROKEN_PACKAGE_JSON);
+    await write('tools/y/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError(path.join(repo, 'tools'));
+
+    expect(error.code).toBe('manifest-parse');
+    // The root's own failure is not listed: a subdirectory scan reads it
+    // for classification only, and a root scan reports it.
+    expect(error.message.startsWith('1 manifest does not parse and stops the scan: tools/y/package.json')).toBe(true);
+    expect(error.message).toContain('because package.json outside it could not be read');
+  });
+
+  test('S3 control: with every file under the path valid, the scan passes and notes the unread root', async () => {
+    await write('package.json', BROKEN_PACKAGE_JSON);
+    await write('tools/z/package.json', manifestJson({}));
+
+    const result = await scan({ repoRoot: path.join(repo, 'tools'), mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.exitCode).toBe(0);
+    const notes = result.run.diagnostics.filter((entry) => entry.code === 'classification-input-unread');
+    expect(notes.map((entry) => entry.message)).toEqual([
+      'package.json: outside the scanned directory tools and could not be read to decide which manifests are projects, so every manifest under tools was treated as a project for this scan',
+    ]);
+    expect(result.run.diagnostics.map((entry) => entry.code)).not.toContain('manifest-parse');
+  });
+
+  test('S4 an out-of-prefix file: reference makes its target a project', async () => {
+    await ignore('tools/x');
+    await write('package.json', manifestJson({}));
+    await write('apps/web/package.json', manifestJson({ x: 'file:../../tools/x' }));
+    await write('tools/x/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError(path.join(repo, 'tools'));
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('tools/x/package.json');
+  });
+
+  test('S5 an out-of-prefix lockfile link entry makes its target a project', async () => {
+    await ignore('tools/x');
+    await write('package.json', manifestJson({}));
+    await write('package-lock.json', linkLock('tools/x'));
+    await write('tools/x/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError(path.join(repo, 'tools'));
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('tools/x/package.json');
+  });
+
+  test.each([
+    ['a pnpm-workspace.yaml beside a lockfile', 'other/pnpm-workspace.yaml', 'packages: [\n', 'other/pnpm-lock.yaml', "lockfileVersion: '9.0'\n"],
+    ['a pyproject.toml beside uv.lock', 'other/pyproject.toml', BROKEN_PYPROJECT, 'other/uv.lock', UV_LOCK],
+    ['an npm lockfile', 'other/package-lock.json', '{not json', 'other/package.json', manifestJson({})],
+  ])('S6 an unreadable out-of-prefix classification input (%s) makes every manifest under the path a project', async (_label, input, content, beside, besideContent) => {
+    await ignore('tools/y');
+    await write('package.json', manifestJson({}));
+    await write(input, content);
+    await write(beside, besideContent);
+    await write('tools/y/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError(path.join(repo, 'tools'));
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('tools/y/package.json');
+    expect(error.message).toContain(`because ${input}`);
+  });
+
+  test('S7 an out-of-prefix ignored broken stray a root scan would drop contributes nothing', async () => {
+    await ignore('other', 'tools/y');
+    await write('package.json', manifestJson({}));
+    await write('other/package.json', BROKEN_PACKAGE_JSON);
+    await write('tools/y/package.json', BROKEN_PACKAGE_JSON);
+    await write('tools/z/package.json', manifestJson({}));
+
+    const result = await scan({ repoRoot: path.join(repo, 'tools'), mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.exitCode).not.toBe(2);
+    const codes = result.run.diagnostics.map((entry) => entry.code);
+    expect(codes).not.toContain('classification-input-unread');
+    expect(result.run.diagnostics.filter((entry) => entry.code === 'manifest-unparsed').map((entry) => entry.message)).toEqual([
+      'tools/y/package.json: not parsed; covered by ignorePaths',
+    ]);
+  });
+
+  test('S8 scan packages reads a root workspace member under a skipped directory name', async () => {
+    await write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/build/x'] }));
+    await write('packages/build/x/package.json', manifestJson({ reqeusts: '1.0.0' }));
+
+    const states = await loadStates(path.join(repo, 'packages'), { kind: 'audit' });
+
+    const member = states.after.manifests.find((entry) => entry.path === 'packages/build/x/package.json');
+    expect(member?.deps.map((dep) => dep.name)).toEqual(['reqeusts']);
+  });
+
+  test('S9 a classification read outside the path raises no diagnostic of its own (path-outside-root)', async () => {
+    // A tracked directory later replaced on disk by a symlink out of the
+    // repository: the working tree still lists other/package.json, and
+    // reading it resolves outside the root.
+    const outside = await mkdtemp(path.join(tmpdir(), 'dep-guard-outside-'));
+    tempDirs.push(outside);
+    await writeFile(path.join(outside, 'package.json'), manifestJson({}), 'utf8');
+    await write('package.json', manifestJson({}));
+    await write('other/package.json', manifestJson({}));
+    await write('tools/z/package.json', manifestJson({}));
+    await commitAll('base');
+    await rm(path.join(repo, 'other'), { recursive: true });
+    await symlink(outside, path.join(repo, 'other'));
+
+    const sub = await scan({ repoRoot: path.join(repo, 'tools'), mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(sub.run.diagnostics.map((entry) => entry.code)).not.toContain('path-outside-root');
+    expect(sub.run.diagnostics.map((entry) => entry.code)).not.toContain('classification-input-unread');
+  });
+
+  test('S10 a symlinked package.json outside the path is unread on the judged side', async () => {
+    await ignore('tools/y');
+    await write('package.json', manifestJson({}));
+    await write('real/package.json', manifestJson({}));
+    await mkdir(path.join(repo, 'other'), { recursive: true });
+    await symlink('../real/package.json', path.join(repo, 'other', 'package.json'));
+    await write('tools/y/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError(path.join(repo, 'tools'));
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('because other/package.json outside it could not be read');
+  });
+
+  test('S10 a symlinked package.json outside the path on a comparison side contributes nothing there', async () => {
+    await ignore('tools/y');
+    await write('package.json', manifestJson({}));
+    await write('real/package.json', manifestJson({}));
+    await mkdir(path.join(repo, 'other'), { recursive: true });
+    await symlink('../real/package.json', path.join(repo, 'other', 'package.json'));
+    await write('tools/y/package.json', BROKEN_PACKAGE_JSON);
+    await write('tools/z/package.json', manifestJson({}));
+    await commitAll('base');
+    await git('tag', 'base');
+    await rm(path.join(repo, 'other', 'package.json'));
+    await write('other/package.json', manifestJson({}));
+    await commitAll('head');
+
+    const result = await scan({
+      repoRoot: path.join(repo, 'tools'),
+      mode: { kind: 'base', ref: 'base' },
+      corpusDir: FIXTURE_CORPUS,
+    });
+
+    expect(result.exitCode).not.toBe(2);
+    expect(result.run.diagnostics.map((entry) => entry.code)).not.toContain('classification-input-unread');
+  });
+
+  test('S9 files outside the scanned path raise no scanned-file diagnostics', async () => {
+    await write('package.json', manifestJson({}));
+    await write('build/package.json', manifestJson({}));
+    await write('tools/z/package.json', manifestJson({}));
+
+    const result = await scan({ repoRoot: path.join(repo, 'tools'), mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.run.diagnostics.map((entry) => entry.code)).not.toContain('manifest-skipped-dirname');
+    expect(result.run.diagnostics.map((entry) => entry.code)).not.toContain('classification-input-unread');
+  });
+});
+
+describe('every fatal parse error in one exit 2 (0.15.0)', () => {
+  test('E1 every side and every parse site is listed, judged side first, in order', async () => {
+    await write('package.json', manifestJson({}));
+    await write('old/package.json', BROKEN_PACKAGE_JSON);
+    await commitAll('base');
+    await git('tag', 'base');
+    await rm(path.join(repo, 'old'), { recursive: true });
+    await write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/*'], pnpm: 'x' }));
+    await write('packages/broken/package.json', BROKEN_PACKAGE_JSON);
+    await write('tools/x/package.json', BROKEN_PACKAGE_JSON);
+    await commitAll('head');
+
+    const error = await scanError(() =>
+      scan({ repoRoot: repo, mode: { kind: 'base', ref: 'base' }, corpusDir: FIXTURE_CORPUS })
+    );
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message.startsWith('4 manifests do not parse and stop the scan: ')).toBe(true);
+    const order = [
+      'package.json (judged side): "pnpm" field is not an object',
+      'packages/broken/package.json (judged side)',
+      'tools/x/package.json (judged side)',
+      'old/package.json (the --base ref "base")',
+    ].map((needle) => error.message.indexOf(needle));
+    expect(order.every((index) => index >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(error.message).toContain('fix the file on the base branch, or cover it with ignorePaths there');
+  });
+
+  test('E2 eleven broken strays list ten and count the rest', async () => {
+    await write('package.json', manifestJson({}));
+    for (let index = 1; index <= 11; index += 1) {
+      await write(`s${String(index).padStart(2, '0')}/package.json`, BROKEN_PACKAGE_JSON);
+    }
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message.startsWith('11 manifests do not parse')).toBe(true);
+    expect(error.message).toContain('s10/package.json');
+    expect(error.message).not.toContain('s11/package.json');
+    expect(error.message).toContain('and 1 more');
+  });
+
+  test('E3 a lockfile parse error beside a broken stray keeps its own error and code', async () => {
+    await write('package.json', manifestJson({}));
+    await write('package-lock.json', '{not json');
+    await write('tools/x/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await auditError();
+
+    expect(error.code).toBe('lockfile-parse');
+  });
+});
+
+describe('manifest-parse messages carry no file content (0.15.0)', () => {
+  test('M1 a byte order mark before a shape-broken file beside a lockfile names the shape class', async () => {
+    await ignore('apps/w');
+    await write('package.json', manifestJson({}));
+    await write('apps/w/package.json', '﻿{"pnpm": "x"}');
+    await write('apps/w/package-lock.json', npmLock({}));
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('it is valid JSON, so a package manager may install from it');
+    expect(error.message).not.toContain('some package managers accept JSON');
+  });
+
+  test('M2 a dependency key is printed only up to its leading name characters', async () => {
+    await write('package.json', manifestJson({}));
+    await write('apps/s/package.json', JSON.stringify({ dependencies: { 'tok_SECRET-123 abc\u0001': 1 } }));
+
+    const error = await auditError();
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('"tok_SECRET-123..."');
+    expect(error.message).not.toContain(' abc');
+    expect(error.message).not.toContain('\u0001');
+  });
+
+  // Two bodies: the npm/cli shape, and one whose JSON.parse error text
+  // quotes the input (V8 echoes the source around an unexpected token), so
+  // a message that passed parser text through would carry NOPE.
+  const positions: Array<[string, (body: string) => Promise<void>]> = [
+    ['the root package.json', async (body) => write('package.json', body)],
+    [
+      'a root workspace member',
+      async (body) => {
+        await write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/*'] }));
+        await write('packages/a/package.json', body);
+      },
+    ],
+    [
+      'a manifest beside a lockfile',
+      async (body) => {
+        await write('package.json', manifestJson({}));
+        await write('apps/x/package.json', body);
+        await write('apps/x/package-lock.json', npmLock({}));
+      },
+    ],
+    [
+      'a nested install root member',
+      async (body) => {
+        await write('package.json', manifestJson({}));
+        await write('apps/x/package.json', JSON.stringify({ name: 'x', version: '1.0.0', workspaces: ['pkgs/*'] }));
+        await write('apps/x/package-lock.json', npmLock({}));
+        await write('apps/x/pkgs/a/package.json', body);
+      },
+    ],
+    [
+      'a file: target',
+      async (body) => {
+        await write('package.json', manifestJson({ x: 'file:tools/x' }));
+        await write('tools/x/package.json', body);
+      },
+    ],
+    [
+      'a lockfile link target',
+      async (body) => {
+        await write('package.json', manifestJson({}));
+        await write('package-lock.json', linkLock('tools/x'));
+        await write('tools/x/package.json', body);
+      },
+    ],
+  ];
+  describe.each([
+    ['the npm/cli shape', BROKEN_PACKAGE_JSON],
+    ['a body the parser quotes', '{"dependencies": NOPE}'],
+  ])('M3 with %s', (_bodyLabel, body) => {
+    test.each(positions)('no message echoes the fixture body: %s', async (_label, setup) => {
+      await ignore('apps', 'packages', 'tools');
+      await setup(body);
+
+      const error = await auditError();
+
+      expect(error.code).toBe('manifest-parse');
+      expect(error.message).not.toContain('NOPE');
+      expect(error.message).toContain('is a project and stops the scan whatever ignorePaths says');
+    });
   });
 });
 
