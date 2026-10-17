@@ -44,11 +44,12 @@ function scanResult(findings: Finding[], overrides: Partial<ScanResult['run']> =
         deadlineExceeded: false,
       },
       ecosystems: {
-        npm: { manifests: 1, candidates: 0, checked: 0, notChecked: { privateScope: 0 }, lockfile: 'read' },
+        npm: { manifests: 1, candidates: 0, checked: 0, notChecked: { privateScope: 0 }, lockfile: 'read', notParsed: 0 },
         go: { files: 0 },
         pypi: {
           requirements: 0,
           pinned: 0,
+          notParsed: 0,
           manifests: 0,
           lockfiles: 0,
           candidates: 0,

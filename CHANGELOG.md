@@ -10,6 +10,86 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+No verdict is loosened. A manifest that does not parse still stops the scan
+by default; `ignorePaths` on the base branch remains the way to clear a
+broken test fixture. The default stays fatal because bun installs from
+`package.json` files that are not JSON (comments, trailing commas, text
+after the value), so "not JSON" does not mean "not installable". The
+changes below can only add an exit 2, which can turn a green run red.
+
+### What can newly stop a scan (exit 2), and how to clear each
+
+- A `pyproject.toml`, `Pipfile` or `uv.toml` that does not parse, beside
+  `uv.lock`, `poetry.lock`, `pdm.lock`, `Pipfile.lock` or an npm-family
+  lockfile, or named by a uv workspace's `members`, now stops the scan
+  whatever `ignorePaths` says, as a `package.json` beside its lockfile
+  already did. 0.14.0 dropped it when `ignorePaths` covered it. Fix the
+  file.
+- A `pyproject.toml` (or `Pipfile`, `uv.toml`) under a skipped directory
+  name beside a Python lockfile, such as `vendor/x/pyproject.toml` beside
+  `vendor/x/uv.lock`, was never parsed before: only an npm-family lockfile
+  promoted the manifest beside it past the skipped-directory filter. It is
+  now parsed, and stops the scan when it does not parse, with no
+  `ignorePaths` entry involved. Its dependencies are still not read. Fix
+  the file.
+- A `package.json` that is the target of a `file:`, `link:` or `portal:`
+  dependency, or of a link entry in an npm lockfile, now stops the scan
+  when it does not parse, whatever `ignorePaths` says. Fix the file.
+- On `dep-guard scan <path>`, a manifest under the path that does not parse
+  is fatal or dropped exactly as on a scan of the repository root: a root
+  workspace member, a member of an install root above the path, or a
+  reference target under the path that `ignorePaths` covers now stops the
+  scan. When a file outside the path that decides this cannot be read,
+  every manifest under the path that does not parse stops the scan, and
+  `classification-input-unread` names the file. Fix the file it names.
+- A pull request that removes a manifest from the base's workspaces,
+  lockfile directory or references and breaks it in the same change stops
+  the scan. Fix the file.
+
+### Changed
+
+- Every manifest that stops the scan, on every side, is listed in one
+  error (ten at most, then a count), with the side and the reason, instead
+  of the first one only. The exit code is unchanged. A manifest that does
+  not parse no longer hides a later one, and a broken file on the base no
+  longer hides one on the pull request.
+- A `manifest-parse` message no longer prints a dependency key in full; it
+  prints the key's leading name characters.
+- An `ignorePaths` entry whose only effect is skipping a manifest that does
+  not parse is no longer reported as `ignore-path-unmatched`.
+- A manifest under a skipped directory name that is a project only through
+  a Python lockfile beside it, or as a uv workspace member, now gets a
+  `manifest-skipped-dirname` note saying it was parsed only to decide
+  whether it stops the scan, instead of one saying no lockfile sits beside
+  it.
+- `dep-guard scan <path>` now reads a root workspace member under the path
+  whose path has a skipped directory name (`build`, `vendor` and the rest),
+  as a scan of the repository root does. This can add findings.
+- The target of a `file:`, `link:` or `portal:` dependency, and of an npm
+  lockfile link entry, is read whatever directory names are on its path,
+  like a workspace member. This can add findings.
+
+### Added
+
+- `run.ecosystems.npm.notParsed` and `run.ecosystems.pypi.notParsed` count
+  manifests dropped because `ignorePaths` covers them. Both are always
+  present in the JSON output and are required fields of the exported
+  `NpmEcosystemSummary` and `PypiEcosystemSummary` interfaces, so code that
+  builds those objects by hand must now include them.
+- `classification-input-unread`, a note on a subdirectory scan only.
+- Dogfood bench: a row may carry a `config` object (`ignorePaths` only)
+  with a required `configNote` saying the upstream repository does not
+  carry it; the baseline records it as `configApplied`. A clone that
+  already carries `.dep-guard.json` or `.dep-guard.local.json` is refused,
+  and a `--compare` run reports drift when the row's config and the
+  baseline's `configApplied` differ.
+- Dogfood bench: eslint is measured through such a row (its two broken
+  fixture directories) and is no longer skipped. npm/cli stays skipped, now
+  as `lockfile-parse`: it also carries a deliberately broken fixture
+  `package-lock.json`, which the first broken manifest used to hide and
+  which no `ignorePaths` entry clears. The public baseline is re-recorded;
+  no other row's counts moved.
+
 ## [0.14.0] - 2026-10-17
 
 Reporting and wording. Nothing here changes an exit code or a severity, with

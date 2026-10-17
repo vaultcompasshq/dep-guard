@@ -324,6 +324,19 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
+/**
+ * True when the text is a TOML table once a byte order mark is stripped,
+ * the reading readToml gives it. Decides whether a TOML manifest that
+ * failed to parse failed on syntax or on shape, for the exit 2 message.
+ */
+export function isReadableToml(content: string): boolean {
+  try {
+    return asRecord(parseToml(withoutByteOrderMark(content))) !== null;
+  } catch {
+    return false;
+  }
+}
+
 function readToml(filePath: string, content: string): Record<string, unknown> {
   try {
     const parsed: unknown = parseToml(withoutByteOrderMark(content));

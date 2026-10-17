@@ -361,9 +361,10 @@ and how many were read but not checked and why (see "Ecosystem coverage"):
 ```json
 "ecosystems": {
   "npm":  { "manifests": 2, "candidates": 3, "checked": 3,
-            "notChecked": { "privateScope": 0 }, "lockfile": "read" },
+            "notChecked": { "privateScope": 0 }, "lockfile": "read",
+            "notParsed": 0 },
   "pypi": { "manifests": 2, "lockfiles": 1, "candidates": 7,
-            "requirements": 9, "pinned": 9,
+            "requirements": 9, "pinned": 9, "notParsed": 0,
             "existenceChecked": 5, "resemblanceChecked": 7,
             "notChecked": { "offline": 0, "budget": 1, "unreachable": 1,
                             "privateIndex": 0, "internal": 0,
@@ -382,6 +383,8 @@ counts Python lockfiles that could not be read for names. `npm.lockfile` is
 `read`, `not-read` (a lockfile in a format dep-guard does not parse),
 `missing`, or `not-applicable` (the `check` command); `pypi.requirements`
 and `pypi.pinned` count named Python requirements and those pinned exactly;
+`npm.notParsed` and `pypi.notParsed` count manifests that did not parse and
+were skipped because `ignorePaths` covers them (`manifest-unparsed`);
 `go.files` counts `go.mod` and `go.sum` files.
 
 `--no-online` forces the online checks off for one run, overriding
@@ -1245,24 +1248,49 @@ quiet:
   `project.optional-dependencies`, `[tool.poetry.dependencies]` and the
   poetry group tables; a poetry `git` or `url` table is judged as a git or
   url source. A file that does not parse stops the scan and names the
-  path, unless `ignorePaths` on the base covers it, in which case it is
-  skipped with a note. Paths git ignores are not scanned. A directory
+  path, unless it is a stray that `ignorePaths` on the base covers (see
+  below for which manifests are projects), in which case it is skipped
+  with a note. Paths git ignores are not scanned. A directory
   named `node_modules`, `.venv`, `venv`, `dist`, `build`, `vendor` or
-  `vendored` only drops a stray manifest that no workspace pattern names
-  and that has no lockfile beside it, and says so in
-  `manifest-skipped-dirname`; a workspace member, a manifest with a
-  lockfile in the same directory, a member that install root's own
-  workspace patterns name, and a lockfile on such a path are read. Under
+  `vendored` drops a manifest under it from the scan, and says so in
+  `manifest-skipped-dirname`, unless it is a workspace member, a manifest
+  with an npm-family lockfile (npm, pnpm, yarn, bun) in the same
+  directory, a member that install root's own workspace patterns name, or
+  the target of a `file:`, `link:` or `portal:` dependency or an npm
+  lockfile link; those, and any npm-family lockfile on such a path, are
+  scanned (their dependencies are read). A Python lockfile under such a
+  name is not read. A manifest under such a name that is a project
+  only through a Python lockfile beside it (`build/x/pyproject.toml` beside
+  `build/x/uv.lock`), or as a uv workspace member, is not scanned: it is
+  parsed only to decide whether it stops the scan, its dependencies are
+  not read, and the `manifest-skipped-dirname` note says so. Under
   `node_modules` only lockfiles are read. Every other `package.json` git tracks
   is read, test fixtures and templates included, so a fixture cannot hide
   a dependency; an `ignorePaths` entry on the base branch is how one is
-  dropped. That includes a fixture `package.json` that does not parse: one
-  `ignorePaths` covers is skipped with a `manifest-unparsed` note, and one
-  it does not cover stops the scan and names the path. On a scan of the
-  repository root, the root `package.json`, a workspace member and a
-  `package.json` with a lockfile beside it are projects, not fixtures, and
-  stop the scan when they do not parse whatever `ignorePaths` says. `dep-guard scan <path>` reads manifests under that directory
-  and nothing above it; a lockfile in an ancestor directory is named in
+  dropped. A manifest that does not parse stops the scan and names the
+  path. The one way to clear a broken fixture is an `ignorePaths` entry on
+  the base branch, which skips it with a `manifest-unparsed` note, and that
+  works only for a stray. The root `package.json`, a workspace member, a
+  manifest with a lockfile beside it (npm, pnpm, yarn, bun, `uv.lock`,
+  `poetry.lock`, `pdm.lock`, `Pipfile.lock`), one named by such a
+  directory's workspace patterns or by a uv workspace's `members`, and the
+  target of a `file:`, `link:` or `portal:` dependency or of an npm
+  lockfile link are projects, and stop the scan whatever `ignorePaths`
+  says. There is no default skip for a file that is not JSON, because bun
+  installs from some files that are not. A broken manifest on the base
+  branch with no entry stops every pull request against it until the base
+  is fixed. Every manifest that stops the scan is listed in one error, ten
+  at most, with its side and the reason, for example:
+
+      dep-guard: 2 manifests do not parse and stop the scan: packages/broken/package.json (judged side): not valid JSON; some package managers accept JSON with comments, trailing commas or text after the value, so this file may still install; a root workspace member is a project and stops the scan whatever ignorePaths says. | test/old/package.json (the --base ref "base"): not valid JSON; some package managers accept JSON with comments, trailing commas or text after the value, so this file may still install; fix the file on the base branch, or cover it with ignorePaths there. (manifest-parse)
+
+  `dep-guard scan <path>` reads dependencies and lockfile entries under
+  that directory and nothing above it. To decide which manifests under it
+  are projects, it also reads the root `package.json` and
+  `pnpm-workspace.yaml`, the manifests and workspace files beside every
+  lockfile, every `package.json` and every npm lockfile in the repository,
+  and reports nothing about them unless one cannot be read
+  (`classification-input-unread`); a lockfile in an ancestor directory is named in
   `lockfile-outside-prefix` and not applied, so a full gate is a scan of
   the repository root. Reported paths stay relative to the git root, and
   config and the baseline are still read from the git root. Lockfile

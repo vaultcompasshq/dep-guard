@@ -38,6 +38,12 @@
 // past the point where it spawns the scan -- entries are identified by
 // their position in the local list.
 //
+// A public row may carry `config` (ignorePaths only) with a required
+// `configNote`; the harness writes it into the clone as .dep-guard.json,
+// refuses a clone that already carries .dep-guard.json or
+// .dep-guard.local.json, and records it on the baseline row as
+// `configApplied`. See lib/row-config.mjs.
+//
 // No dependencies are ever installed. dep-guard reads manifests and
 // lockfiles; node_modules would add minutes per repository and change
 // nothing about the answer.
@@ -50,6 +56,7 @@ import { fileURLToPath } from 'node:url';
 
 import { compareToBaseline, formatComparison } from './lib/baseline.mjs';
 import { assertCountsOnly, assertPrivateEntry, summarize } from './lib/counts.mjs';
+import { applyRowConfig, baselineEntry, validateRepoList } from './lib/row-config.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI_PATH = path.join(REPO_ROOT, 'packages', 'cli', 'dist', 'cli.js');
@@ -288,6 +295,9 @@ function readCorpusMeta(corpusDir) {
 
 async function runPublicTier(options) {
   const config = readJson(options.reposFile ?? PUBLIC_REPOS, 'public repository list');
+  // Every row's config is checked before anything is cloned, so a bad row
+  // stops the run rather than half of it.
+  validateRepoList(config);
   const entries = [];
   const failed = [];
 
@@ -295,12 +305,17 @@ async function runPublicTier(options) {
     const workDir = mkdtempSync(path.join(tmpdir(), 'dep-guard-bench-'));
     const clonePath = path.join(workDir, 'repo');
     const startedAt = Date.now();
+    let configApplied = null;
     try {
       log(`${target.repo} at ${target.sha.slice(0, 12)}`);
       await cloneWithRetries(target.url, target.sha, clonePath);
+      configApplied = applyRowConfig(clonePath, target);
+      if (configApplied !== null) {
+        log(`  applying the row's config: ${JSON.stringify(configApplied)}`);
+      }
       const result = await scan(clonePath, options.corpusDir, options.online);
       const counts = assertCountsOnly(summarize(result));
-      entries.push({ repo: target.repo, sha: target.sha, counts });
+      entries.push(baselineEntry(target, configApplied, counts));
 
       const observed = Object.entries(counts.lockfile).find(([, value]) => value === 1)?.[0];
       if (target.expectLockfile !== undefined && observed !== target.expectLockfile) {
@@ -319,7 +334,12 @@ async function runPublicTier(options) {
       log(`  skipped${expected}: ${err.message}`);
       // Recorded, not dropped: a baseline without the row would let a
       // --compare run report a match while a pinned repository fails.
-      entries.push({ repo: target.repo, sha: target.sha, skipped: reason });
+      entries.push({
+        repo: target.repo,
+        sha: target.sha,
+        ...(configApplied === null ? {} : { configApplied, configNote: target.configNote }),
+        skipped: reason,
+      });
       failed.push(target.repo);
     } finally {
       rmSync(workDir, { recursive: true, force: true });

@@ -1037,6 +1037,17 @@ export async function scan(opts: {
   // An entry that covers only a lockfile below the root did match
   // something, so it must not be reported as unmatched later.
   const lockfileIgnoreMatches = new Set<string>();
+  // So did an entry whose only effect was to drop a manifest that does not
+  // parse (manifest-unparsed), on the judged or the comparison side: it is
+  // the one way to clear a broken fixture, and reporting it as a no-op
+  // would tell the reader to delete it.
+  for (const side of [statePair.after, statePair.before]) {
+    for (const dropped of side?.notParsed ?? []) {
+      for (const matched of matchingIgnoreEntries(dropped, config.ignorePaths)) {
+        lockfileIgnoreMatches.add(matched);
+      }
+    }
+  }
   // The comparison sides for the lockfile downgrade rule. With --base, both
   // the --base side and the trust base, so a run cannot choose the weaker
   // one. With --trust-base alone, the trust base, while the run stays an
@@ -1199,7 +1210,7 @@ export async function scan(opts: {
       ctx.diagnostics.push(notChecked);
     }
   }
-  const ecosystems = summarizeEcosystems(ctx, statePair.after.manifests, pypiStats);
+  const ecosystems = summarizeEcosystems(ctx, statePair.after.manifests, pypiStats, statePair.after.notParsed ?? []);
 
   const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
   const filtered = applyPathFilters(rawFindings, config, baseline, diagnostics, lockfileIgnoreMatches);

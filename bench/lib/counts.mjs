@@ -46,6 +46,7 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   'audit-limits',
   'audit-no-tamper-comparison',
   'check-single-name-only',
+  'classification-input-unread',
   'delta-ambiguous-lock-entry',
   'delta-new-lock-entries',
   'ignore-path-dropped',

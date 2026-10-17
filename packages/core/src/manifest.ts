@@ -63,6 +63,55 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+// npm's own limit on a package name's length.
+const MAX_NPM_NAME_LENGTH = 214;
+
+function isNpmNameChar(code: number): boolean {
+  return (
+    (code >= 0x30 && code <= 0x39) || // 0-9
+    (code >= 0x41 && code <= 0x5a) || // A-Z
+    (code >= 0x61 && code <= 0x7a) || // a-z
+    code === 0x2e || // .
+    code === 0x5f || // _
+    code === 0x7e || // ~
+    code === 0x2d || // -
+    code === 0x40 || // @
+    code === 0x2f // /
+  );
+}
+
+/**
+ * What may be printed of a dependency key from a package.json: its leading
+ * run of npm name characters (ASCII letters, digits, ".", "_", "~", "-",
+ * "@", "/"), at most 214 of them, with "..." when anything was cut. The
+ * rule invalidNameFragment applies to Python names, widened to the npm
+ * character set.
+ */
+export function npmNameFragment(text: string): string {
+  let end = 0;
+  while (end < text.length && end < MAX_NPM_NAME_LENGTH && isNpmNameChar(text.charCodeAt(end))) {
+    end += 1;
+  }
+  if (end === 0) {
+    return '(no name characters)';
+  }
+  return end === text.length ? text : `${text.slice(0, end)}...`;
+}
+
+/**
+ * True when the text is JSON once a byte order mark is stripped, the same
+ * reading parseManifest gives it. Decides whether a manifest that failed
+ * parseManifest failed on syntax or on shape, for the exit 2 message.
+ */
+export function isReadableJson(content: string): boolean {
+  try {
+    JSON.parse(withoutByteOrderMark(content));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
 }
@@ -205,8 +254,11 @@ function extractDeps(path: string, manifestObj: Record<string, unknown>): Manife
     // resolving to inherited Object.prototype members.
     for (const [name, value] of Object.entries(section)) {
       if (typeof value !== 'string') {
+        // The key is file content, and a fixture or a hostile manifest can
+        // make it anything, a token included. Only its leading run of npm
+        // name characters is printed (npmNameFragment).
         throw new DepGuardError(
-          `${path}: dependency "${name}" in "${depType}" has a non-string specifier`,
+          `${path}: dependency "${npmNameFragment(name)}" in "${depType}" has a non-string specifier`,
           'manifest-parse'
         );
       }

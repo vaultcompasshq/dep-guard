@@ -7,8 +7,8 @@
       "url": "https://github.com/npm/cli.git",
       "sha": "4cdcceac047f82571d0ec734e18b87d1d130e042",
       "expectLockfile": "npm",
-      "expectSkip": "manifest-parse",
-      "skipNote": "workspaces/arborist/test/fixtures/bad/package.json is deliberately not JSON. Since 0.11.0 it stops the scan unless ignorePaths covers it, the bench passes no per-repository config, and the repository has no .dep-guard.json of its own.",
+      "expectSkip": "lockfile-parse",
+      "skipNote": "workspaces/arborist/test/fixtures/conflict-package-lock/package-lock.json is a deliberately broken npm lockfile (not valid JSON). Every npm lockfile is read at any depth since 0.11.0 and one that does not parse stops the scan whatever ignorePaths says, so no bench config can clear it. Until 0.15.0 the first broken manifest (workspaces/arborist/test/fixtures/bad/package.json) stopped the scan before lockfiles were read and hid this one; 0.15.0 collects every manifest parse failure and lets a lockfile parse error keep its own code.",
       "shape": "npm workspaces monorepo with a v3 package-lock; the format with full coverage, at the size where transitive entries dominate"
     },
     {
@@ -58,8 +58,13 @@
       "url": "https://github.com/eslint/eslint.git",
       "sha": "f3993b0547bace7370e9728ee7408af49d367d76",
       "expectLockfile": "none",
-      "expectSkip": "manifest-parse",
-      "skipNote": "tests/fixtures/config-file/broken-package-json/package.json is deliberately missing its closing brace. Since 0.11.0 it stops the scan unless ignorePaths covers it, the bench passes no per-repository config, and the repository has no .dep-guard.json of its own.",
+      "config": {
+        "ignorePaths": [
+          "tests/fixtures/config-file/broken-package-json",
+          "tests/fixtures/ignored-paths/broken-package-json"
+        ]
+      },
+      "configNote": "eslint does not carry these ignorePaths entries upstream and has no .dep-guard.json of its own. The bench applies them so the repository can be measured: the two fixtures are deliberately broken package.json files (not valid JSON), neither is a project (no lockfile, workspace pattern or reference names it), and dep-guard stops on an unparseable stray manifest unless ignorePaths covers it. Findings under these two directories are filtered as a result. The paths are the whole manifest-parse listing of a 0.15.0 scan at the pinned commit.",
       "shape": "no committed lockfile at a size where the manifest alone carries a long dependency list"
     },
     {
