@@ -112,7 +112,7 @@ jobs:
       id: conductor
       uses: vaultcompasshq/conductor@afd0ea85447b863028eb18736b44ef266abd9500 # v0.10.0
       with:
-        dep-guard-version: 0.13.0
+        dep-guard-version: 0.14.0
         output: conductor.sarif
 
     - name: Upload the SARIF log
