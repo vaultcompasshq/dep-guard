@@ -39,7 +39,7 @@ inputs:
       request is not the place to widen a pattern for the convenience of
       testing one.
     required: false
-    default: 0.13.0
+    default: 0.14.0
   path:
     description: |
       Path to scan, relative to the workspace root. Must be 1..256 characters
@@ -297,7 +297,7 @@ runs:
         # those in this file to end in a 40-character sha, and it cannot tell
         # prose from a step.)
         DG_TAG_SCANNER_MAJOR=0
-        DG_TAG_SCANNER_MINOR=13
+        DG_TAG_SCANNER_MINOR=14
         DG_TAG_SCANNER_PATCH=0
         DG_TAG_SCANNER="${DG_TAG_SCANNER_MAJOR}.${DG_TAG_SCANNER_MINOR}.${DG_TAG_SCANNER_PATCH}"
 

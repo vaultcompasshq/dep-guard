@@ -10,6 +10,8 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-17
+
 Reporting and wording. Nothing here changes an exit code or a severity, with
 named exceptions. The install-script collapse under Changed keeps the
 severity and the exit and changes only the finding count. The typosquat
