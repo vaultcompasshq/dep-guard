@@ -37,6 +37,10 @@ import type { Diagnostic, Finding } from '../types.js';
 
 export const ASYMMETRY_DOWNLOAD_FLOOR = 2_000;
 
+export function isPythonFinding(finding: Omit<Finding, 'fingerprint'>): boolean {
+  return finding.details?.ecosystem === 'pypi';
+}
+
 export interface AsymmetryDeps {
   fetchWeeklyDownloads(names: string[]): Promise<DownloadCountsResult>;
 }
@@ -50,6 +54,13 @@ export async function applyTyposquatAsymmetry(
   const candidates: Omit<Finding, 'fingerprint'>[] = [];
   for (const finding of findings) {
     if (finding.ruleId !== 'typosquat' || finding.severity !== 'low') {
+      continue;
+    }
+    // A Python resemblance has no npm download count to read: sending its
+    // name to the npm downloads API would put a Python name on the wire to
+    // npm, which nothing may do (checks/candidates.ts), and the count would
+    // be about an unrelated npm package anyway.
+    if (isPythonFinding(finding)) {
       continue;
     }
     if (isInternalName(finding.packageName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {

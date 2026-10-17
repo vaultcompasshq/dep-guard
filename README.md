@@ -54,15 +54,22 @@ core library's `checkSingle`.
 
 ## What it checks
 
-Six rules, all offline and deterministic (plus four optional online checks
+Six rules, all offline and deterministic (plus five optional online checks
 -- see below):
 
-- **Unknown package** -- a new name absent from a corpus of real npm package
-  names. The hallucination signal.
-- **Typosquat** -- edit distance against a popularity list, plus transform
-  rules that catch what distance misses: separator swaps, scope flattening
-  (`babel-core` against `@babel/core`), repeated and omitted characters,
-  keyboard adjacency, and a curated list of known confusion pairs.
+- **Unknown package** -- for npm, a new name absent from a corpus of real
+  npm package names. The hallucination signal. For Python, no PyPI corpus
+  ships, so a Python name is checked for existence only with `--online`,
+  against PyPI itself (see "Online checks").
+- **Typosquat** -- for npm, edit distance against a popularity list, plus
+  transform rules that catch what distance misses: separator swaps, scope
+  flattening (`babel-core` against `@babel/core`), repeated and omitted
+  characters, keyboard adjacency, and a curated list of known confusion
+  pairs. For Python, typosquat compares a new name with the other Python
+  names the same repository declares (and, on a comparison run, the names
+  the base declared). No list of popular PyPI projects ships, so a typo of a
+  project the repository does not already use is caught only by the online
+  existence check, and only when the typo is not a registered project.
 - **Install script** -- a dependency that gains the ability to run install
   scripts. Acquisition only: a version bump of a package that already ran
   them is not a finding, or every `npm update` would be noise.
@@ -126,9 +133,11 @@ every invocation, pre-commit hooks included, which is why a
 latency-sensitive setup is usually better off passing `--online` in CI
 alone.
 
-Four checks, all backed by npm's public downloads and registry metadata
-APIs, all degrading to the offline result with a diagnostic on any network
-failure rather than blocking. All four share one rule for which names may
+Five checks: four backed by npm's public downloads and registry metadata
+APIs, and one PyPI existence check against the PyPI JSON API. All of them
+degrade to the offline result with a diagnostic on any network failure
+rather than blocking, and all five share one per-run time budget. The four
+npm checks share one rule for which names may
 be put on the wire to the public registry at all: a name in your configured
 `internalScopes` or `internalPrefixes` is never sent, and neither is a name
 declared private by your own project `.npmrc` -- a scope pin, or the
@@ -165,6 +174,40 @@ needs no reminder that it was excluded.
   budget -- leaves the finding exactly as the offline scan made it, still
   blocking, with the reason recorded in its `details`. A network failure
   never means fewer or quieter findings.
+- **PyPI existence.** Every new Python name, from requirements files,
+  `pyproject.toml`, `Pipfile` and the poetry, uv, pdm and pipenv lockfiles,
+  is looked up once per run in its PEP 503 normalised form
+  (`Python_Dateutil` is the PyPI project `python-dateutil`). A 404 is a
+  `critical` unknown-package finding, the same severity an npm 404 earns:
+  the name is on no index the repository declares, so it is a hallucinated
+  or mistyped dependency, or a project PyPI has removed. A 2xx whose
+  project name matches is the only answer read as "exists", and it vouches
+  for nothing more than that a project of that name exists. Every other
+  answer -- a 3xx (never followed), a 5xx after one retry, a timeout, a
+  2xx describing another project or none, any other 4xx -- and a spent
+  budget leave the name unchecked, with a diagnostic and a count, and never
+  a finding. The lookup runs second, after npm unknown-package resolution
+  and before the three npm steps that add or escalate; on a tight budget an
+  npm registered-squat or publish-age signal can be lost to PyPI lookups,
+  and that step's `online-deadline-exceeded` diagnostic says so. PyPI
+  existence is asked live and never cached. Which Python names are never
+  sent: a name a `pypi:` entry in `internalPrefixes` covers
+  (`"pypi:acme-"`); and every name in a manifest that declares a package
+  index other than PyPI (`--index-url`, `--extra-index-url`,
+  `--find-links`, `--no-index` in any spelling pip accepts, a non-explicit
+  poetry, uv or pdm source, a `Pipfile` source, a repository `uv.toml`),
+  or, for an explicit index, the names pinned to it. Those index
+  declarations are control inputs: on a `--trust-base` run they are read
+  from the trust base, and a head-side change is reported as a proposal
+  and does not take effect. A lockfile's own recorded source never skips an
+  entry by itself; it skips only when it equals an origin a manifest in the
+  same directory declares. The skip is a coverage gap, not a safety
+  property: `pypi-private-index-skipped` names each one, and for an index
+  pip or uv consults beside PyPI it says that a name not on PyPI is exposed
+  to dependency confusion and was not checked. A user-level `pip.conf`,
+  `PIP_INDEX_URL`, `UV_INDEX_URL` or a CI-level index setting is invisible
+  to this check; list such private names under `internalPrefixes` with the
+  `pypi:` prefix.
 - **Typosquat popularity asymmetry.** Escalates a non-alias-list typosquat
   match from `low` to `high` when the candidate's own weekly downloads sit
   below a measured floor of two thousand downloads in the last week --
@@ -226,7 +269,7 @@ needs no reminder that it was excluded.
   `internalPrefixes`. The same gap applies to an npm lockfile written with
   its own registry-resolved URLs omitted.
 
-A registry error in any of the four checks degrades to a diagnostic
+A registry error in any of the five checks degrades to a diagnostic
 rather than a block, the design every check above already follows for its
 own network failure: it never turns an otherwise-clean scan's exit 0 into
 an exit 1 by itself, so a registry outage does not turn a required CI
@@ -302,6 +345,30 @@ on its `online:` line.
   "deadlineExceeded": false
 }
 ```
+
+PyPI lookups count in the same totals. Beside `online`, `run.ecosystems`
+is always present and says, per ecosystem, how many new names were checked
+and how many were read but not checked and why (see "Ecosystem coverage"):
+
+```json
+"ecosystems": {
+  "npm":  { "manifests": 2, "candidates": 3, "checked": 3,
+            "notChecked": { "privateScope": 0 } },
+  "pypi": { "manifests": 2, "lockfiles": 1, "candidates": 7,
+            "existenceChecked": 5, "resemblanceChecked": 7,
+            "notChecked": { "offline": 0, "budget": 1, "unreachable": 1,
+                            "privateIndex": 0, "internal": 0,
+                            "lockfileUnreadable": 0 },
+            "excluded": { "url": 0, "vcs": 1, "path": 0, "editable": 0,
+                          "constraint": 0, "self": 0, "invalidName": 0,
+                          "unrecognised": 0 } }
+}
+```
+
+`excluded` counts every Python requirement on the judged side that is not a
+name candidate, by why; `candidates` and the not-checked counts are new
+names after dedupe, one per normalised project name. `lockfileUnreadable`
+counts Python lockfiles that could not be read for names.
 
 `--no-online` forces the online checks off for one run, overriding
 `"online": true` in `.dep-guard.json`. That is the flag to reach for in a
@@ -594,6 +661,18 @@ is: it is the one other line online checks read (see "Online checks"
 above), and a pull request editing only that line is reported as `npmrc
 changed in this pull request (proposed: default registry changed)`.
 
+Python package-index declarations (every index option in a requirements
+file, the poetry, uv and pdm sources, `Pipfile` sources, a repository
+`uv.toml`, and per-name mappings onto a named index) and a uv workspace
+root's `members` and `exclude` are control inputs too: each is read from the
+trust base copy of the same path, a head-side change is reported as `python
+index changed in this pull request (requirements.txt)`, and a base copy that
+is a gitlink or does not parse stops the run (exit 2,
+`python-index-invalid`). A base copy that is a symlink does not stop a pull
+request that replaces the link with a regular file: the base then
+contributes no declarations for that file, so every name in it is looked up,
+and `python-index-unread-comparison-side` says so.
+
 A control input the head carries and the base does not reads `config added
 in this pull request`, and the run uses the defaults rather than the head's
 proposal. The allow counter keeps reporting what the *base* allow list
@@ -659,7 +738,7 @@ flag at all, with or without `--base`, so its coverage is limited to
 [Lockfile support](#lockfile-support)). That limitation stays as
 documented; this table is about the comparison-based signals only.
 
-\*\* Publish age is one of the four `--online` checks (see "Online checks"
+\*\* Publish age is one of the five `--online` checks (see "Online checks"
 above) and does not run at all without `--online` or `"online": true`,
 regardless of `--base`. When it does run, it reads `delta.lockEntryChanges`
 directly rather than `delta.changes`: with no earlier revision every
@@ -835,9 +914,9 @@ Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
 {
   "failOn": "medium",
   "online": false,
-  "allow": ["some-package", "@acme/*"],
+  "allow": ["some-package", "@acme/*", "pypi:some-python-project"],
   "internalScopes": ["@acme"],
-  "internalPrefixes": ["acme-"],
+  "internalPrefixes": ["acme-", "pypi:acme-"],
   "extraAliases": { "unused-imports": ["eslint-plugin-unused-imports"] },
   "ignorePaths": ["fixtures"],
   "minAgeDays": 7,
@@ -853,6 +932,14 @@ which is a fact about where bytes come from rather than about the package.
 And `ignorePaths` drops findings before the gate sees them, so a pattern
 broad enough to match everything would switch the tool off; patterns made
 only of wildcards are rejected for that reason.
+
+Python names take a `pypi:` prefix in `allow` and in `internalPrefixes`:
+`"pypi:reqeusts"` clears a Python finding for that project and
+`"pypi:acme-"` keeps every Python name starting `acme-` off the wire, both
+compared in PEP 503 normalised form (`pypi:Acme_` and `pypi:acme-` are the
+same prefix). A bare entry stays npm-only: existing lists were written and
+reviewed about npm names, and extending what a reviewed entry means to a
+second ecosystem would be a change nobody reviewed.
 
 `minAgeDays` and `minAgeAllow` configure the minimum-publish-age online
 check (see "Online checks" above); they have no
@@ -939,6 +1026,64 @@ them well:
 | Local only, no account | yes | no | no | yes | yes |
 
 Run it alongside them, not instead of them.
+
+dep-guard checks that a Python name exists on PyPI and does not resemble
+another name your repository uses; it does not look up advisories, which is
+what osv-scanner (the umbrella's vulnerabilities gate) does, and neither
+result stands in for the other.
+
+## Ecosystem coverage
+
+| Ecosystem | Files read | Name checks | Lockfile checks |
+|---|---|---|---|
+| npm | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` (`yarn.lock`, `bun.lock` noted, not parsed) | unknown-package against the shipped corpus, and the registry with `--online`; typosquat against the shipped popularity list; registered-squat and asymmetry with `--online` | tamper, install-script, publish-age (`--online`) |
+| Python (PyPI) | requirements files, `pyproject.toml`, `Pipfile`, `poetry.lock`, `uv.lock`, `pdm.lock`, `Pipfile.lock` | unknown-package with `--online` only (PyPI existence; no corpus ships); typosquat against the repository's own Python names only | none: Python lockfiles are read for names; their hashes and sources are not judged. A git or url requirement is a tamper git-source or url-source finding, as for npm |
+
+Every run that read a Python file prints a `names:` line under its summary,
+and the JSON result carries the same counts under `run.ecosystems`:
+
+    names: npm 3 checked (corpus, registry); pypi 5 of 7 checked for existence (PyPI); 2 not checked: 1 online budget spent, 1 PyPI unreachable; resemblance checked against this repository's own Python names; 1 url, path or vcs requirement excluded
+
+An offline run with Python names also raises `pypi-names-not-checked`.
+
+Which Python files are read: `requirements.txt` and any `.txt` whose name
+starts with `requirements` or ends in `requirements.txt`
+(`requirements-dev.txt`, `dev-requirements.txt`), any `.txt` directly in a
+directory named `requirements`, `requirements.in`, every file a `-r` or
+`--requirement` line names (relative to the including file, inside the
+repository, never through a symlink, at most eight includes deep, each file
+once), `pyproject.toml` (`project.dependencies` and optional dependencies,
+`build-system.requires`, `[dependency-groups]`, the poetry tables, the uv
+and pdm dev tables, `[tool.uv.sources]`), `Pipfile`, a repository `uv.toml`
+(index settings only), and the four Python lockfiles, read for names only.
+A file named by `-c` is read, and its names are counted as constraints,
+never checked: a constraint never installs a name by itself.
+
+How a requirements line is read follows pip: a `name @ url` reference or a
+line starting with a URL scheme pip accepts (`https:`, `http:`, `ftp:`,
+`file:`, `git+`, `svn`, `hg+`, `bzr+`, `ssh:`) is a url or git dependency,
+which the tamper check judges and the name checks exclude; then an archive
+(`.whl`, `.zip`, `.tar.gz` and the rest of pip's list, case-insensitively)
+or a path is excluded as `file`; `reqeusts.zip==1.0` is the PyPI project
+`reqeusts-zip`, because a version specifier makes it a name. Every option
+spelling pip accepts is read (`-r x`, `-rx`, `--requirement=x`, any unique
+abbreviation of a long option), and a line that is neither a dependency nor
+a recognised option, including one with an unexpanded `${VAR}`, is counted
+and named in `requirements-line-unread` rather than dropped. A requirements
+file that no pattern matches and no `-r` line reaches (one a workflow runs
+as `pip install -r deps.txt`) is not read.
+
+A `[tool.uv.sources]` entry applies only to the project that declares it
+and, from a uv workspace root, to that root's `members`, read from the
+trust base on a `--trust-base` run. As in uv, a project's own entry for a
+name takes precedence over its workspace root's. A `path` or `editable`
+source exempts a name only when its target is a project of that name this
+run parsed, or an archive that exists in the tree and whose file name
+carries that distribution name; a `workspace` source only when a member of
+that name exists. A `git` or `url` source
+makes the dependency a tamper subject. Even a confirmed exemption covers uv
+only: `pip install .`, `uv build --no-sources` and every consumer of a
+published package resolve the name from PyPI.
 
 ## Lockfile support
 
@@ -1061,11 +1206,9 @@ quiet:
   lockfile, which in a repository with lockfiles in several directories can
   be a different file. A finding for a declared dependency names a
   manifest that declares it, which can be a manifest in another directory
-  that has no lockfile of its own. `package.json`,
-  `pyproject.toml` and `requirements.txt` are read at any depth too. Python
-  package names are read but not yet checked against any registry or
-  corpus: unknown-package and typosquat judge npm names only, so a Python
-  dependency produces no name finding. A
+  that has no lockfile of its own. `package.json` and the Python files
+  listed under "Ecosystem coverage" below are read at any depth too; what
+  is checked for a Python name is in that table. A
   `pyproject.toml` that only holds `[tool.*]` config has no dependencies;
   that file alone does not make the scan a could-not-run when another
   manifest or lockfile resolved. `pyproject.toml` is parsed as TOML, and
@@ -1099,10 +1242,10 @@ quiet:
   A path covered by `ignorePaths` (read from the base on a pull-request
   run) drops findings under that path, and an unread lockfile there is
   noted as `lockfile-nested-ignored` instead. `lockfile-not-read` names
-  every lockfile this tool does not read. `-r` lines in a requirements
-  file are not followed; a file named `requirements.txt` is read on its
-  own. `--staged`, `--base` and `--trust-base` compare each manifest with
-  the same path on the other side.
+  every lockfile this tool does not read. Requirements files and the
+  `-r` and `-c` lines in them are read as "Ecosystem coverage" below
+  describes. `--staged`, `--base` and `--trust-base` compare each manifest
+  with the same path on the other side.
 - Workspace patterns -- a `workspaces` list in `package.json` is resolved
   the way npm's own workspace mapper resolves it, checked against npm
   10.9.8: patterns in order, a run of leading `!` negating when odd, one

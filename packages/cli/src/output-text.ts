@@ -48,6 +48,61 @@ export function renderDiagnosticLine(diagnostic: Diagnostic): string {
   return `note (${diagnostic.code}): ${sanitizeText(diagnostic.message)}`;
 }
 
+// The not-checked reasons, in the order the line prints them. A reason
+// prints only when its count is above zero. Each counts names, so they add
+// up to the not-checked total; an unreadable lockfile is counted in files
+// (its names are unknown by definition) and printed as a clause of its own
+// rather than added to that total.
+const NOT_CHECKED_REASONS: Array<[keyof ScanResult['run']['ecosystems']['pypi']['notChecked'], string]> = [
+  ['budget', 'online budget spent'],
+  ['unreachable', 'PyPI unreachable'],
+  ['privateIndex', 'private index'],
+  ['internal', 'internal name'],
+];
+
+/**
+ * The "names:" line: per ecosystem, how many new names were checked and
+ * how, and how many were read but not checked and why. Printed whenever at
+ * least one Python manifest or lockfile was read, so an npm-only report is
+ * unchanged; null otherwise. Every value is a count, none of it
+ * repository content.
+ */
+export function renderNamesLine(result: ScanResult): string | null {
+  const { npm, pypi } = result.run.ecosystems;
+  if (pypi.manifests + pypi.lockfiles === 0) {
+    return null;
+  }
+  const online = result.run.online.enabled;
+  const parts: string[] = [];
+  if (npm.manifests > 0) {
+    const privateNote = npm.notChecked.privateScope > 0 ? `, ${npm.notChecked.privateScope} private scope not checked` : '';
+    parts.push(`npm ${npm.checked} checked (${online ? 'corpus, registry' : 'corpus'})${privateNote}`);
+  }
+  const resemblance = "resemblance checked against this repository's own Python names";
+  let python: string;
+  if (!online) {
+    python = `pypi ${pypi.candidates} not checked for existence (no PyPI corpus ships; pass --online), ${resemblance}`;
+  } else {
+    const reasons = NOT_CHECKED_REASONS.filter(([key]) => pypi.notChecked[key] > 0).map(
+      ([key, label]) => `${pypi.notChecked[key]} ${label}`
+    );
+    const notChecked = NOT_CHECKED_REASONS.reduce((sum, [key]) => sum + pypi.notChecked[key], 0);
+    python =
+      `pypi ${pypi.existenceChecked} of ${pypi.candidates} checked for existence (PyPI)` +
+      (notChecked > 0 ? `; ${notChecked} not checked: ${reasons.join(', ')}; ${resemblance}` : `, ${resemblance}`);
+  }
+  const unreadable = pypi.notChecked.lockfileUnreadable;
+  if (unreadable > 0) {
+    python += `; ${unreadable} lockfile${unreadable === 1 ? '' : 's'} unreadable, ${unreadable === 1 ? 'its' : 'their'} names not checked`;
+  }
+  const excluded = pypi.excluded.url + pypi.excluded.vcs + pypi.excluded.path + pypi.excluded.editable;
+  if (excluded > 0) {
+    python += `; ${excluded} url, path or vcs requirement${excluded === 1 ? '' : 's'} excluded`;
+  }
+  parts.push(python);
+  return `names: ${parts.join('; ')}`;
+}
+
 export function renderText(result: ScanResult): string {
   const lines: string[] = [];
 
@@ -144,6 +199,10 @@ export function renderText(result: ScanResult): string {
       `fail-on=${result.run.failOn}, blocking=${result.run.blockingMatches}, ` +
       `exit=${result.exitCode}`
   );
+  const names = renderNamesLine(result);
+  if (names !== null) {
+    lines.push(names);
+  }
 
   // One line under the summary, only when online checks actually ran
   // (issue #75): a disabled run has nothing to add here that the summary

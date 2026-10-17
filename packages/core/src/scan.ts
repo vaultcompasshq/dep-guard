@@ -47,6 +47,13 @@ import {
 import { defaultCachePath, loadCache } from './online/cache.js';
 import { fetchPackument, fetchWeeklyDownloads } from './online/registry-client.js';
 import type { DownloadCountsResult } from './online/registry-client.js';
+import { newNames } from './checks/candidates.js';
+import { pythonTyposquatCheck } from './checks/python-typosquat.js';
+import { pypiNamesNotChecked, summarizeEcosystems, type EcosystemsSummary } from './ecosystems.js';
+import { fetchPypiProject } from './online/pypi-client.js';
+import { checkPypiExistence, type PypiExistenceStats } from './online/pypi-existence.js';
+import { applyUvSources, judgedPythonControls, PythonIndexRule } from './python-sources.js';
+import { loadPythonControls } from './python-trust.js';
 
 // Every check runs against one shared corpus + config + delta, in a fixed
 // order (RuleId's own declaration order in types.ts) so a scan's finding
@@ -55,6 +62,7 @@ import type { DownloadCountsResult } from './online/registry-client.js';
 const CHECKS: Check[] = [
   existenceCheck,
   typosquatCheck,
+  pythonTyposquatCheck,
   installScriptCheck,
   tamperCheck,
   hygieneCheck,
@@ -134,6 +142,10 @@ export interface ScanResult {
     // docs/INVARIANTS.md's "one wall clock" section for the online
     // subsystem this reports on.
     online: OnlineRunSummary;
+    // Per ecosystem: how many new names were checked and how, and how many
+    // were read but not checked and why (ecosystems.ts). Always present;
+    // additive under the stability policy.
+    ecosystems: EcosystemsSummary;
   };
   exitCode: 0 | 1;
 }
@@ -234,7 +246,8 @@ function runChecks(
   delta: DependencyDelta,
   npmrcRegistryPins: Map<string, string>,
   npmrcDefaultRegistry: string | null,
-  npmrcChanged: boolean
+  npmrcChanged: boolean,
+  pythonIndex: PythonIndexRule | null = null
 ): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
   const ctx: CheckContext = {
     corpus,
@@ -243,6 +256,7 @@ function runChecks(
     npmrcRegistryPins,
     npmrcDefaultRegistry,
     npmrcChanged,
+    ...(pythonIndex === null ? {} : { pythonIndex }),
     diagnostics: [],
     allowed: [],
   };
@@ -511,22 +525,30 @@ async function cachedFetchPackumentVersionTimes(
   return { versionTimes: packument.versionTimes };
 }
 
-// The four online steps, in the order the run's one wall-clock budget is
+// The five online steps, in the order the run's one wall-clock budget is
 // spent on them. The order is a priority decision, not an accident:
 //
-//  1. unknown-package resolution, because it is the only step that can
-//     REMOVE a false positive from the flagship blocking check, and the
-//     only one whose absence gets steadily worse as a release ages away
-//     from its corpus walk. If the budget only stretches to one step, this
-//     is the one worth having.
-//  2. typosquat popularity asymmetry, which escalates an existing low.
-//  3. registered-squat, which adds a new medium.
-//  4. publish-age, which adds a new high.
+//  1. npm unknown-package resolution, because it is the only step that can
+//     stand a blocking false positive down (to low), and the only one
+//     whose absence gets steadily worse as a release ages away from its
+//     corpus walk. It looks up only corpus misses, usually a handful.
+//  2. PyPI existence, which adds a critical for a Python name PyPI answers
+//     404 for. It is the only existence check Python names have at all,
+//     offline or online, while an npm name has already been judged offline
+//     by the corpus and the popularity list before step 3 runs.
+//  3. typosquat popularity asymmetry, which escalates an existing low.
+//  4. registered-squat, which adds a new medium.
+//  5. publish-age, which adds a new high.
 //
-// Steps 2 through 4 all only ever add or escalate, so a budget spent
-// before them costs a signal that would not have existed offline either.
-// Step 1 is the one whose omission leaves a user with a blocking finding
-// they have no way to clear, which is why it goes first.
+// Steps 3 to 5 are not mere refinements: each adds or escalates a signal
+// that does not exist offline. So putting PyPI second is a trade between
+// two online-only signals, and the cost is stated: on a tight budget an
+// npm registered-squat or publish-age finding can be lost to PyPI lookups,
+// and those steps' online-deadline-exceeded diagnostics say so. A budget
+// spent before step 2 would leave every Python name with no existence
+// answer at all, whereas one spent before step 3 leaves npm names with
+// their offline verdict. Step 1 stays first because its absence leaves a
+// user holding a blocking finding they cannot clear.
 //
 // Never throws, per docs/INVARIANTS.md: each step owns its own error
 // handling and turns a failure into a diagnostic, because --online
@@ -557,6 +579,16 @@ async function cachedFetchPackumentVersionTimes(
 async function liveFetchPackument(name: string, lookups: LookupCounter) {
   lookups.attempted += 1;
   return fetchPackument(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
+}
+
+// PyPI existence, asked live for the same reasons as liveFetchPackument
+// above, and never cached at all: there is no PyPI cache entry in 0.13.0,
+// read or written (docs/INVARIANTS.md). Any later one uses a
+// "pypi:<kind>:<normalised>" key, so it cannot collide with the unprefixed
+// npm keys (downloads:, created:, version-times:), which are npm keys.
+async function liveFetchPypiProject(name: string, lookups: LookupCounter) {
+  lookups.attempted += 1;
+  return fetchPypiProject(name, { backoffCapMs: SCAN_BACKOFF_CAP_MS });
 }
 
 // The run-level facts scan.ts's JSON `online` field reports (issue #75).
@@ -607,20 +639,35 @@ async function enrichOnline(
   rawFindings: Omit<Finding, 'fingerprint'>[],
   ctx: CheckContext,
   budgetMs: number
-): Promise<{ findings: Omit<Finding, 'fingerprint'>[]; summary: OnlineRunSummary }> {
+): Promise<{
+  findings: Omit<Finding, 'fingerprint'>[];
+  summary: OnlineRunSummary;
+  pypiStats: PypiExistenceStats;
+}> {
   const deadline = createOnlineDeadline(budgetMs);
   // Threaded through every real fetch below rather than kept at module
   // scope: see LookupCounter's own comment for why a fresh one per call is
   // what keeps two scans in one process from mixing counts.
   const lookups: LookupCounter = { attempted: 0, cacheHits: 0 };
 
-  const resolved = await resolveUnknownPackages(
+  const resolvedNpm = await resolveUnknownPackages(
     rawFindings,
     ctx,
     { fetchPackument: (name) => liveFetchPackument(name, lookups) },
     ctx.diagnostics,
     deadline
   );
+
+  // 2. PyPI existence. Appends findings only; never removes or lowers one.
+  const pypi = await checkPypiExistence(
+    newNames(ctx).pypi,
+    ctx,
+    ctx.pythonIndex ?? null,
+    { fetchPypiProject: (name) => liveFetchPypiProject(name, lookups) },
+    ctx.diagnostics,
+    deadline
+  );
+  const resolved = [...resolvedNpm, ...pypi.findings];
 
   // applyTyposquatAsymmetry issues one bulk request and has no per-name
   // loop, so it is gated here rather than internally: there is exactly one
@@ -630,7 +677,7 @@ async function enrichOnline(
   // it can overstate how many lookups were skipped, never understate; no
   // name is emitted with it.
   const asymmetryCandidates = resolved.filter(
-    (f) => f.ruleId === 'typosquat' && f.severity === 'low'
+    (f) => f.ruleId === 'typosquat' && f.severity === 'low' && f.details?.ecosystem !== 'pypi'
   ).length;
   if (deadline.expired()) {
     if (asymmetryCandidates > 0) {
@@ -662,10 +709,8 @@ async function enrichOnline(
     deadline
   );
 
-  // 4. publish-age, added last for the same reason registered-squat is
-  // third: it only ever ADDS a new finding, so a budget spent before it
-  // costs a signal that would not have existed offline either, unlike
-  // step 1's removals.
+  // 5. publish-age, added last among the npm steps: it only ever ADDS a new
+  // finding, and nothing orders it against registered-squat (step 4).
   const publishAgeFindings = await findPublishAgeFindings(
     ctx,
     { fetchPackument: (name, versions) => cachedFetchPackumentVersionTimes(name, versions, lookups) },
@@ -686,6 +731,7 @@ async function enrichOnline(
       lookupsSkippedByDeadline: sumDeadlineSkipped(ctx.diagnostics),
       deadlineExceeded: deadline.expired(),
     },
+    pypiStats: pypi.stats,
   };
 }
 
@@ -696,6 +742,7 @@ interface RunInfo {
   diagnostics: Diagnostic[];
   startedAt: number;
   online: OnlineRunSummary;
+  ecosystems: EcosystemsSummary;
 }
 
 // checkSingle's manifestPath is fabricated (SYNTHETIC_MANIFEST_PATH
@@ -837,6 +884,7 @@ function buildResult(
       lockfileFormat: info.lockfileFormat,
       diagnostics: dedupeDiagnostics(info.diagnostics),
       online: info.online,
+      ecosystems: info.ecosystems,
     },
     exitCode,
   };
@@ -1000,6 +1048,45 @@ export async function scan(opts: {
       statePair.diagnostics
     );
   }
+  // Python index declarations and uv workspace members are control inputs
+  // (python-trust.ts): on a pull-request run they come from the trust base
+  // copy of each judged Python file, and a head-side change to them is a
+  // proposal that does not take effect. [tool.uv.sources] entries are then
+  // applied within their scope, before the delta is computed, so a git or
+  // url rewrite reaches the tamper check and a confirmed path or workspace
+  // source leaves the name checks.
+  let pythonControls = judgedPythonControls(statePair.after.manifests);
+  if (controls !== null) {
+    const loaded = await loadPythonControls(
+      root,
+      controls.ref,
+      `the trust base "${controls.ref}"`,
+      statePair.after.manifests
+    );
+    pythonControls = loaded.controls;
+    statePair.diagnostics.push(...loaded.diagnostics);
+    if (loaded.proposal !== null) {
+      controls.proposals.push(loaded.proposal);
+    }
+  }
+  applyUvSources(
+    statePair.after.manifests,
+    pythonControls,
+    statePair.diagnostics,
+    new Set(statePair.after.pythonArchiveFiles ?? [])
+  );
+  // Every comparison side gets the same rewrite, by its own sources and
+  // members, so a dependency whose git or url source did not move is the
+  // same dependency on both sides. Applied to the judged side only, an
+  // untouched git-sourced name read as moved from pypi to git and raised a
+  // tamper critical on every pull request. Its notes are dropped: what a
+  // comparison side's own scope says is not news about this change.
+  for (const side of new Set([statePair.before, trustState])) {
+    if (side !== null && side !== statePair.after) {
+      applyUvSources(side.manifests, judgedPythonControls(side.manifests), [], new Set(side.pythonArchiveFiles ?? []));
+    }
+  }
+  const pythonIndex = new PythonIndexRule(statePair.after.manifests, pythonControls);
   const deltaWith = (acknowledgedLockfiles: readonly string[]): DependencyDelta =>
     computeDelta(statePair.before, statePair.after, {
       extraComparisonSides: trustState === null ? [] : [trustState],
@@ -1070,7 +1157,8 @@ export async function scan(opts: {
     // or HEAD side by bytes, and the trust base by its own comparison.
     [statePair.before, trustState].some(
       (side) => side !== null && (side.npmrcContent ?? null) !== (statePair.after.npmrcContent ?? null)
-    ) || (controls?.npmrcChanged ?? false)
+    ) || (controls?.npmrcChanged ?? false),
+    pythonIndex
   );
   // A --base or --trust-base run is the pull-request/CI shape (issue #75):
   // never a commit hook, so the online budget's default is minutes rather
@@ -1079,15 +1167,22 @@ export async function scan(opts: {
   const isPullRequestRun = controls !== null || opts.mode.kind === 'base';
   let rawFindings: Omit<Finding, 'fingerprint'>[];
   let online: OnlineRunSummary;
+  let pypiStats: PypiExistenceStats | null = null;
   if (resolveOnline(config, opts.online)) {
     const budgetMs = resolveOnlineBudgetMs(config, opts.onlineBudgetMs, isPullRequestRun);
     const enriched = await enrichOnline(checkedFindings, ctx, budgetMs);
     rawFindings = enriched.findings;
     online = enriched.summary;
+    pypiStats = enriched.pypiStats;
   } else {
     rawFindings = checkedFindings;
     online = ONLINE_DISABLED_SUMMARY;
+    const notChecked = pypiNamesNotChecked(ctx);
+    if (notChecked !== null) {
+      ctx.diagnostics.push(notChecked);
+    }
   }
+  const ecosystems = summarizeEcosystems(ctx, statePair.after.manifests, pypiStats);
 
   const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
   const { findings, suppressed, ignored } = applyPathFilters(
@@ -1111,6 +1206,7 @@ export async function scan(opts: {
       diagnostics,
       startedAt,
       online,
+      ecosystems,
     },
     controls
   );
@@ -1249,15 +1345,20 @@ export async function checkSingle(opts: {
   const isPullRequestRun = controls !== null;
   let rawFindings: Omit<Finding, 'fingerprint'>[];
   let online: OnlineRunSummary;
+  let pypiStats: PypiExistenceStats | null = null;
   if (resolveOnline(config, opts.online)) {
     const budgetMs = resolveOnlineBudgetMs(config, opts.onlineBudgetMs, isPullRequestRun);
     const enriched = await enrichOnline(checkedFindings, ctx, budgetMs);
     rawFindings = enriched.findings;
     online = enriched.summary;
+    pypiStats = enriched.pypiStats;
   } else {
     rawFindings = checkedFindings;
     online = ONLINE_DISABLED_SUMMARY;
   }
+  // checkSingle stays npm-only (design open point 9): its one synthetic
+  // name is an npm name, and no Python file is read.
+  const ecosystems = summarizeEcosystems(ctx, null, pypiStats);
 
   const findings = skipPathFilters(rawFindings);
 
@@ -1274,6 +1375,7 @@ export async function checkSingle(opts: {
       diagnostics: [...ctx.diagnostics, NAME_ONLY_DIAGNOSTIC],
       startedAt,
       online,
+      ecosystems,
     },
     controls
   );

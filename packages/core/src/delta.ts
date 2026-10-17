@@ -1,5 +1,6 @@
 import type { LockEntry, LockfileFormat, ParsedLockfile } from './lockfiles/types.js';
 import type { DepType, ManifestDep, Protocol } from './manifest.js';
+import { computePythonDelta, type PythonDeltaFacts } from './python-delta.js';
 import { originOf } from './resolution.js';
 import { isReadLockfile, type LockfileInventoryEntry, type RepoState } from './state.js';
 import { comparisonTamperSignalList } from './tamper-signals.js';
@@ -154,6 +155,11 @@ export interface DependencyDelta {
   // candidates.ts exempts a name only for a change whose own lockfile sits
   // in that directory.
   workspaceLocalNamesByDir?: ReadonlyMap<string, ReadonlySet<string>>;
+  // The Python facts the name checks read (python-delta.ts): new lockfile
+  // names, what the judged side excluded and why, and the names each side
+  // declares. Absent on a delta built by hand, which then has no Python
+  // lockfile names and no exclusions.
+  python?: PythonDeltaFacts;
 }
 
 const LOCKFILE_MISSING = 'lockfile-missing';
@@ -184,8 +190,12 @@ function compositeKey(parts: string[]): string {
   return JSON.stringify(parts);
 }
 
-function depKey(manifestPath: string, depType: DepType, name: string): string {
-  return compositeKey([manifestPath, depType, name]);
+// A pypi dependency is keyed by its PEP 503 normalised registryName, so
+// re-casing "Flask" to "flask", or "python_dateutil" to "python-dateutil",
+// is the same dependency and not an added one (docs/INVARIANTS.md). Every
+// other protocol keys on the name as written, as before.
+function depKey(manifestPath: string, dep: Pick<ManifestDep, 'depType' | 'name' | 'registryName' | 'protocol'>): string {
+  return compositeKey([manifestPath, dep.depType, dep.protocol === 'pypi' ? dep.registryName : dep.name]);
 }
 
 function indexDeps(stateSide: RepoState | null): Map<string, ManifestDep> {
@@ -195,7 +205,7 @@ function indexDeps(stateSide: RepoState | null): Map<string, ManifestDep> {
   }
   for (const manifest of stateSide.manifests) {
     for (const dep of manifest.deps) {
-      index.set(depKey(manifest.path, dep.depType, dep.name), dep);
+      index.set(depKey(manifest.path, dep), dep);
     }
   }
   return index;
@@ -1240,7 +1250,7 @@ export function computeDelta(
       // Keyed by manifest path, section, and name together: the same name
       // legitimately appears in several sections and several workspace
       // manifests, and each of those is its own dependency.
-      const previous = beforeDeps.get(depKey(manifest.path, dep.depType, dep.name));
+      const previous = beforeDeps.get(depKey(manifest.path, dep));
 
       // Selection diagnostics are held aside until this dependency's fate is
       // known: every dependency is looked up in both lockfiles, and an
@@ -1429,9 +1439,13 @@ export function computeDelta(
     });
   }
 
+  const python = computePythonDelta(before, after, comparisonSides);
+  deltaDiagnostics.push(...python.diagnostics);
+
   return {
     changes,
     lockEntryChanges: lockEntries.changes,
+    python: python.facts,
     onlyBuiltAdded: onlyBuiltDifference(before, after),
     lockfileFormat,
     hasComparisonBase: before !== null,

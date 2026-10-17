@@ -34,6 +34,8 @@
 // core this same relative-path way) after "exports" was added: unaffected.
 export { checkSingle, scan, CHECK_SINGLE_DIAGNOSTIC_CODE } from './scan.js';
 export type { ScanResult, TrustBaseReport } from './scan.js';
+// run.ecosystems' shape, for the CLI's names: line and any JSON consumer.
+export type { EcosystemsSummary, NpmEcosystemSummary, PypiEcosystemSummary, PypiNotChecked } from './ecosystems.js';
 export type { ScanMode } from './git-source.js';
 // Pull-request mode's public types. The CLI renders a proposal list and a
 // shape change, and a consumer reading trustBase out of the JSON should

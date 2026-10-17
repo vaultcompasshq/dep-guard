@@ -1,3 +1,4 @@
+import type { PythonManifestInfo } from './python-types.js';
 import { withoutByteOrderMark } from './text.js';
 import { DepGuardError } from './types.js';
 
@@ -13,8 +14,10 @@ export type Protocol =
   | 'git'
   | 'url'
   | 'alias'
-  // A Python package index dependency (requirements.txt or pyproject.toml).
-  // Not an npm registry name, so the npm corpus checks do not see it.
+  // A Python package index dependency (a requirements file, pyproject.toml
+  // or a Pipfile). Its registryName is the PEP 503 normalised project name.
+  // Never an npm name: checks/candidates.ts routes it to the PyPI check
+  // only, so it cannot reach the npm corpus, registry or downloads API.
   | 'pypi';
 
 export interface ManifestDep {
@@ -43,6 +46,10 @@ export interface ParsedManifest {
   workspaces?: string[];
   deps: ManifestDep[];
   pnpmOnlyBuilt: string[];
+  // Present on every Python manifest (python-manifest.ts): what it excluded
+  // from the name checks and why, the lines it could not read, the files
+  // it includes, and the package indexes it declares.
+  python?: PythonManifestInfo;
 }
 
 const DEP_TYPES: DepType[] = [

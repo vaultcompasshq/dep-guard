@@ -90,14 +90,20 @@ export function createOnlineDeadline(
 // docs/INVARIANTS.md's "derive, do not describe" applied to a string.
 export const ONLINE_DEADLINE_CODE = 'online-deadline-exceeded';
 
+// `tail` replaces the closing clause for a step whose skipped lookups have
+// no offline result to keep: the PyPI existence step ends "those names were
+// not checked for existence on PyPI", because saying they kept an offline
+// result would be false there. The "before N lookup(s)" phrase is the same
+// either way, so sumDeadlineSkipped below reads both.
 export function deadlineDiagnosticMessage(
   check: string,
   skipped: number,
-  deadline: OnlineDeadline
+  deadline: OnlineDeadline,
+  tail = 'those findings kept their offline result'
 ): string {
   return (
     `${check}: the per-run online budget (${deadline.budgetMs}ms) was spent before ` +
-    `${skipped} lookup(s) could run; those findings kept their offline result`
+    `${skipped} lookup(s) could run; ${tail}`
   );
 }
 

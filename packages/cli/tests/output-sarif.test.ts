@@ -43,6 +43,18 @@ function scanResult(findings: Finding[], overrides: Partial<ScanResult['run']> =
         lookupsSkippedByDeadline: 0,
         deadlineExceeded: false,
       },
+      ecosystems: {
+        npm: { manifests: 1, candidates: 0, checked: 0, notChecked: { privateScope: 0 } },
+        pypi: {
+          manifests: 0,
+          lockfiles: 0,
+          candidates: 0,
+          existenceChecked: 0,
+          resemblanceChecked: 0,
+          notChecked: { offline: 0, budget: 0, unreachable: 0, privateIndex: 0, internal: 0, lockfileUnreadable: 0 },
+          excluded: { url: 0, vcs: 0, path: 0, editable: 0, constraint: 0, self: 0, invalidName: 0, unrecognised: 0 },
+        },
+      },
       ...overrides,
     },
     exitCode: 0,
