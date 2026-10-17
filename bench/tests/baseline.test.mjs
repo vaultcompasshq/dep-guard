@@ -106,6 +106,105 @@ describe('compareToBaseline', () => {
     );
   });
 
+  describe('expectSkip', () => {
+    const skipped = (name, sha, reason) => ({ repo: name, sha, skipped: reason });
+    const targets = [
+      { repo: 'owner/one', sha: 'aaa' },
+      { repo: 'owner/two', sha: 'bbb', expectSkip: 'manifest-parse' },
+    ];
+    const skipBaseline = {
+      version: 1,
+      corpus: baseline.corpus,
+      repos: [entry('owner/one', 'aaa', counts()), skipped('owner/two', 'bbb', 'manifest-parse')],
+    };
+
+    it('matches when the expected skip is still a skip for the same reason', () => {
+      const result = compareToBaseline(
+        { repos: skipBaseline.repos, corpus: baseline.corpus },
+        skipBaseline,
+        targets
+      );
+      expect(result.drift).toEqual([]);
+      expect(result.changed).toBe(false);
+    });
+
+    it('is drift when a repository without expectSkip fails to scan', () => {
+      const result = compareToBaseline(
+        {
+          repos: [skipped('owner/one', 'aaa', 'manifest-parse'), skipBaseline.repos[1]],
+          corpus: baseline.corpus,
+        },
+        skipBaseline,
+        targets
+      );
+      expect(result.changed).toBe(true);
+      expect(result.drift).toContainEqual({
+        repo: 'owner/one',
+        kind: 'unexpected-skip',
+        expected: null,
+        actual: 'manifest-parse',
+      });
+      expect(result.drift).toContainEqual({
+        repo: 'owner/one',
+        kind: 'skip-changed',
+        before: null,
+        after: 'manifest-parse',
+      });
+    });
+
+    it('is drift when a repository with expectSkip now scans', () => {
+      const result = compareToBaseline(
+        { repos: [skipBaseline.repos[0], entry('owner/two', 'bbb', counts())], corpus: baseline.corpus },
+        skipBaseline,
+        targets
+      );
+      expect(result.changed).toBe(true);
+      expect(result.drift).toContainEqual({
+        repo: 'owner/two',
+        kind: 'expected-skip-scanned',
+        expected: 'manifest-parse',
+      });
+      expect(result.drift).toContainEqual({
+        repo: 'owner/two',
+        kind: 'skip-changed',
+        before: 'manifest-parse',
+        after: null,
+      });
+    });
+
+    it('is drift when an expected skip fails for a different reason', () => {
+      const result = compareToBaseline(
+        {
+          repos: [skipBaseline.repos[0], skipped('owner/two', 'bbb', 'clone-failed')],
+          corpus: baseline.corpus,
+        },
+        skipBaseline,
+        targets
+      );
+      expect(result.drift).toContainEqual({
+        repo: 'owner/two',
+        kind: 'unexpected-skip',
+        expected: 'manifest-parse',
+        actual: 'clone-failed',
+      });
+    });
+
+    it('formats each skip difference with the repository name', () => {
+      const text = formatComparison({
+        changed: true,
+        drift: [
+          { repo: 'owner/one', kind: 'unexpected-skip', expected: null, actual: 'manifest-parse' },
+          { repo: 'owner/two', kind: 'expected-skip-scanned', expected: 'manifest-parse' },
+          { repo: 'owner/three', kind: 'skip-changed', before: 'manifest-parse', after: null },
+        ],
+        context: [],
+      });
+      expect(text).toContain('owner/one  could not be scanned (manifest-parse)');
+      expect(text).toContain('owner/two  scanned, but the repository list expects it to be skipped');
+      expect(text).toContain('owner/three  skipped (manifest-parse) in the baseline, scanned in this run');
+    });
+  });
+
   it('refuses to compare against a baseline that is not one', () => {
     expect(() => compareToBaseline({ repos: [] }, null)).toThrow(/baseline/i);
     expect(() => compareToBaseline({ repos: [] }, { repos: 'nope' })).toThrow(/baseline/i);

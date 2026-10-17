@@ -1,3 +1,7 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from '@jest/globals';
 
 import {
@@ -5,9 +9,101 @@ import {
   assertPrivateEntry,
   countedKeys,
   DIAGNOSTIC_CODES,
+  LOCKFILE_FORMATS,
   RULE_IDS,
   summarize,
 } from '../lib/counts.mjs';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const SOURCE_DIRS = [
+  path.join(REPO_ROOT, 'packages', 'core', 'src'),
+  path.join(REPO_ROOT, 'packages', 'cli', 'src'),
+];
+
+function sourceFiles() {
+  const files = [];
+  for (const dir of SOURCE_DIRS) {
+    for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith('.ts')) {
+        files.push(path.join(entry.parentPath, entry.name));
+      }
+    }
+  }
+  return files;
+}
+
+// The diagnostic codes the shipped source puts on a run, as far as a text
+// scan can see them: a `code:` property given a single-quoted literal or an
+// UPPER_CASE constant, the constant resolved against every single-quoted
+// string constant the source declares (by name, across files, since codes
+// are imported). This is a tripwire, not a parser. It reports, so the test
+// can fail on them:
+//   - a `code:` whose value is anything else (a template literal, a
+//     double-quoted string, a ternary, a lowercase variable), since those
+//     forms are exactly what the two patterns above would miss;
+//   - a constant it cannot resolve;
+//   - a constant name declared twice with different values, which would
+//     make the resolution ambiguous.
+// What it still cannot see is a code that never appears after `code:` in
+// a source file, such as one passed to a helper that builds the object.
+// A type annotation (`code: string;`, `(code: number): boolean`), not a value.
+const TYPE_ANNOTATION = /^(string|number)[;,)]*:?$/;
+
+function emittedDiagnosticCodes() {
+  const constants = new Map();
+  const conflicting = new Set();
+  const literalCodes = new Set();
+  const namedCodes = new Set();
+  const unrecognised = [];
+  for (const file of sourceFiles()) {
+    const text = readFileSync(file, 'utf8');
+    for (const match of text.matchAll(/\bconst ([A-Z][A-Z0-9_]*)(?:: [A-Za-z]+)? = '([^']+)'/g)) {
+      if (constants.has(match[1]) && constants.get(match[1]) !== match[2]) {
+        conflicting.add(match[1]);
+      }
+      constants.set(match[1], match[2]);
+    }
+    const lines = text.split('\n');
+    for (let index = 0; index < lines.length; index += 1) {
+      const trimmed = lines[index].trim();
+      if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) {
+        continue;
+      }
+      for (const match of lines[index].matchAll(/\bcode: (\S+)/g)) {
+        const value = match[1].replace(/,$/, '');
+        const literal = /^'([^']+)'$/.exec(value);
+        if (literal !== null) {
+          literalCodes.add(literal[1]);
+        } else if (/^[A-Z][A-Z0-9_]*$/.test(value)) {
+          namedCodes.add(value);
+        } else if (!TYPE_ANNOTATION.test(match[1])) {
+          unrecognised.push(`${path.relative(REPO_ROOT, file)}:${index + 1}: code: ${match[1]}`);
+        }
+      }
+    }
+  }
+  const unresolved = [...namedCodes].filter((name) => !constants.has(name));
+  const resolved = [...namedCodes]
+    .filter((name) => constants.has(name))
+    .map((name) => constants.get(name));
+  return {
+    codes: new Set([...literalCodes, ...resolved]),
+    unresolved,
+    unrecognised,
+    // Only a name used as a code matters; DEFAULT_REGISTRY, say, differs
+    // between files and is no code.
+    conflicting: [...conflicting].filter((name) => namedCodes.has(name)),
+  };
+}
+
+function unionMembers(file, typeName) {
+  const text = readFileSync(file, 'utf8');
+  const match = text.match(new RegExp(`export type ${typeName} =([^;]+);`));
+  if (match === null) {
+    throw new Error(`no ${typeName} union in ${file}`);
+  }
+  return [...match[1].matchAll(/'([^']+)'/g)].map((member) => member[1]);
+}
 
 function scanResult(overrides = {}) {
   return {
@@ -178,5 +274,31 @@ describe('assertCountsOnly', () => {
     for (const code of DIAGNOSTIC_CODES) {
       expect(countedKeys()).toContain(code);
     }
+  });
+});
+
+describe('the vocabulary covers what the source emits', () => {
+  // Without this the vocabulary goes stale silently: a code added to core
+  // and not here is counted under "other", and the public baseline then
+  // records a bucket nobody can read.
+  it('names every diagnostic code core and the CLI can emit', () => {
+    const { codes, unresolved, unrecognised, conflicting } = emittedDiagnosticCodes();
+    expect(unresolved).toEqual([]);
+    expect(unrecognised).toEqual([]);
+    expect(conflicting).toEqual([]);
+    // A floor, so a scraper that stopped matching cannot pass by finding
+    // nothing.
+    expect(codes.size).toBeGreaterThan(40);
+    expect(codes).toContain('manifest-unparsed');
+    const missing = [...codes].filter((code) => !DIAGNOSTIC_CODES.includes(code)).sort();
+    expect(missing).toEqual([]);
+  });
+
+  it('names every rule id and lockfile format the types declare', () => {
+    const ruleIds = unionMembers(path.join(SOURCE_DIRS[0], 'types.ts'), 'RuleId');
+    expect(ruleIds.length).toBeGreaterThan(5);
+    expect(ruleIds.filter((ruleId) => !RULE_IDS.includes(ruleId))).toEqual([]);
+    const formats = unionMembers(path.join(SOURCE_DIRS[0], 'lockfiles', 'types.ts'), 'LockfileFormat');
+    expect(formats.filter((format) => !LOCKFILE_FORMATS.includes(format))).toEqual([]);
   });
 });

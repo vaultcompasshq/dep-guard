@@ -11,11 +11,30 @@ GitHub release notes, which are generated from the commit history.
 ## [Unreleased]
 
 Reporting and wording. Nothing here changes an exit code or a severity, with
-two named exceptions. The install-script collapse under Changed keeps the
+named exceptions. The install-script collapse under Changed keeps the
 severity and the exit and changes only the finding count. The typosquat
 length floor under Changed can change an exit in one case: with `failOn` set
 to `low`, a resemblance finding against a target shorter than three
-characters (every resemblance finding is low) is no longer raised.
+characters (every resemblance finding is low) is no longer raised. The fix
+under Fixed turns an exit 2 into a completed scan only where `ignorePaths`
+already covers the file.
+
+### Fixed
+
+- A stray `package.json` that does not parse, such as a deliberately broken
+  test fixture, stopped the scan with exit 2 (`manifest-parse`) even when
+  `ignorePaths` covered it. Present since 0.11.0, which began reading
+  manifests in subdirectories; until now only a Python manifest could be
+  cleared this way, although the README named `ignorePaths` as the way to
+  drop any fixture manifest. An `ignorePaths` entry now clears it for every
+  ecosystem: the file is skipped with a `manifest-unparsed` note and the
+  scan goes on. The entry is read from the base on a `--trust-base` run, so
+  a pull request cannot clear its own parse error by adding it. With no
+  entry the default is unchanged: exit 2 naming the path. On a scan of the
+  repository root, the root `package.json`, a workspace member and a
+  `package.json` with a lockfile beside it still stop the scan when they do
+  not parse, whatever `ignorePaths` says. Found by the public dogfood bench, where npm/cli and
+  eslint both carry such a fixture.
 
 ### Added
 
@@ -64,6 +83,25 @@ characters (every resemblance finding is low) is no longer raised.
 - The could-not-run message for a manifest on disk that resolved none now
   also says the installed dep-guard, with its version, may be out of date
   when a newer dep-guard reads the file's format.
+- Dogfood bench: the counts vocabulary names every diagnostic code core and
+  the CLI emit, and the `publish-age` rule, so new behaviour no longer
+  collapses into `other`; a bench test fails when the source emits a code
+  the vocabulary does not name.
+- Dogfood bench: pallets/flask, pinned at a commit, is added so the Python
+  surface has a baseline.
+- Dogfood bench: the public baseline is re-recorded. It dated from
+  2026-08-17 and matched 0.10.0; the rows for axios, vite, vuejs/core,
+  prettier and jest move with 0.10.1's workspace resolver and 0.11.0's
+  nested manifests. npm/cli and eslint are recorded as skipped
+  (`manifest-parse`): the bench passes no per-repository config and each
+  carries an unparseable fixture `package.json` that needs an `ignorePaths`
+  entry the upstream repository does not have.
+- Dogfood bench: a repository that cannot be scanned is recorded in the run
+  and the baseline as skipped, with dep-guard's could-not-run code, instead
+  of being left out, and `expectSkip` in `bench/repos.public.json` names a
+  known skip. A `--compare` run reports drift when a repository without
+  `expectSkip` fails to scan, when one with it scans or fails for another
+  reason, and when a repository's skip state differs from the baseline's.
 
 ## [0.13.0] - 2026-10-17
 

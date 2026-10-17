@@ -1256,7 +1256,12 @@ quiet:
   `node_modules` only lockfiles are read. Every other `package.json` git tracks
   is read, test fixtures and templates included, so a fixture cannot hide
   a dependency; an `ignorePaths` entry on the base branch is how one is
-  dropped. `dep-guard scan <path>` reads manifests under that directory
+  dropped. That includes a fixture `package.json` that does not parse: one
+  `ignorePaths` covers is skipped with a `manifest-unparsed` note, and one
+  it does not cover stops the scan and names the path. On a scan of the
+  repository root, the root `package.json`, a workspace member and a
+  `package.json` with a lockfile beside it are projects, not fixtures, and
+  stop the scan when they do not parse whatever `ignorePaths` says. `dep-guard scan <path>` reads manifests under that directory
   and nothing above it; a lockfile in an ancestor directory is named in
   `lockfile-outside-prefix` and not applied, so a full gate is a scan of
   the repository root. Reported paths stay relative to the git root, and

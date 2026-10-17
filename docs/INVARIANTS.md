@@ -1273,8 +1273,41 @@ beside a lockfile is a project" below). Every other `package.json` git tracks is
 templates included; `ignorePaths` on the comparison side is how one is
 dropped. `pyproject.toml` is parsed as TOML and dependencies come from
 `project.dependencies`, `project.optional-dependencies` and the poetry
-tables only; a file that does not parse is a could-not-run that names the
-path unless `ignorePaths` on the comparison side covers it. Lockfile
+tables only. A stray manifest of any ecosystem that does not parse is a
+could-not-run (`manifest-parse`) that names the path unless `ignorePaths`
+read from the comparison side (the trust base's on a `--trust-base` run)
+covers it, in which case it is dropped with a `manifest-unparsed` note and
+the scan goes on; a head that adds the entry for its own broken file still
+exits 2. On a scan of the repository root, the root `package.json`, a
+workspace member, and a `package.json` an install root vouches for (a
+lockfile in its directory, or that root's workspace patterns name it) stay
+fatal whatever `ignorePaths` says. On `dep-guard scan <path>` the root
+manifest is read only when it is under the prefix and install roots come
+from the files under it, so a broken root-workspace member inside the
+prefix that `ignorePaths` covers is dropped with the note; the well-formed
+file would have had its findings filtered by the same entry. Before
+this fix only a Python manifest could be dropped, so from 0.11.0 a broken
+fixture `package.json` (npm/cli and eslint both carry one) was exit 2 with
+no way to clear it. Tests (`nested-manifests.test.ts`): `an unreadable
+stray package.json on an ignorePaths path does not exit 2`, `an unreadable
+stray package.json with no ignore entry exits 2 and names the path`, `under
+--trust-base, a head that adds the ignorePaths entry for its own broken
+package.json still exits 2`; controls `an ignored package.json beside its
+own lockfile that does not parse still exits 2`, `an ignored member a
+nested install root's workspace patterns name that does not parse still
+exits 2` and `an ignored workspace member that does not parse still exits
+2` (the last is parsed before the catch, by the root workspace walk, so it
+pins that walk and not the install-root guard). Mutation-checked, each
+mutation on the catch's condition in `loadState`: restoring the
+Python-only condition turns only the first red; dropping the install-root
+guard (`if (!isIgnoredPath(relPath)) throw`) turns the lockfile control and
+the nested-member control red; narrowing the guard to a lockfile in the
+same directory (`installRootSet.has(parentDir(relPath))`) turns only the
+nested-member control red; keeping only the guard (`if (vouchedFor)
+throw`, so every non-vouched parse error is swallowed) turns the two
+no-entry tests and the pyproject no-entry test red; and reading ignorePaths
+from disk instead of the trust base (in `scan.ts`) turns only the
+`--trust-base` test red. Lockfile
 coverage is judged per directory: an unread root lockfile that changed is a
 downgrade only when the root had a read lockfile with entries on the
 comparison side, and a directory whose read lockfile is gone on the judged

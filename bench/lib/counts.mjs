@@ -32,14 +32,18 @@ export const RULE_IDS = Object.freeze([
   'version-hygiene',
   'dependency-confusion',
   'registered-squat',
+  'publish-age',
 ]);
 
 export const LOCKFILE_FORMATS = Object.freeze(['npm', 'pnpm', 'yarn', 'bun', 'none']);
 
-// The codes core can raise. A stale entry here costs nothing; a missing one
-// costs a number under `other` and a note on the run, never a key.
+// The codes core and the CLI can raise. A stale entry here costs nothing; a
+// missing one costs a number under `other` and a note on the run, never a
+// key. bench/tests/counts.test.mjs fails when the source emits a code this
+// list does not name, so a new code cannot fall into `other` unnoticed.
 export const DIAGNOSTIC_CODES = Object.freeze([
   'audit-anchor-differs',
+  'audit-limits',
   'audit-no-tamper-comparison',
   'check-single-name-only',
   'delta-ambiguous-lock-entry',
@@ -47,18 +51,53 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   'ignore-path-dropped',
   'ignore-path-unmatched',
   'lockfile-binary-skipped',
+  'lockfile-downgrade-acknowledged',
   'lockfile-format-manifest-only',
   'lockfile-missing',
+  'lockfile-nested-changed',
+  'lockfile-nested-ignored',
+  'lockfile-nested-removed',
+  'lockfile-not-read',
+  'lockfile-outside-prefix',
+  'lockfile-unread-comparison-side',
+  'lockfile-unread-sibling',
   'manifest-alias-empty',
+  'manifest-skipped-dirname',
+  'manifest-unparsed',
+  'multiple-lockfiles',
   'npm-lockfile-invalid-entry',
+  'npm-lockfile-unverifiable-name',
   'npm-lockfile-v1',
   'npmrc-pin-unparseable',
   'online-check-unreachable',
+  'online-deadline-exceeded',
+  'path-outside-root',
   'pnpm-lockfile-invalid-entry',
+  'pnpm-multi-document-lockfile',
   'pnpm-no-install-script-flag',
+  'publish-age-allowed',
+  'publish-age-package-unknown',
+  'publish-age-private-origin-skipped',
+  'publish-age-version-unknown',
+  'pypi-names-not-checked',
+  'pypi-private-index-skipped',
+  'python-index-unread-comparison-side',
+  'python-lockfile-unreadable',
+  'python-name-invalid',
+  'python-workspace-unconfirmed',
+  'registered-squat-private-origin-skipped',
+  'requirements-line-unread',
+  'symlink-cycle',
+  'symlinked-input-comparison-side',
   'tamper-resolution-unreadable',
+  'typosquat-asymmetry-private-origin-skipped',
+  'unknown-package-private-origin-skipped',
+  'unknown-package-private-scope-skipped',
+  'workspace-dir-unreadable',
   'workspace-duplicate-directory',
   'workspace-glob-unsupported',
+  'workspace-link-unconfirmed',
+  'workspace-pattern-unread-comparison-side',
 ]);
 
 const OTHER = 'other';

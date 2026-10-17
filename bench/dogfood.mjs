@@ -213,12 +213,12 @@ async function cloneAt(url, sha, into) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// A fetch of nine repositories over the public internet will occasionally
+// A fetch of ten repositories over the public internet will occasionally
 // have one connection reset, and losing a sixty-second run to that is
 // annoying enough that somebody stops running it. Retried a couple of
-// times; a repository that still will not clone is reported and skipped,
-// which a --compare run then surfaces as a repository the baseline knows
-// and this run did not cover.
+// times; a repository that still will not clone is recorded as skipped
+// (clone-failed), which a --compare run then surfaces as a skip the
+// repository list does not expect.
 async function cloneWithRetries(url, sha, into, attempts = 3) {
   for (let attempt = 1; ; attempt += 1) {
     try {
@@ -255,7 +255,13 @@ async function scan(targetPath, corpusDir, online) {
   }
   const result = await run(process.execPath, args, { cwd: REPO_ROOT, timeoutMs: SCAN_TIMEOUT_MS });
   if (result.code !== 0) {
-    throw new Error(`scan exited ${result.code}: ${result.stderr.trim().split('\n').slice(-2).join(' ')}`);
+    const tail = result.stderr.trim().split('\n').slice(-2).join(' ');
+    const error = new Error(`scan exited ${result.code}: ${tail}`);
+    // The could-not-run code dep-guard prints last, in parentheses. It is a
+    // fixed vocabulary of this tool's own, never repository text, which is
+    // what lets it be recorded in the public baseline.
+    error.skipReason = /\(([a-z][a-z0-9-]*)\)$/.exec(tail)?.[1] ?? 'scan-failed';
+    throw error;
   }
   try {
     return JSON.parse(result.stdout);
@@ -308,7 +314,12 @@ async function runPublicTier(options) {
           `${observed} lockfile, ${Math.round((Date.now() - startedAt) / 1000)}s`
       );
     } catch (err) {
-      log(`  skipped: ${err.message}`);
+      const reason = typeof err.skipReason === 'string' ? err.skipReason : 'clone-failed';
+      const expected = target.expectSkip === reason ? ' (expected by the repository list)' : '';
+      log(`  skipped${expected}: ${err.message}`);
+      // Recorded, not dropped: a baseline without the row would let a
+      // --compare run report a match while a pinned repository fails.
+      entries.push({ repo: target.repo, sha: target.sha, skipped: reason });
       failed.push(target.repo);
     } finally {
       rmSync(workDir, { recursive: true, force: true });
@@ -318,10 +329,10 @@ async function runPublicTier(options) {
   if (failed.length > 0) {
     log(`\n${failed.length} repository(s) could not be scanned: ${failed.join(', ')}`);
   }
-  if (entries.length === 0) {
+  if (entries.every((entry) => entry.skipped !== undefined)) {
     throw new Error('no repository could be scanned');
   }
-  return entries;
+  return { entries, targets: config.repos };
 }
 
 // The private tier deliberately learns as little as it can. The path goes
@@ -348,16 +359,21 @@ async function runLocalTier(options) {
     log(`  ${counts.findings.total} finding(s), ${counts.diagnostics.total} diagnostic(s)`);
   }
 
-  return entries;
+  return { entries, targets: [] };
 }
 
-function renderTable(entries) {
+function renderTable(allEntries) {
   const lines = [];
-  const width = Math.max(...entries.map((entry) => entry.repo.length), 12);
+  const width = Math.max(...allEntries.map((entry) => entry.repo.length), 12);
   lines.push(
     `${'repository'.padEnd(width)}  total  crit  high   med   low  diags  lockfile`
   );
-  for (const entry of entries) {
+  const entries = allEntries.filter((entry) => entry.skipped === undefined);
+  for (const entry of allEntries) {
+    if (entry.skipped !== undefined) {
+      lines.push(`${entry.repo.padEnd(width)}  skipped (${entry.skipped})`);
+      continue;
+    }
     const { counts } = entry;
     const lockfile = Object.entries(counts.lockfile).find(([, value]) => value === 1)?.[0] ?? '?';
     lines.push(
@@ -414,7 +430,7 @@ async function main() {
   }
 
   const startedAt = Date.now();
-  const entries =
+  const { entries, targets } =
     options.tier === 'public' ? await runPublicTier(options) : await runLocalTier(options);
   const runRecord = {
     version: 1,
@@ -436,7 +452,7 @@ async function main() {
 
   if (options.compare) {
     const baseline = readJson(baselinePath, `${options.tier} baseline`);
-    const comparison = compareToBaseline(runRecord, baseline);
+    const comparison = compareToBaseline(runRecord, baseline, targets);
     log('');
     log(formatComparison(comparison));
     if (comparison.changed) {
