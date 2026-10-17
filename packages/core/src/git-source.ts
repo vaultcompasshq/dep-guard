@@ -205,6 +205,12 @@ function isPackageJsonPath(relPath: string): boolean {
   return baseName(relPath) === 'package.json';
 }
 
+// go.mod and go.sum: listed for the coverage statement only, never read.
+function isGoModuleFile(relPath: string): boolean {
+  const name = baseName(relPath);
+  return name === 'go.mod' || name === 'go.sum';
+}
+
 function isProjectManifestPath(relPath: string): boolean {
   return isPackageJsonPath(relPath) || isPythonManifestPath(relPath);
 }
@@ -2188,6 +2194,7 @@ async function loadState(
     workspaceLocalNamesByDir,
     pythonLockfiles,
     pythonArchiveFiles,
+    goFiles: files.filter(isGoModuleFile).sort(),
   };
 }
 

@@ -103,6 +103,118 @@ export function renderNamesLine(result: ScanResult): string | null {
   return `names: ${parts.join('; ')}`;
 }
 
+function plural(count: number, one: string, many: string = `${one}s`): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/**
+ * The coverage statement: for each ecosystem the run saw (npm, Python, and
+ * Go when go.mod or go.sum is present), whether it was read, which checks
+ * ran, and which did not and why. Built only from run.ecosystems and
+ * run.online, so every value is a count or a fixed phrase and none of it is
+ * repository content. Empty when no ecosystem was seen, or for a run with no
+ * repository behind it.
+ */
+export function renderCoverageLines(result: ScanResult): string[] {
+  const { npm, pypi, go } = result.run.ecosystems;
+  const online = result.run.online.enabled;
+  const lines: string[] = [];
+
+  if (npm.manifests > 0 && npm.lockfile !== 'not-applicable') {
+    const ran = ['unknown-package', 'typosquat', 'version-hygiene', 'dependency-confusion'];
+    const didNot: string[] = [];
+    if (npm.lockfile === 'read') {
+      // What the two lockfile checks can honestly claim: an audit scan has
+      // nothing to compare, and a pnpm lockfile has no per-entry flag.
+      ran.push(
+        result.run.mode === 'audit'
+          ? 'lockfile-tamper (git-source and url-source signals only; no earlier revision to compare)'
+          : 'lockfile-tamper',
+        result.run.lockfileFormat === 'pnpm'
+          ? 'install-script (onlyBuiltDependencies only; pnpm lockfiles carry no per-entry flag)'
+          : 'install-script'
+      );
+    } else if (npm.lockfile === 'missing') {
+      didNot.push('lockfile-tamper and install-script (no npm or pnpm lockfile found)');
+    } else {
+      didNot.push('lockfile-tamper and install-script (a lockfile is present but dep-guard does not read its format)');
+    }
+    if (online) {
+      ran.push('registered-squat', 'publish-age');
+    } else {
+      didNot.push('registered-squat and publish-age (they need --online)');
+    }
+    lines.push(
+      `  npm: read, ${npm.lockfile === 'missing' ? 'no lockfile' : 'with a lockfile'}. Ran: ${ran.join(', ')}.` +
+        (didNot.length > 0 ? ` Did not run: ${didNot.join(', ')}.` : '')
+    );
+  }
+
+  if (pypi.manifests + pypi.lockfiles > 0) {
+    const ran = online
+      ? ['unknown-package (PyPI)', "typosquat against this repository's own Python names", 'tamper for git and url requirements']
+      : ["typosquat against this repository's own Python names", 'tamper for git and url requirements'];
+    const didNot: string[] = [];
+    if (!online) {
+      didNot.push('unknown-package (it needs --online; no PyPI corpus ships)');
+    }
+    didNot.push(
+      'lockfile-tamper comparison and install-script (dep-guard reads npm and pnpm lockfiles only; Python lockfiles are read for names)'
+    );
+    let line =
+      `  pypi: read (${plural(pypi.manifests, 'manifest')}, ${plural(pypi.lockfiles, 'lockfile')}). ` +
+      `Ran: ${ran.join(', ')}. Did not run: ${didNot.join(', ')}.`;
+    if (pypi.requirements > 0 && pypi.pinned === pypi.requirements) {
+      line += ` All ${pypi.requirements} requirements are pinned exactly; pinned requirements are not a lockfile dep-guard compares.`;
+    }
+    lines.push(line);
+  }
+
+  if (go.files > 0) {
+    lines.push(`  go: not read. go.mod and go.sum are not read by dep-guard (${plural(go.files, 'file')} seen).`);
+  }
+
+  return lines.length === 0 ? [] : ['coverage:', ...lines];
+}
+
+// Notes that state what an audit scan (no earlier revision to compare
+// against) could not do. Several of them repeat on every audit run, so the
+// text report folds them into one line; the JSON result keeps each one.
+const AUDIT_LIMIT_CODES: ReadonlySet<string> = new Set([
+  'audit-no-tamper-comparison',
+  'pnpm-no-install-script-flag',
+  'pypi-names-not-checked',
+]);
+const AUDIT_LIMITS_CODE = 'audit-limits';
+
+// The diagnostics as note lines, with an audit run's limits folded into one
+// "limits of this scan" line at the place the first of them stood. The
+// folded line carries every message in full, numbered, so nothing the
+// separate notes said is lost; a single limit is left as its own note.
+function renderDiagnosticLines(result: ScanResult): string[] {
+  const { diagnostics } = result.run;
+  const limits = result.run.mode === 'audit' ? diagnostics.filter((entry) => AUDIT_LIMIT_CODES.has(entry.code)) : [];
+  if (limits.length < 2) {
+    return diagnostics.map(renderDiagnosticLine);
+  }
+  const lines: string[] = [];
+  let folded = false;
+  for (const diagnostic of diagnostics) {
+    if (!AUDIT_LIMIT_CODES.has(diagnostic.code)) {
+      lines.push(renderDiagnosticLine(diagnostic));
+    } else if (!folded) {
+      folded = true;
+      lines.push(
+        renderDiagnosticLine({
+          code: AUDIT_LIMITS_CODE,
+          message: `limits of this scan: ${limits.map((limit, index) => `(${index + 1}) ${sanitizeText(limit.message)}`).join('; ')}`,
+        })
+      );
+    }
+  }
+  return lines;
+}
+
 export function renderText(result: ScanResult): string {
   const lines: string[] = [];
 
@@ -131,9 +243,7 @@ export function renderText(result: ScanResult): string {
 
   if (result.run.diagnostics.length > 0) {
     lines.push('');
-    for (const diagnostic of result.run.diagnostics) {
-      lines.push(renderDiagnosticLine(diagnostic));
-    }
+    lines.push(...renderDiagnosticLines(result));
   }
 
   // suppressed, ignored and allowed are three different facts -- dropped by
@@ -203,6 +313,7 @@ export function renderText(result: ScanResult): string {
   if (names !== null) {
     lines.push(names);
   }
+  lines.push(...renderCoverageLines(result));
 
   // One line under the summary, only when online checks actually ran
   // (issue #75): a disabled run has nothing to add here that the summary

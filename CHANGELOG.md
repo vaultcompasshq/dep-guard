@@ -10,6 +10,61 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+Reporting and wording. Nothing here changes an exit code or a severity, with
+two named exceptions. The install-script collapse under Changed keeps the
+severity and the exit and changes only the finding count. The typosquat
+length floor under Changed can change an exit in one case: with `failOn` set
+to `low`, a resemblance finding against a target shorter than three
+characters (every resemblance finding is low) is no longer raised.
+
+### Added
+
+- A `coverage:` block under the run summary: for each ecosystem the run saw
+  (npm, Python, and Go when `go.mod` or `go.sum` is present), whether it was
+  read, which checks ran, and which did not and why. Go is stated as not
+  read ("go.mod and go.sum are not read by dep-guard"). The `names:` line is
+  unchanged. `run.ecosystems` gains `npm.lockfile` (`read`, `not-read`,
+  `missing` or `not-applicable`), `pypi.requirements` and `pypi.pinned`
+  (named requirements, and how many are pinned exactly), and `go.files`.
+
+### Changed
+
+- `install-script`: when a change adds the npm lockfile, or replaces it with
+  one sharing no entry with the comparison side, the packages that run an
+  install script are reported as one high finding that names the count and
+  the packages and points at `allow` as the remedy, instead of one high
+  finding per package. The exit is 1 either way. The collapse happens after
+  `ignorePaths` and the baseline have filtered the per-package findings, so
+  both behave as they did before and an existing per-package baseline entry
+  still clears its package; the collapsed finding's own fingerprint is
+  derived from the sorted package set, so baselining it covers only the
+  packages it listed. A package an `allow` entry clears is left out, a
+  platform-restricted optional dependency such as `fsevents` stays in the
+  list, and a single package keeps its own finding. Audit mode and pnpm
+  lockfiles are unchanged. Clearing it: add the packages you reviewed to
+  `allow`.
+- The `coverage:` line qualifies what it claims: an audit scan lists
+  `lockfile-tamper` as git-source and url-source signals only, and a pnpm
+  lockfile lists `install-script` as `onlyBuiltDependencies` only.
+- `lockfile-missing` (a note, never a finding) is printed only when the
+  judged side has a `package.json` and no npm or pnpm lockfile. A Go
+  repository with `go.sum`, and a Python manifest with every requirement
+  pinned exactly, no longer get it; the coverage block says what is true of
+  them instead. Its text now says "no npm or pnpm lockfile".
+- In the text report of an audit scan, two or more of the repeated limits
+  (`audit-no-tamper-comparison`, `pnpm-no-install-script-flag`,
+  `pypi-names-not-checked`) print as one `audit-limits` note carrying every
+  message. The JSON diagnostics are unchanged.
+- Typosquat: a resemblance rule (every rule except the curated alias list),
+  for npm and for Python, no longer matches a target shorter than three
+  characters, so `cn` is not reported against `co`. A two-letter name absent
+  from the corpus is still an unknown-package finding. This is the one exit
+  change the floor can make: only under `failOn: low`, where a name such as
+  `wss` is no longer reported against `ws`.
+- The could-not-run message for a manifest on disk that resolved none now
+  also says the installed dep-guard, with its version, may be out of date
+  when a newer dep-guard reads the file's format.
+
 ## [0.13.0] - 2026-10-17
 
 Python dependency names are now checked. What can

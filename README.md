@@ -70,9 +70,17 @@ Six rules, all offline and deterministic (plus five optional online checks
   the base declared). No list of popular PyPI projects ships, so a typo of a
   project the repository does not already use is caught only by the online
   existence check, and only when the typo is not a registered project.
+  A resemblance needs a target of at least three characters (`cn` is not
+  reported against `co`); the curated confusion pairs are exempt.
 - **Install script** -- a dependency that gains the ability to run install
   scripts. Acquisition only: a version bump of a package that already ran
-  them is not a finding, or every `npm update` would be noise.
+  them is not a finding, or every `npm update` would be noise. A change that
+  adds the npm lockfile, or replaces it with one sharing no entry, makes
+  every scripted package in it read as acquired; those are reported as one
+  high finding that names the count and the packages, with `allow` as the
+  remedy for the ones you have reviewed. The severity and the exit are the
+  same as for one package, and `ignorePaths` and the baseline apply to the
+  per-package findings first.
 - **Lockfile tamper** -- resolutions moving to another host, integrity
   hashes removed, forged, or downgraded to a weaker algorithm, and tarballs
   repointed within the same host. It also reads the declared specifier, so a
@@ -353,22 +361,28 @@ and how many were read but not checked and why (see "Ecosystem coverage"):
 ```json
 "ecosystems": {
   "npm":  { "manifests": 2, "candidates": 3, "checked": 3,
-            "notChecked": { "privateScope": 0 } },
+            "notChecked": { "privateScope": 0 }, "lockfile": "read" },
   "pypi": { "manifests": 2, "lockfiles": 1, "candidates": 7,
+            "requirements": 9, "pinned": 9,
             "existenceChecked": 5, "resemblanceChecked": 7,
             "notChecked": { "offline": 0, "budget": 1, "unreachable": 1,
                             "privateIndex": 0, "internal": 0,
                             "lockfileUnreadable": 0 },
             "excluded": { "url": 0, "vcs": 1, "path": 0, "editable": 0,
                           "constraint": 0, "self": 0, "invalidName": 0,
-                          "unrecognised": 0 } }
+                          "unrecognised": 0 } },
+  "go":   { "files": 0 }
 }
 ```
 
 `excluded` counts every Python requirement on the judged side that is not a
 name candidate, by why; `candidates` and the not-checked counts are new
 names after dedupe, one per normalised project name. `lockfileUnreadable`
-counts Python lockfiles that could not be read for names.
+counts Python lockfiles that could not be read for names. `npm.lockfile` is
+`read`, `not-read` (a lockfile in a format dep-guard does not parse),
+`missing`, or `not-applicable` (the `check` command); `pypi.requirements`
+and `pypi.pinned` count named Python requirements and those pinned exactly;
+`go.files` counts `go.mod` and `go.sum` files.
 
 `--no-online` forces the online checks off for one run, overriding
 `"online": true` in `.dep-guard.json`. That is the flag to reach for in a
@@ -1038,7 +1052,21 @@ result stands in for the other.
 | Ecosystem | Files read | Name checks | Lockfile checks |
 |---|---|---|---|
 | npm | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` (`yarn.lock`, `bun.lock` noted, not parsed) | unknown-package against the shipped corpus, and the registry with `--online`; typosquat against the shipped popularity list; registered-squat and asymmetry with `--online` | tamper, install-script, publish-age (`--online`) |
-| Python (PyPI) | requirements files, `pyproject.toml`, `Pipfile`, `poetry.lock`, `uv.lock`, `pdm.lock`, `Pipfile.lock` | unknown-package with `--online` only (PyPI existence; no corpus ships); typosquat against the repository's own Python names only | none: Python lockfiles are read for names; their hashes and sources are not judged. A git or url requirement is a tamper git-source or url-source finding, as for npm |
+| Python (PyPI) | requirements files, `pyproject.toml`, `Pipfile`, `poetry.lock`, `uv.lock`, `pdm.lock`, `Pipfile.lock` | unknown-package with `--online` only (PyPI existence; no corpus ships); typosquat against the repository's own Python names only | none: Python lockfiles are read for names; their hashes and sources are not judged. A git or url requirement is a tamper git-source or url-source finding, as for npm. Requirements pinned exactly are not a lockfile dep-guard compares |
+| Go | none: `go.mod` and `go.sum` are not read by dep-guard | none | none |
+
+Every run that saw an ecosystem prints a `coverage:` block under the summary
+(and under the `names:` line when there is one): per ecosystem, read or not
+read, which checks ran, and which did not and why.
+
+    coverage:
+      npm: read, with a lockfile. Ran: unknown-package, typosquat, version-hygiene, dependency-confusion, lockfile-tamper, install-script. Did not run: registered-squat and publish-age (they need --online).
+      pypi: read (2 manifests, 0 lockfiles). Ran: typosquat against this repository's own Python names, tamper for git and url requirements. Did not run: unknown-package (it needs --online; no PyPI corpus ships), lockfile-tamper comparison and install-script (dep-guard reads npm and pnpm lockfiles only; Python lockfiles are read for names). All 9 requirements are pinned exactly; pinned requirements are not a lockfile dep-guard compares.
+      go: not read. go.mod and go.sum are not read by dep-guard (2 files seen).
+
+`lockfile-missing` is a note printed only for a `package.json` with no npm or
+pnpm lockfile; a Python or Go repository is described by the block above
+instead.
 
 Every run that read a Python file prints a `names:` line under its summary,
 and the JSON result carries the same counts under `run.ecosystems`:
