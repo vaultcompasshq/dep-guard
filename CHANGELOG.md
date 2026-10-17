@@ -10,6 +10,8 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-17
+
 No verdict is loosened. A manifest that does not parse still stops the scan
 by default; `ignorePaths` on the base branch remains the way to clear a
 broken test fixture. The default stays fatal because bun installs from
