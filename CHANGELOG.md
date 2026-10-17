@@ -10,7 +10,9 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
-Python dependency names are now checked (targeted at 0.13.0). What can
+## [0.13.0] - 2026-10-17
+
+Python dependency names are now checked. What can
 newly block, and how to clear each:
 
 - Findings (exit 1) from unknown-package, critical, for a Python name PyPI
