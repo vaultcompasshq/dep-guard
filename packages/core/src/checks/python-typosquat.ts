@@ -30,7 +30,7 @@ import { pypiDisplayName } from '../python-names.js';
 import type { Finding } from '../types.js';
 import { pypiAllowClears } from './allow.js';
 import { newNames } from './candidates.js';
-import { KEYBOARD_NEIGHBOURS } from './typosquat.js';
+import { KEYBOARD_NEIGHBOURS, MIN_RESEMBLANCE_TARGET_LENGTH } from './typosquat.js';
 import type { Check } from './types.js';
 
 const SHORT_NAME_MAX_LENGTH = 6;
@@ -124,7 +124,7 @@ function distance(name: string, known: readonly string[]): PythonMatch | null {
 
 export function matchPythonName(name: string, others: ReadonlySet<string>): PythonMatch | null {
   // The exact normalised name is never its own target.
-  const known = new Set(others);
+  const known = new Set([...others].filter((other) => other.length >= MIN_RESEMBLANCE_TARGET_LENGTH));
   known.delete(name);
   if (known.size === 0) {
     return null;

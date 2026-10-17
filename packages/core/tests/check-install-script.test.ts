@@ -66,6 +66,7 @@ interface ContextOptions {
   diagnostics?: Diagnostic[];
   lockEntryChanges?: LockEntryChange[];
   hasComparisonBase?: boolean;
+  lockfileWhollyNew?: boolean;
 }
 
 function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckContext {
@@ -76,6 +77,7 @@ function makeContext(changes: DepChange[], options: ContextOptions = {}): CheckC
     lockfileFormat: options.lockfileFormat ?? 'npm',
     lockfilePath: 'package-lock.json',
     hasComparisonBase: options.hasComparisonBase ?? true,
+    ...(options.lockfileWhollyNew === undefined ? {} : { lockfileWhollyNew: options.lockfileWhollyNew }),
     workspaceLocalNames: new Set(),
     diagnostics: options.diagnostics ?? [],
   };
@@ -314,6 +316,45 @@ describe('installScriptCheck: a scan with no comparison base', () => {
     expect(addedFinding.message).toContain('did not run before');
     expect(acquiredFinding.severity).toBe('high');
     expect(acquiredFinding.details?.signal).toBe('flag-acquired');
+  });
+});
+
+// A change that adds or regenerates the whole lockfile makes every
+// install-script package read as acquired. One finding per package buried
+// the review; the same facts are one finding, same severity, same exit.
+describe('installScriptCheck: a wholly new lockfile still yields per-package findings', () => {
+  const scripted = { version: '1.0.0', hasInstallScript: true };
+  const newLockEntries = ['esbuild', 'fsevents', 'sharp'].map((name) =>
+    makeLockEntryChange(name, undefined, scripted)
+  );
+
+  test('several install-script packages on a wholly new lockfile are one high finding naming count and packages', () => {
+    const findings = installScriptCheck(
+      makeContext([], { lockEntryChanges: newLockEntries, lockfileWhollyNew: true })
+    );
+    // The check itself never collapses: scan() does, after ignorePaths and
+    // the baseline (install-script-collapse.test.ts).
+    expect(findings.map((finding) => finding.packageName)).toEqual(['esbuild', 'fsevents', 'sharp']);
+    expect(findings.every((finding) => finding.severity === 'high')).toBe(true);
+  });
+
+  test('allowed packages are not counted or named', () => {
+    const findings = installScriptCheck(
+      makeContext([], {
+        lockEntryChanges: newLockEntries,
+        lockfileWhollyNew: true,
+        config: { allow: ['fsevents'] },
+      })
+    );
+    expect(findings.map((finding) => finding.packageName)).toEqual(['esbuild', 'sharp']);
+  });
+
+  test('audit mode keeps its low per-package presence findings', () => {
+    const findings = installScriptCheck(
+      makeContext([], { lockEntryChanges: newLockEntries, lockfileWhollyNew: true, hasComparisonBase: false })
+    );
+    expect(findings).toHaveLength(3);
+    expect(findings.every((finding) => finding.severity === 'low')).toBe(true);
   });
 });
 

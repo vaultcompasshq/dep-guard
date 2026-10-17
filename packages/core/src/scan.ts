@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { loadBaseline } from './baseline.js';
@@ -14,6 +15,7 @@ import { loadCorpus } from './corpus.js';
 import { computeDelta } from './delta.js';
 import type { DepChange, DependencyDelta } from './delta.js';
 import { fingerprintFinding } from './fingerprint.js';
+import { collapseInstallScriptFindings } from './install-script-collapse.js';
 import { evaluateGate, severityAtLeast } from './gate.js';
 import {
   assertScannablePath,
@@ -54,6 +56,20 @@ import { fetchPypiProject } from './online/pypi-client.js';
 import { checkPypiExistence, type PypiExistenceStats } from './online/pypi-existence.js';
 import { applyUvSources, judgedPythonControls, PythonIndexRule } from './python-sources.js';
 import { loadPythonControls } from './python-trust.js';
+
+// The version of this installed package, for a message that has to say which
+// dep-guard read the repository. package.json sits one level above both src/
+// and dist/. Never throws: a version that cannot be read is said as unknown.
+function installedVersion(): string {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')
+    ) as { version?: unknown };
+    return typeof manifest.version === 'string' ? manifest.version : '(version unknown)';
+  } catch {
+    return '(version unknown)';
+  }
+}
 
 // Every check runs against one shared corpus + config + delta, in a fixed
 // order (RuleId's own declaration order in types.ts) so a scan's finding
@@ -1009,7 +1025,8 @@ export async function scan(opts: {
       throw new DepGuardError(
         'found a manifest on disk but resolved none; the scan root may be wrong. In CI ' +
           'this is a could-not-run, not a clean pass. Check that the action runs at the ' +
-          'repository root.',
+          'repository root. Or this dep-guard may be out of date: the file may be in a ' +
+          `format that a newer dep-guard reads and dep-guard ${installedVersion()} does not.`,
         'manifests-unresolved'
       );
     }
@@ -1185,13 +1202,17 @@ export async function scan(opts: {
   const ecosystems = summarizeEcosystems(ctx, statePair.after.manifests, pypiStats);
 
   const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
-  const { findings, suppressed, ignored } = applyPathFilters(
-    rawFindings,
-    config,
+  const filtered = applyPathFilters(rawFindings, config, baseline, diagnostics, lockfileIgnoreMatches);
+  // After the filters, over what survived them: see install-script-collapse.ts.
+  const collapse = collapseInstallScriptFindings(filtered.findings, {
+    hasComparisonBase: delta.hasComparisonBase,
+    lockfileWhollyNew: delta.lockfileWhollyNew,
+    lockfilePath: delta.lockfilePath,
     baseline,
-    diagnostics,
-    lockfileIgnoreMatches
-  );
+  });
+  const { ignored } = filtered;
+  const findings = collapse.findings;
+  const suppressed = filtered.suppressed + collapse.suppressed;
 
   return buildResult(
     findings,

@@ -30,6 +30,16 @@ import type { Check, CheckContext } from './types.js';
 
 const SHORT_NAME_MAX_LENGTH = 6;
 
+// A resemblance rule (every rule below the alias list, here and in the
+// Python check) needs a target of at least this many characters. One edit
+// is no evidence of anything when the whole name is two characters ("cn"
+// against "co"), so such a target is noise, not a resemblance. The alias
+// list is curated, not guessed, and is exempt.
+// The length is that of the whole target name, scope included: a scoped
+// target such as "@types/ms" clears the floor, and its short tail is handled
+// by the same-scope tail comparison below.
+export const MIN_RESEMBLANCE_TARGET_LENGTH = 3;
+
 type MatchRule =
   | 'alias-list'
   | 'separator-swap'
@@ -154,6 +164,10 @@ function sameScopeTails(name: string, target: string): { nameTail: string; targe
   return { nameTail: nameScope.tail, targetTail: targetScope.tail };
 }
 
+function belowResemblanceFloor(target: string): boolean {
+  return target.length < MIN_RESEMBLANCE_TARGET_LENGTH;
+}
+
 function buildTopIndex(corpus: Corpus): TopIndex {
   const lengths = new Set<number>();
   const separatorForms = new Map<string, string>();
@@ -179,7 +193,7 @@ function buildTopIndex(corpus: Corpus): TopIndex {
 }
 
 function probe(name: string, candidate: string, rule: MatchRule, corpus: Corpus): Match | null {
-  if (candidate === name) {
+  if (candidate === name || belowResemblanceFloor(candidate)) {
     return null;
   }
   const targetRank = corpus.topRank(candidate);
@@ -358,6 +372,9 @@ function distanceMatch(name: string, corpus: Corpus): Match | null {
   const top = corpus.topNames;
   for (let index = 0; index < top.length; index += 1) {
     const target = top[index];
+    if (belowResemblanceFloor(target)) {
+      continue;
+    }
     const shared = sameScopeTails(name, target);
     const compareName = shared === null ? name : shared.nameTail;
     const compareTarget = shared === null ? target : shared.targetTail;

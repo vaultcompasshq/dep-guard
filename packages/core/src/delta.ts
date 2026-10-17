@@ -139,6 +139,13 @@ export interface DependencyDelta {
   // to decide, because the wrong default is a check asserting a change it
   // has no evidence for.
   hasComparisonBase: boolean;
+  // True when the primary lockfile on the judged side is new in this change
+  // (absent on the comparison side) or when none of its entries has a
+  // counterpart there (a regenerated file): with an earlier revision behind
+  // the scan, every entry then reads as added. The install-script check
+  // reads it to report that as one finding. False or absent otherwise,
+  // including with no comparison base and a delta built by hand.
+  lockfileWhollyNew?: boolean;
   // Package names the AFTER side's lockfile records as workspace-local
   // (RepoState.workspaceLocalNames, itself a carry of
   // ParsedLockfile.workspaceLocalNames -- see lockfiles/types.ts). A
@@ -160,6 +167,10 @@ export interface DependencyDelta {
   // declares. Absent on a delta built by hand, which then has no Python
   // lockfile names and no exclusions.
   python?: PythonDeltaFacts;
+  // How many go.mod and go.sum files the judged side holds. dep-guard reads
+  // neither; the count exists so the coverage statement can say so. Absent on
+  // a delta built by hand, which reads as none.
+  go?: { files: number };
 }
 
 const LOCKFILE_MISSING = 'lockfile-missing';
@@ -623,6 +634,25 @@ function diffLockEntries(
   }
 
   return { changes: entryChanges, diagnostics };
+}
+
+// A primary lockfile with entries, judged against an earlier revision, whose
+// every entry came out as added with nothing before it: the file is new in
+// this change or was regenerated from nothing in common. An entry that is
+// unchanged or changed has a counterpart, so a single one disqualifies.
+function isWhollyNewLockfile(
+  hasComparisonBase: boolean,
+  lockfile: ParsedLockfile | null,
+  changes: readonly LockEntryChange[]
+): boolean {
+  if (!hasComparisonBase || lockfile === null) {
+    return false;
+  }
+  let total = 0;
+  for (const entries of lockfile.entries.values()) {
+    total += entries.length;
+  }
+  return total > 0 && changes.length === total && changes.every((change) => change.kind === 'added');
 }
 
 // The tampering this tool exists to catch does not have to touch
@@ -1329,11 +1359,18 @@ export function computeDelta(
     });
   }
   if (after.lockfile === null) {
-    if (unreadPresent.length === 0) {
+    // Raised only where there is an npm manifest whose lockfile this tool
+    // would read. A Python or Go repository has no such lockfile to miss:
+    // what is true of it (pinned requirements are not a lockfile dep-guard
+    // compares, go.mod and go.sum are not read) is said in the coverage
+    // statement (run.ecosystems), not as a missing lockfile. A diagnostic
+    // either way: this never changed an exit code.
+    const hasNpmManifest = after.manifests.some((manifest) => manifest.python === undefined);
+    if (unreadPresent.length === 0 && hasNpmManifest) {
       deltaDiagnostics.push({
         code: LOCKFILE_MISSING,
         message:
-          'no lockfile was found, so the lockfile-tamper and install-script checks had nothing to read and were skipped; the manifest-level checks still ran',
+          'no npm or pnpm lockfile was found, so the lockfile-tamper and install-script checks had nothing to read and were skipped; the manifest-level checks still ran',
       });
     }
   } else if (before === null && (lockfileFormat === 'npm' || lockfileFormat === 'pnpm')) {
@@ -1387,6 +1424,10 @@ export function computeDelta(
   // Their entries join the same lockEntryChanges list the checks already
   // walk, each tagged with its own path and format.
   const primaryChanges = [...lockEntries.changes];
+  // Judged on the primary lockfile alone, and only when it is the only one:
+  // the install-script check names the package list under one lockfile path.
+  const lockfileWhollyNew =
+    (after.extraLockfiles ?? []).length === 0 && isWhollyNewLockfile(before !== null, after.lockfile, primaryChanges);
   for (const extra of after.extraLockfiles ?? []) {
     const counterpart = counterpartOf(extra);
     if (before === null) {
@@ -1446,9 +1487,11 @@ export function computeDelta(
     changes,
     lockEntryChanges: lockEntries.changes,
     python: python.facts,
+    go: { files: (after.goFiles ?? []).length },
     onlyBuiltAdded: onlyBuiltDifference(before, after),
     lockfileFormat,
     hasComparisonBase: before !== null,
+    ...(lockfileWhollyNew ? { lockfileWhollyNew: true } : {}),
     workspaceLocalNames: after.workspaceLocalNames,
     ...(after.workspaceLocalNamesByDir === undefined
       ? {}

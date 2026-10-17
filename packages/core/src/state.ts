@@ -98,6 +98,11 @@ export interface RepoState {
   // Every listed file with a pip archive extension on this side, so a
   // [tool.uv.sources] archive target is confirmed only when it exists.
   pythonArchiveFiles?: string[];
+  // Paths of go.mod and go.sum on this side (not under node_modules or a
+  // skipped directory). dep-guard reads neither; they are listed only so the
+  // coverage statement can say Go was seen and not read. Absent on a state
+  // built by hand.
+  goFiles?: string[];
 }
 
 const SCOPE_PIN_SUFFIX = ':registry';

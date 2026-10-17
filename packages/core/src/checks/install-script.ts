@@ -281,6 +281,8 @@ export const installScriptCheck: Check = (ctx) => {
         },
       });
     }
+    // A wholly new lockfile is collapsed by scan(), after ignorePaths and
+    // the baseline (install-script-collapse.ts), never here.
     return findings;
   }
 

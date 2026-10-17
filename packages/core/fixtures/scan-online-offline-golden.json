@@ -58,7 +58,7 @@
     "diagnostics": [
       {
         "code": "lockfile-missing",
-        "message": "no lockfile was found, so the lockfile-tamper and install-script checks had nothing to read and were skipped; the manifest-level checks still ran"
+        "message": "no npm or pnpm lockfile was found, so the lockfile-tamper and install-script checks had nothing to read and were skipped; the manifest-level checks still ran"
       }
     ],
     "online": {
@@ -74,7 +74,8 @@
         "manifests": 1,
         "candidates": 2,
         "checked": 2,
-        "notChecked": { "privateScope": 0 }
+        "notChecked": { "privateScope": 0 },
+        "lockfile": "missing"
       },
       "pypi": {
         "manifests": 0,
@@ -99,8 +100,11 @@
           "self": 0,
           "invalidName": 0,
           "unrecognised": 0
-        }
-      }
+        },
+        "requirements": 0,
+        "pinned": 0
+      },
+      "go": { "files": 0 }
     }
   },
   "exitCode": 1

@@ -1294,7 +1294,8 @@ base's on a `--trust-base` run, otherwise the `.dep-guard.json` on disk in
 the scanned repository, which is the judged side's) drops findings under
 that path, and an unread lockfile there is `lockfile-nested-ignored`
 instead. Such an entry is not reported as unmatched. The no-lockfile note
-`lockfile-missing` is printed only when the inventory is empty;
+`lockfile-missing` is printed only when the inventory is empty and the
+judged side holds an npm manifest;
 `lockfile-not-read` names every lockfile this tool does not read.
 `--staged`, `--base` and `--trust-base` compare each manifest with the same
 path on the other side. Tests: `manifests below the scan root`, `a skipped
@@ -3755,3 +3756,60 @@ Residuals, recorded rather than closed:
 - A head-written lockfile entry that claims a private source the base
   already declares is skipped; only a Python lockfile tamper rule could
   judge whether it should have moved there.
+
+## Coverage is stated per ecosystem, and wording never moves an exit (0.14.0)
+
+Reporting and wording only: nothing in this section changes an exit code, a
+severity or a blocking decision, with two named exceptions: the collapse
+below, which keeps the exit and the severity and changes only the count, and
+the resemblance length floor, which can move an exit only under failOn low,
+as its own bullet states.
+
+- **One finding, same severity, same exit, and no filter sees it first.**
+  When the primary lockfile is an npm lockfile (the pnpm branch does not
+  collapse), new in a change with an earlier revision behind it or sharing no
+  entry with the comparison side, and it is the only npm or pnpm lockfile on
+  the judged side, the per-package `install-script` findings that survive
+  `ignorePaths` and the baseline are replaced by ONE finding at high, signal
+  `acquired-on-new-lockfile` (`install-script-collapse.ts`, called from
+  `scan()` after `applyPathFilters`; `isWhollyNewLockfile` in `delta.ts`).
+  The exit is 1 either way. The collapse runs AFTER the filters on purpose:
+  built inside the check it ran before them, and then a baseline entry for one
+  package set, or an `ignorePaths` entry for the lockfile path, swallowed
+  other packages (and declared dependencies) that 0.13.0 reported. Now
+  `ignorePaths` and per-package baseline entries behave exactly as before. The
+  collapsed finding's fingerprint is a hash of the sorted package set, and a
+  baseline entry for it is honoured only for that exact set; no baseline
+  widening is accepted. Every package stays in `details.packages` (the
+  message names the first ten), a package an `allow` entry cleared is not in
+  it, a platform-restricted optional dependency stays in it (no built-in
+  allow list), and a lone package keeps its own finding. Audit mode is
+  untouched. Tests: `probe A`, `probe B` and `an old per-package baseline
+  entry` in `coverage-and-wording.test.ts`, and
+  `install-script-collapse.test.ts`.
+- **`lockfile-missing` is raised only when an npm manifest has no lockfile to
+  read.** It is a diagnostic, never a finding, so it never decided an exit;
+  it is now printed only when the judged side holds a `package.json` and no
+  npm or pnpm lockfile (`computeDelta`). A Python-only or Go repository does
+  not get it: what is true of them is in `run.ecosystems` (pinned
+  requirements are not a lockfile dep-guard compares; `go.mod` and `go.sum`
+  are not read). Tests: `lockfile-missing is raised only for an ecosystem
+  whose lockfile dep-guard reads`.
+- **The coverage statement is derived from `run.ecosystems`, not kept beside
+  it.** `npm.lockfile`, `pypi.requirements`, `pypi.pinned` and `go.files` are
+  computed from the same delta the checks read; the text `coverage:` lines
+  (`renderCoverageLines`) are built from those fields and from `run.online`
+  alone, and contain no repository content. `go.files` counts `go.mod` and
+  `go.sum` outside skipped directories; neither file is ever opened. The
+  `names:` line is unchanged.
+- **An audit scan's limits fold in the text report only.** With no earlier
+  revision, two or more of `audit-no-tamper-comparison`,
+  `pnpm-no-install-script-flag` and `pypi-names-not-checked` print as one
+  `audit-limits` note carrying every message in full; the JSON diagnostics
+  are untouched. Tests: `the limits of an audit scan`.
+- **A resemblance target is at least three characters.** The npm typosquat
+  rules below the alias list and the Python check skip a target shorter than
+  `MIN_RESEMBLANCE_TARGET_LENGTH`; the alias list is exempt. Every resemblance
+  finding is low, so the floor can change an exit only under `failOn: low`
+  (accepted: `wss` against `ws` is no longer reported there). Test:
+  `typosquat length floor`.

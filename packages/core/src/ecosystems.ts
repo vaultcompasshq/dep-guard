@@ -11,17 +11,25 @@
 import { isInternalName } from './checks/allow.js';
 import { newNames } from './checks/candidates.js';
 import type { CheckContext } from './checks/types.js';
+import { NPM_LOCKFILE_V1_CODE } from './lockfiles/npm.js';
 import type { ParsedManifest } from './manifest.js';
 import type { PypiExistenceStats } from './online/pypi-existence.js';
 import { privatePinnedScope } from './online/registry-scope.js';
 import type { PythonExclusionClass } from './python-types.js';
 import type { Diagnostic } from './types.js';
 
+// Whether the npm lockfile checks (tamper, install-script) had a lockfile to
+// read: 'read' for an npm or pnpm lockfile this tool parses, 'not-read' for
+// one it finds and does not parse (yarn, bun, a v1 npm file), 'missing' for
+// none, 'not-applicable' for a run with no repository behind it (checkSingle).
+export type NpmLockfileState = 'read' | 'not-read' | 'missing' | 'not-applicable';
+
 export interface NpmEcosystemSummary {
   manifests: number;
   candidates: number;
   checked: number;
   notChecked: { privateScope: number };
+  lockfile: NpmLockfileState;
 }
 
 export interface PypiNotChecked {
@@ -43,11 +51,49 @@ export interface PypiEcosystemSummary {
   resemblanceChecked: number;
   notChecked: PypiNotChecked;
   excluded: Record<PythonExclusionClass, number>;
+  // Named requirements across the judged Python manifests, and how many of
+  // them are pinned exactly (a single == or === clause). Every requirement
+  // pinned is the nearest a Python manifest comes to a lockfile, and it is
+  // not one dep-guard compares.
+  requirements: number;
+  pinned: number;
+}
+
+// go.mod and go.sum seen on the judged side. dep-guard reads neither, so
+// there is nothing else to count.
+export interface GoEcosystemSummary {
+  files: number;
 }
 
 export interface EcosystemsSummary {
   npm: NpmEcosystemSummary;
   pypi: PypiEcosystemSummary;
+  go: GoEcosystemSummary;
+}
+
+// "==1.2.3" and "===1.2.3": one clause, an exact operator, no wildcard. Any
+// other specifier (a range, a compound clause, none) is not an exact pin.
+// Whitespace is removed first; the pattern has no nested quantifier, so a
+// hostile specifier cannot make it backtrack.
+function isExactPin(specifier: string): boolean {
+  return /^===?[0-9A-Za-z.+!_-]+$/.test(specifier.split(/\s+/).join(''));
+}
+
+function npmLockfileState(ctx: CheckContext, judged: boolean): NpmLockfileState {
+  if (!judged) {
+    return 'not-applicable';
+  }
+  const { delta } = ctx;
+  if (delta.diagnostics.some((diagnostic) => diagnostic.code === NPM_LOCKFILE_V1_CODE)) {
+    return 'not-read';
+  }
+  if (delta.lockfileFormat === 'npm' || delta.lockfileFormat === 'pnpm') {
+    return 'read';
+  }
+  if (delta.lockfileFormat === 'yarn' || delta.lockfileFormat === 'bun') {
+    return 'not-read';
+  }
+  return delta.diagnostics.some((diagnostic) => diagnostic.code === 'lockfile-not-read') ? 'not-read' : 'missing';
 }
 
 export const PYPI_NAMES_NOT_CHECKED = 'pypi-names-not-checked';
@@ -84,6 +130,10 @@ export function summarizeEcosystems(
   const npmManifests =
     judgedManifests === null ? 1 : judgedManifests.filter((manifest) => manifest.python === undefined).length;
 
+  const pythonDeps = (judgedManifests ?? [])
+    .filter((manifest) => manifest.python !== undefined)
+    .flatMap((manifest) => manifest.deps.filter((dep) => dep.protocol === 'pypi'));
+
   const pypiNames = new Set(names.pypi.map((candidate) => candidate.name)).size;
   const python = ctx.delta.python;
   const stats = pypiStats ?? { existenceChecked: 0, budget: 0, unreachable: 0, privateIndex: 0, internal: 0 };
@@ -93,6 +143,7 @@ export function summarizeEcosystems(
       candidates: npmNames.length,
       checked: npmNames.length - privateScope,
       notChecked: { privateScope },
+      lockfile: npmLockfileState(ctx, judgedManifests !== null),
     },
     pypi: {
       manifests: python?.manifests ?? 0,
@@ -109,7 +160,10 @@ export function summarizeEcosystems(
         lockfileUnreadable: python?.unreadableLockfiles.length ?? 0,
       },
       excluded: { ...names.excluded },
+      requirements: pythonDeps.length,
+      pinned: pythonDeps.filter((dep) => isExactPin(dep.specifier)).length,
     },
+    go: { files: ctx.delta.go?.files ?? 0 },
   };
 }
 
