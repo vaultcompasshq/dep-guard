@@ -269,6 +269,116 @@ describe('pyproject.toml', () => {
   });
 });
 
+// The shape of the fixture npm/cli carries at
+// workspaces/arborist/test/fixtures/bad/package.json.
+const BROKEN_PACKAGE_JSON = '{\nNOPE\n';
+
+async function scanError(run: () => Promise<unknown>): Promise<DepGuardError> {
+  let caught: unknown;
+  try {
+    await run();
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(DepGuardError);
+  return caught as DepGuardError;
+}
+
+describe('an unparseable stray package.json', () => {
+  test('an unreadable stray package.json on an ignorePaths path does not exit 2', async () => {
+    await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['test/fixtures'] }));
+    await write('package.json', manifestJson({}));
+    await write('test/fixtures/bad/package.json', BROKEN_PACKAGE_JSON);
+
+    const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+    expect(result.exitCode).not.toBe(2);
+    const notice = result.run.diagnostics.find((entry) =>
+      entry.message.includes('test/fixtures/bad/package.json')
+    );
+    expect(notice?.code).toBe('manifest-unparsed');
+    expect(notice?.message).toMatch(/not parsed/i);
+  });
+
+  test('an unreadable stray package.json with no ignore entry exits 2 and names the path', async () => {
+    await write('package.json', manifestJson({}));
+    await write('test/fixtures/bad/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await scanError(() =>
+      scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS })
+    );
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('test/fixtures/bad/package.json');
+  });
+
+  test('under --trust-base, a head that adds the ignorePaths entry for its own broken package.json still exits 2', async () => {
+    await write('package.json', manifestJson({}));
+    await commitAll('base');
+    await git('tag', 'base');
+    await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['test/fixtures'] }));
+    await write('test/fixtures/bad/package.json', BROKEN_PACKAGE_JSON);
+    await commitAll('head');
+
+    const error = await scanError(() =>
+      scan({
+        repoRoot: repo,
+        mode: { kind: 'base', ref: 'base' },
+        corpusDir: FIXTURE_CORPUS,
+        trustBase: 'base',
+      })
+    );
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('test/fixtures/bad/package.json');
+  });
+
+  test('an ignored package.json beside its own lockfile that does not parse still exits 2', async () => {
+    await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['apps/web'] }));
+    await write('package.json', manifestJson({}));
+    await write('apps/web/package.json', BROKEN_PACKAGE_JSON);
+    await write('apps/web/package-lock.json', npmLock({}));
+
+    const error = await scanError(() =>
+      scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS })
+    );
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('apps/web/package.json');
+  });
+
+  test('an ignored workspace member that does not parse still exits 2', async () => {
+    await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['packages/broken'] }));
+    await write('package.json', JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/*'] }));
+    await write('packages/broken/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await scanError(() =>
+      scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS })
+    );
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('packages/broken/package.json');
+  });
+
+  test('an ignored member a nested install root\'s workspace patterns name that does not parse still exits 2', async () => {
+    // Root workspace members are parsed before the catch; this member is
+    // reached only through the nested install root apps/x, so it is the
+    // case the install-root guard in the catch exists for.
+    await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['apps/x/pkgs'] }));
+    await write('package.json', manifestJson({}));
+    await write('apps/x/package.json', JSON.stringify({ name: 'x', version: '1.0.0', workspaces: ['pkgs/*'] }));
+    await write('apps/x/package-lock.json', npmLock({}));
+    await write('apps/x/pkgs/a/package.json', BROKEN_PACKAGE_JSON);
+
+    const error = await scanError(() =>
+      scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS })
+    );
+
+    expect(error.code).toBe('manifest-parse');
+    expect(error.message).toContain('apps/x/pkgs/a/package.json');
+  });
+});
+
 describe('lockfile coverage is judged per directory', () => {
   const ROOT_YARN = '# yarn lockfile v1\n\nlodash@^4.17.21:\n  version "4.17.21"\n';
 

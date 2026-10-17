@@ -31,12 +31,44 @@ function indexRepos(entries) {
   return byName;
 }
 
-export function compareToBaseline(run, baseline) {
+// A repository that could not be scanned is recorded as { repo, sha,
+// skipped: reason } rather than left out, so a pinned repository that stops
+// scanning is a difference and not a silent gap. The reason is the
+// could-not-run code dep-guard printed (manifest-parse), or scan-failed or
+// clone-failed when there was none.
+function skipReason(entry) {
+  return typeof entry?.skipped === 'string' ? entry.skipped : null;
+}
+
+// What the repository list says about each target. A target with
+// expectSkip is one known not to scan, for that reason; any other failure
+// is drift, and so is that target scanning after all, since either way the
+// note in the list is no longer true.
+export function checkExpectedSkips(run, targets) {
+  const drift = [];
+  const after = indexRepos(run.repos);
+  for (const target of targets ?? []) {
+    const runEntry = after.get(target?.repo);
+    if (runEntry === undefined) {
+      continue;
+    }
+    const expected = typeof target.expectSkip === 'string' ? target.expectSkip : null;
+    const actual = skipReason(runEntry);
+    if (actual !== null && actual !== expected) {
+      drift.push({ repo: target.repo, kind: 'unexpected-skip', expected, actual });
+    } else if (actual === null && expected !== null) {
+      drift.push({ repo: target.repo, kind: 'expected-skip-scanned', expected });
+    }
+  }
+  return drift;
+}
+
+export function compareToBaseline(run, baseline, targets = []) {
   if (baseline === null || typeof baseline !== 'object' || !Array.isArray(baseline.repos)) {
     throw new Error('baseline is missing or is not a recorded dogfood run');
   }
 
-  const drift = [];
+  const drift = [...checkExpectedSkips(run, targets)];
   const context = [];
 
   const before = indexRepos(baseline.repos);
@@ -53,6 +85,14 @@ export function compareToBaseline(run, baseline) {
     // counts at a different commit say nothing about this tool.
     if (baseEntry.sha !== runEntry.sha) {
       drift.push({ repo: name, kind: 'repinned', before: baseEntry.sha, after: runEntry.sha });
+      continue;
+    }
+    const baseSkip = skipReason(baseEntry);
+    const runSkip = skipReason(runEntry);
+    if (baseSkip !== null || runSkip !== null) {
+      if (baseSkip !== runSkip) {
+        drift.push({ repo: name, kind: 'skip-changed', before: baseSkip, after: runSkip });
+      }
       continue;
     }
     const baseCounts = flattenCounts(baseEntry.counts);
@@ -127,6 +167,24 @@ export function formatComparison(comparison) {
         break;
       case 'unbaselined':
         lines.push(`  ${item.repo}  in this run but not in the baseline`);
+        break;
+      case 'skip-changed':
+        lines.push(
+          `  ${item.repo}  ${item.before === null ? 'scanned' : `skipped (${item.before})`} in the ` +
+            `baseline, ${item.after === null ? 'scanned' : `skipped (${item.after})`} in this run`
+        );
+        break;
+      case 'unexpected-skip':
+        lines.push(
+          `  ${item.repo}  could not be scanned (${item.actual}); the repository list ` +
+            (item.expected === null ? 'expects it to scan' : `expects ${item.expected}`)
+        );
+        break;
+      case 'expected-skip-scanned':
+        lines.push(
+          `  ${item.repo}  scanned, but the repository list expects it to be skipped ` +
+            `(${item.expected}); drop expectSkip and re-record the baseline`
+        );
         break;
       default:
         lines.push(`  ${item.repo}  ${item.kind}`);

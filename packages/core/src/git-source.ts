@@ -2077,16 +2077,21 @@ async function loadState(
     if (content === null) {
       continue;
     }
-    // A Python manifest that does not parse is a per-file failure. When
-    // ignorePaths from the comparison side covers it, the file is skipped
-    // with a note and the scan goes on; otherwise the failure stands, so a
-    // change cannot clear its own parse error. A file that parses is read
-    // whether or not it is ignored: its findings are filtered later, like
-    // any other path under ignorePaths.
+    // A stray manifest of any ecosystem that does not parse is a per-file
+    // failure. When ignorePaths from the comparison side covers it, the file
+    // is skipped with a note and the scan goes on; otherwise the failure
+    // stands, so a change cannot clear its own parse error. A package.json
+    // that an install root vouches for (a lockfile beside it, or that
+    // root's workspace patterns name it) is a project, not a stray, and
+    // stays fatal whatever ignorePaths says, as the root manifest and the
+    // root's workspace members (parsed above) do. A file that parses is
+    // read whether or not it is ignored: its findings are filtered later,
+    // like any other path under ignorePaths.
     try {
       manifests.push(parseProjectManifest(relPath, content));
     } catch (err) {
-      if (!(isPythonManifestPath(relPath) && isIgnoredPath(relPath))) {
+      const vouchedFor = isPackageJsonPath(relPath) && readDespiteSkippedName(relPath);
+      if (vouchedFor || !isIgnoredPath(relPath)) {
         throw err;
       }
       diagnostics.push({
