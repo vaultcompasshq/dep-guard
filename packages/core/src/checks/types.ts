@@ -1,5 +1,6 @@
 import type { Corpus } from '../corpus.js';
 import type { DependencyDelta } from '../delta.js';
+import type { PythonIndexRule } from '../python-sources.js';
 import type { Diagnostic, FailOn, Finding } from '../types.js';
 
 // The resolved user configuration every check reads.
@@ -78,6 +79,11 @@ export interface CheckContext {
   // evidence of the same bytes, and the tamper check stops forgiving an
   // upward rehash. Absent reads as false; scan.ts always sets it.
   npmrcChanged?: boolean;
+  // The Python index skip rule (python-sources.ts), built by scan.ts from
+  // the run's control inputs: the trust base's index declarations on a
+  // --trust-base run, the judged side's otherwise. Absent on a hand-built
+  // context, which then skips no Python name.
+  pythonIndex?: PythonIndexRule;
   diagnostics: Diagnostic[];
   // A second write-only sink, alongside `diagnostics`. A check that drops a
   // would-be finding because an `allow` entry covers the package pushes the

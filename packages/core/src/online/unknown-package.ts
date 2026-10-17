@@ -212,6 +212,12 @@ export async function resolveUnknownPackages(
     if (finding.ruleId !== 'unknown-package') {
       continue;
     }
+    // A Python name is never sent to the npm registry. None reaches here
+    // today (the PyPI step runs after this one), and the guard keeps it so
+    // if the order ever changes.
+    if (finding.details?.ecosystem === 'pypi') {
+      continue;
+    }
     if (isInternalName(finding.packageName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
       continue;
     }

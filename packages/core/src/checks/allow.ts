@@ -24,6 +24,7 @@
 // package.json key or an npm: alias target, so nothing here indexes an
 // object with that name.
 
+import { normalizePypiName } from '../python-names.js';
 import type { CheckContext } from './types.js';
 
 const SCOPE_SUFFIX = '/*';
@@ -49,6 +50,51 @@ export function allowClears(ctx: CheckContext, name: string): boolean {
   if (isAllowed(name, ctx.config.allow)) {
     ctx.allowed.push(name);
     return true;
+  }
+  return false;
+}
+
+// Python entries carry this prefix, in `allow` and in `internalPrefixes`.
+// Existing lists were written and reviewed about npm names, and silently
+// extending what a reviewed entry means to a second ecosystem would be a
+// change of meaning nobody reviewed, so a bare entry stays npm-only and a
+// Python name is matched only against a "pypi:" entry, both sides in their
+// PEP 503 normalised form.
+export const PYPI_ENTRY_PREFIX = 'pypi:';
+
+/**
+ * True when the normalised Python name `name` is covered by a "pypi:"
+ * allow entry, and -- when it is -- records "pypi:<name>" in the
+ * context's `allowed` sink, as allowClears does for an npm name.
+ */
+export function pypiAllowClears(ctx: CheckContext, name: string): boolean {
+  for (const entry of ctx.config.allow) {
+    if (!entry.startsWith(PYPI_ENTRY_PREFIX)) {
+      continue;
+    }
+    const allowed = normalizePypiName(entry.slice(PYPI_ENTRY_PREFIX.length).trim());
+    if (allowed.length > 0 && allowed === name) {
+      ctx.allowed.push(`${PYPI_ENTRY_PREFIX}${name}`);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when the normalised Python name `name` carries one of the
+ * configured "pypi:" internal prefixes ("pypi:acme-" covers "acme-utils",
+ * and so "Acme_Utils"). A bare entry never matches a Python name.
+ */
+export function isPypiInternalName(name: string, internalPrefixes: readonly string[]): boolean {
+  for (const entry of internalPrefixes) {
+    if (!entry.startsWith(PYPI_ENTRY_PREFIX)) {
+      continue;
+    }
+    const prefix = normalizePypiName(entry.slice(PYPI_ENTRY_PREFIX.length).trim());
+    if (prefix.length > 0 && name.length > prefix.length && name.startsWith(prefix)) {
+      return true;
+    }
   }
   return false;
 }

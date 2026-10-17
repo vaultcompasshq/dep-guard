@@ -1,6 +1,7 @@
 import { NPM_LOCKFILE_V1_CODE } from './lockfiles/npm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
 import type { ParsedManifest } from './manifest.js';
+import type { PythonLockfile } from './python-types.js';
 import { withoutByteOrderMark } from './text.js';
 
 // A lockfile whose entries this tool parses, at the root or below it: npm
@@ -88,6 +89,15 @@ export interface RepoState {
   // falls back to the union.
   workspaceLocalNames: ReadonlySet<string>;
   workspaceLocalNamesByDir?: ReadonlyMap<string, ReadonlySet<string>>;
+  // poetry.lock, uv.lock, pdm.lock and Pipfile.lock files on this side,
+  // read for names only (python-lockfiles.ts). Deliberately separate from
+  // `lockfile` and `extraLockfiles`: those drive the npm and pnpm tamper
+  // rules, the downgrade rule and lockfile-missing, and a Python lockfile
+  // must not take part in any of them. Absent on a state built by hand.
+  pythonLockfiles?: PythonLockfile[];
+  // Every listed file with a pip archive extension on this side, so a
+  // [tool.uv.sources] archive target is confirmed only when it exists.
+  pythonArchiveFiles?: string[];
 }
 
 const SCOPE_PIN_SUFFIX = ':registry';

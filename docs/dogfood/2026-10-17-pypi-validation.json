@@ -1,0 +1,231 @@
+{
+  "description": "Real-registry validation of the PyPI name checks (design docs/design/2026-10-17-python-name-checks-pypi.md, section 9). Recorded by bench/pypi-validate.mjs against the built dep-guard on the 0.13.0 branch, with --online against the live PyPI JSON API, the npm corpus from dep-guard-core 0.11.1 (--corpus-dir), and the default budgets (20000 ms for an audit, 300000 ms for a --base run). Diff the next run against this file.",
+  "date": "2026-10-17",
+  "depGuard": "0.13.0 branch (package version still reads 0.12.0)",
+  "corpus": "dep-guard-core 0.11.1 data/corpus",
+  "audit": [
+    {
+      "repo": "pallets/flask",
+      "url": "https://github.com/pallets/flask",
+      "sha": "d086db856be187255b8ec61ef409357393020f32",
+      "pythonFilesRead": {
+        "requirements": ["examples/celery/requirements.txt"],
+        "pyproject": [
+          "examples/celery/pyproject.toml",
+          "examples/javascript/pyproject.toml",
+          "examples/tutorial/pyproject.toml",
+          "pyproject.toml"
+        ],
+        "lockfiles": ["uv.lock"]
+      },
+      "pypi": {
+        "manifests": 5,
+        "lockfiles": 1,
+        "candidates": 94,
+        "existenceChecked": 94,
+        "notChecked": { "offline": 0, "budget": 0, "unreachable": 0, "privateIndex": 0, "internal": 0, "lockfileUnreadable": 0 },
+        "excluded": { "url": 0, "vcs": 0, "path": 1, "editable": 0, "constraint": 0, "self": 0, "invalidName": 0, "unrecognised": 0 }
+      },
+      "online": { "budgetMs": 20000, "lookupsAttempted": 94, "lookupsSkippedByDeadline": 0, "deadlineExceeded": false },
+      "wallMs": 3062,
+      "pypiStatuses": { "200": 94 },
+      "largestPypiBody": { "project": "ruff", "bytes": 6171231, "ms": 44 },
+      "slowestPypiAnswer": { "project": "pallets-sphinx-themes", "bytes": 42053, "ms": 108 },
+      "bodyTimeouts": [],
+      "findings": [],
+      "namesLine": "names: pypi 94 of 94 checked for existence (PyPI), resemblance checked against this repository's own Python names; 1 url, path or vcs requirement excluded"
+    },
+    {
+      "repo": "pydantic/pydantic",
+      "url": "https://github.com/pydantic/pydantic",
+      "sha": "5adfeaaaea947f81f0f01868604f219084ec151a",
+      "pythonFilesRead": {
+        "requirements": [".github/actions/people/requirements.in", ".github/pyodide/requirements.in"],
+        "pyproject": [
+          "pydantic-core/pyproject.toml",
+          "pyproject.toml",
+          "tests/plugin/pyproject.toml",
+          "tests/typechecking/pyproject.toml"
+        ],
+        "lockfiles": ["pydantic-core/uv.lock", "tests/typechecking/uv.lock", "uv.lock"]
+      },
+      "pypi": {
+        "manifests": 6,
+        "lockfiles": 3,
+        "candidates": 169,
+        "existenceChecked": 169,
+        "notChecked": { "offline": 0, "budget": 0, "unreachable": 0, "privateIndex": 0, "internal": 0, "lockfileUnreadable": 0 },
+        "excluded": { "url": 0, "vcs": 2, "path": 4, "editable": 0, "constraint": 0, "self": 0, "invalidName": 0, "unrecognised": 0 }
+      },
+      "online": { "budgetMs": 20000, "lookupsAttempted": 169, "lookupsSkippedByDeadline": 0, "deadlineExceeded": false },
+      "wallMs": 6158,
+      "pypiStatuses": { "200": 169 },
+      "largestPypiBody": { "project": "aiohttp", "bytes": 9472099, "ms": 38 },
+      "slowestPypiAnswer": { "project": "auditwheel-emscripten", "bytes": 48571, "ms": 144 },
+      "bodyTimeouts": [],
+      "findings": [
+        { "ruleId": "typosquat", "severity": "low", "packageName": "cattrs", "manifestPath": "uv.lock", "target": "attrs", "judgement": "false positive: cattrs and attrs are two real neighbouring projects" },
+        { "ruleId": "lockfile-tamper", "severity": "critical", "packageName": "pydantic-docs", "manifestPath": "pyproject.toml", "judgement": "expected new block: a [tool.uv.sources] git source with no pinned ref, now a tamper subject (CHANGELOG)" }
+      ],
+      "namesLine": "names: pypi 169 of 169 checked for existence (PyPI), resemblance checked against this repository's own Python names; 6 url, path or vcs requirements excluded"
+    },
+    {
+      "repo": "python-poetry/poetry",
+      "url": "https://github.com/python-poetry/poetry",
+      "sha": "38a86661d2ae58694c76d0bb4e628e1400d6dc6f",
+      "pythonFilesRead": {
+        "requirements": [],
+        "pyproject": "pyproject.toml, tests/masonry/builders/fixtures/excluded_subpackage/pyproject.toml, tests/utils/fixtures/pyproject.toml, and 98 under tests/fixtures/",
+        "lockfiles": "poetry.lock and 13 under tests/fixtures/, one of them (tests/fixtures/invalid_lock/poetry.lock) unreadable by design"
+      },
+      "pypi": {
+        "manifests": 101,
+        "lockfiles": 14,
+        "candidates": 98,
+        "existenceChecked": 97,
+        "notChecked": { "offline": 0, "budget": 0, "unreachable": 0, "privateIndex": 1, "internal": 0, "lockfileUnreadable": 1 },
+        "excluded": { "url": 0, "vcs": 6, "path": 24, "editable": 8, "constraint": 0, "self": 1, "invalidName": 1, "unrecognised": 0 }
+      },
+      "online": { "budgetMs": 20000, "lookupsAttempted": 97, "lookupsSkippedByDeadline": 0, "deadlineExceeded": false },
+      "wallMs": 4128,
+      "pypiStatuses": { "200": 95, "404": 2 },
+      "largestPypiBody": { "project": "rapidfuzz", "bytes": 8980125, "ms": 83 },
+      "slowestPypiAnswer": { "project": "invalid-source", "bytes": 24, "ms": 200 },
+      "bodyTimeouts": [],
+      "findings": [
+        { "ruleId": "typosquat", "severity": "low", "packageName": "tomli", "manifestPath": "pyproject.toml", "target": "toml", "judgement": "false positive: tomli and toml are two real projects" },
+        { "ruleId": "unknown-package", "severity": "critical", "packageName": "invalid-dep", "manifestPath": "tests/fixtures/invalid_pyproject/pyproject.toml", "judgement": "a real 404: a test fixture that declares a deliberately invalid name; not a detection error, cleared by ignorePaths tests/fixtures" },
+        { "ruleId": "unknown-package", "severity": "critical", "packageName": "invalid-source", "manifestPath": "tests/fixtures/invalid_pyproject/pyproject.toml", "judgement": "a real 404: the same fixture maps it to an index name it never declares, so it is looked up (fail closed) and is absent" },
+        { "ruleId": "lockfile-tamper", "severity": "critical", "packageName": "poetry-core", "manifestPath": "tests/fixtures/build_systems/core_from_git/pyproject.toml", "judgement": "expected new block: a git string in build-system.requires, a newly read table" },
+        { "ruleId": "lockfile-tamper", "severity": "critical", "packageName": "pendulum", "count": 4, "manifestPath": "tests/fixtures/{non_package_mode,sample_project,with_local_config,with_source}/pyproject.toml", "judgement": "poetry git tables, read before 0.13.0 too" },
+        { "ruleId": "lockfile-tamper", "severity": "low", "packageName": "demo", "manifestPath": "tests/fixtures/project_with_git_dev_dependency/pyproject.toml", "judgement": "a commit-pinned poetry git table, read before 0.13.0 too" }
+      ],
+      "pypiDiagnostics": {
+        "python-name-invalid": 1,
+        "python-lockfile-unreadable": 1,
+        "pypi-private-index-skipped": 2
+      },
+      "namesLine": "names: pypi 97 of 98 checked for existence (PyPI); 2 not checked: 1 private index, 1 lockfile unreadable; resemblance checked against this repository's own Python names; 38 url, path or vcs requirements excluded",
+      "namesLineNote": "recorded before the fix that keeps an unreadable lockfile out of the not-checked total; the line now reads '... 1 not checked: 1 private index; resemblance checked ...; 1 lockfile unreadable, its names not checked; ...'"
+    },
+    {
+      "repo": "pypi/warehouse",
+      "url": "https://github.com/pypi/warehouse",
+      "sha": "f9ce83647318089c485c3d66378d559f0e7cdeed",
+      "pythonFilesRead": {
+        "requirements": [
+          "requirements.txt",
+          "requirements/deploy.txt",
+          "requirements/dev.txt",
+          "requirements/docs-blog.txt",
+          "requirements/docs-dev.txt",
+          "requirements/docs-user.txt",
+          "requirements/ipython.txt",
+          "requirements/lint.txt",
+          "requirements/main.txt",
+          "requirements/tests.txt"
+        ],
+        "pyproject": ["pyproject.toml", "pyramid_components/pyproject.toml"],
+        "lockfiles": []
+      },
+      "includesNote": "warehouse's requirements files carry no -r or -c line at this commit (they are pip-compile outputs), so celery/celery was added to exercise includes. Its .in files under requirements/ are not read: requirements.in is the only .in name the patterns admit.",
+      "pypi": {
+        "manifests": 12,
+        "lockfiles": 0,
+        "candidates": 301,
+        "existenceChecked": 301,
+        "notChecked": { "offline": 0, "budget": 0, "unreachable": 0, "privateIndex": 0, "internal": 0, "lockfileUnreadable": 0 },
+        "excluded": { "url": 0, "vcs": 0, "path": 0, "editable": 0, "constraint": 0, "self": 0, "invalidName": 0, "unrecognised": 0 }
+      },
+      "online": { "budgetMs": 20000, "lookupsAttempted": 375, "lookupsSkippedByDeadline": 966, "deadlineExceeded": true },
+      "budgetNote": "every Python name was looked up inside the 20000 ms plain budget; the npm publish-age step then ran out of budget for 966 npm lockfile lookups, the stated cost of running PyPI second",
+      "wallMs": 20504,
+      "pypiStatuses": { "200": 301 },
+      "largestPypiBody": { "project": "ddtrace", "bytes": 40877492, "ms": 181 },
+      "slowestPypiAnswer": { "project": "datadog", "bytes": 96346, "ms": 227 },
+      "bodyTimeouts": [],
+      "findings": [
+        { "ruleId": "typosquat", "severity": "low", "packageName": "cssselect2", "target": "cssselect", "judgement": "false positive: two real projects" },
+        { "ruleId": "typosquat", "severity": "low", "packageName": "ipython", "target": "gitpython", "judgement": "false positive: two real projects" },
+        { "ruleId": "typosquat", "severity": "low", "packageName": "jsbeautifier", "target": "cssbeautifier", "judgement": "false positive: two real projects" },
+        { "ruleId": "typosquat", "severity": "low", "packageName": "cattrs", "target": "attrs", "judgement": "false positive: two real projects" },
+        { "ruleId": "typosquat", "severity": "low", "packageName": "encutils", "target": "docutils", "judgement": "false positive: two real projects" },
+        { "ruleId": "install-script", "severity": "low", "count": 5, "ecosystem": "npm", "judgement": "npm, unchanged by this work" }
+      ],
+      "namesLine": "names: npm 53 checked (corpus, registry); pypi 301 of 301 checked for existence (PyPI), resemblance checked against this repository's own Python names"
+    },
+    {
+      "repo": "celery/celery",
+      "url": "https://github.com/celery/celery",
+      "sha": "b4178df9244a83ece9242dbf60a1f149bb01d486",
+      "pythonFilesRead": {
+        "requirements": "examples/django/requirements.txt, 11 files directly under requirements/, and 25 under requirements/extras/ and requirements/deps/ reached only through -r",
+        "pyproject": ["pyproject.toml"],
+        "lockfiles": []
+      },
+      "pypi": {
+        "manifests": 38,
+        "lockfiles": 0,
+        "candidates": 65,
+        "existenceChecked": 65,
+        "notChecked": { "offline": 0, "budget": 0, "unreachable": 0, "privateIndex": 0, "internal": 0, "lockfileUnreadable": 0 },
+        "excluded": { "url": 0, "vcs": 3, "path": 0, "editable": 0, "constraint": 0, "self": 0, "invalidName": 0, "unrecognised": 0 }
+      },
+      "online": { "budgetMs": 20000, "lookupsAttempted": 65, "lookupsSkippedByDeadline": 0, "deadlineExceeded": false },
+      "wallMs": 3020,
+      "pypiStatuses": { "200": 65 },
+      "largestPypiBody": { "project": "grpcio", "bytes": 9135219, "ms": 49 },
+      "slowestPypiAnswer": { "project": "pytest-click", "bytes": 15555, "ms": 111 },
+      "bodyTimeouts": [],
+      "findings": [
+        { "ruleId": "lockfile-tamper", "severity": "critical", "count": 3, "manifestPath": "requirements/dev.txt", "packageNames": ["github.com/py-amqp.git", "github.com/kombu.git", "github.com/billiard.git"], "judgement": "expected new block: git+https lines with no #egg=, dropped before 0.13.0, now url or git dependencies named by host and last path segment" }
+      ],
+      "namesLine": "names: pypi 65 of 65 checked for existence (PyPI), resemblance checked against this repository's own Python names; 3 url, path or vcs requirements excluded"
+    }
+  ],
+  "base": [
+    { "repo": "pallets/flask", "commit": "ff6fa22f4d961a28567db11430208b964620f511", "against": "its parent", "candidates": 0, "lookupsAttempted": 0, "findings": 0, "exitCode": 0 },
+    { "repo": "pydantic/pydantic", "commit": "e2ac21dcd66fc682f8a50f6e179dbd95fa4b44ac", "against": "its parent", "candidates": 0, "lookupsAttempted": 0, "findings": 0, "exitCode": 0, "note": "the first run of this commit raised a tamper critical for the untouched pydantic-docs git source: the [tool.uv.sources] rewrite was applied to the judged side only. Fixed (every comparison side gets the same rewrite) and re-run; this is the fixed result" },
+    { "repo": "python-poetry/poetry", "commit": "32356ae238b6ed2ca08aa87a74ad9b108ee2c6f0", "against": "its parent", "candidates": 0, "lookupsAttempted": 0, "findings": 0, "exitCode": 0 },
+    { "repo": "pypi/warehouse", "commit": "73c5a1f376e6a66fd7b845660af84a2d1e6f9daf", "against": "its parent", "candidates": 0, "lookupsAttempted": 0, "findings": 0, "exitCode": 0 },
+    { "repo": "celery/celery", "commit": "a5ac9c42c66c7c6d7eddca7dffd5f37712d8e1c2", "against": "its parent", "candidates": 0, "lookupsAttempted": 0, "findings": 0, "exitCode": 0 }
+  ],
+  "planted": {
+    "repo": "pallets/flask",
+    "on": "d086db856be187255b8ec61ef409357393020f32",
+    "plants": [
+      "requirements-planted.txt: depguard-planted-absent-7f3a9c, werkzueg, -e git+https://github.com/pallets/werkzeug.git#egg=werkzeug, ./vendor/pkg, --requirement=planted-extra.txt",
+      "requirements-option.txt: depguard-planted-absent-7f3a9c==1.0 --config-settings=x=a/b",
+      "requirements-recased.txt: Depguard_Planted.Absent-7F3A9C",
+      "planted-extra.txt (no pattern matches it): depguard-planted-absent-7f3a9c",
+      "uv.lock: a lockfile-only [[package]] depguard-planted-lockonly-7f3a9c (a second absent name, so the entry is genuinely lockfile-only: the first is declared by a manifest in the same directory, which anchors it there)"
+    ],
+    "online": {
+      "pypiRequests": 3,
+      "pypiStatuses": { "404": 3 },
+      "findings": [
+        "unknown-package critical depguard-planted-absent-7f3a9c at requirements-planted.txt, requirements-option.txt, requirements-recased.txt and planted-extra.txt: one lookup, one finding per anchor",
+        "unknown-package critical werkzueg at requirements-planted.txt, and typosquat low werkzueg naming werkzeug: true positive",
+        "unknown-package critical depguard-planted-lockonly-7f3a9c anchored to uv.lock",
+        "lockfile-tamper critical werkzeug at requirements-planted.txt: the planted -e git+ line, a git source added on the head"
+      ],
+      "excluded": { "editable": 1, "path": 2 },
+      "exitCode": 1,
+      "namesLine": "names: pypi 3 of 3 checked for existence (PyPI), resemblance checked against this repository's own Python names; 3 url, path or vcs requirements excluded"
+    },
+    "networkBlocked": {
+      "pypiFindings": "none: no unknown-package finding",
+      "diagnostics": { "online-check-unreachable": 3 },
+      "exitCode": 1,
+      "exitNote": "the design expected exit 0; the exit 1 comes from the offline lockfile-tamper finding on the planted -e git+ line, which no network state changes. No online-derived finding exists",
+      "namesLine": "names: pypi 0 of 3 checked for existence (PyPI); 3 not checked: 3 PyPI unreachable; resemblance checked against this repository's own Python names; 3 url, path or vcs requirements excluded"
+    }
+  },
+  "zeroReleaseProject": {
+    "question": "does the JSON API answer 404 or 2xx for a registered project with zero releases",
+    "answer": "404, read from warehouse's own JSON view at f9ce83647318089c485c3d66378d559f0e7cdeed (warehouse/legacy/api/json.py, latest_release_factory): the project route resolves through the latest release, and a project with no release, or with every release or the project itself in quarantine, raises NoResultFound and returns HTTPNotFound. Such a name is therefore a critical unknown-package although it is registered; it is also not installable by pip, so the finding does not block an install that would have worked. No live example was located in this run, so this is a source reading, not an observed answer",
+    "related": "the same view answers 301 for a name that is not in normalised form, which is why dep-guard always asks for the normalised name and never follows a redirect; yanked releases are still served (open point 3)"
+  },
+  "typosquatJudgements": { "lowFindings": 8, "truePositives": 1, "falsePositives": 7, "note": "the one true positive is the planted werkzueg; every unplanted one is a pair of real neighbouring projects" },
+  "unknownPackageFalsePositives": 0
+}

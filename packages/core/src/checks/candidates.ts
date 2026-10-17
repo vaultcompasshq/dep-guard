@@ -1,5 +1,6 @@
 import { acceptedTransitiveAliasTarget, type DepChange } from '../delta.js';
-import type { Protocol } from '../manifest.js';
+import type { DepType, Protocol } from '../manifest.js';
+import { PYTHON_EXCLUSION_CLASSES, type PythonExclusionClass } from '../python-types.js';
 import type { CheckContext } from './types.js';
 
 // The dependencies the two name-based checks (existence, typosquat) judge,
@@ -40,7 +41,62 @@ export interface NewName {
   registryName: string;
 }
 
-const NAME_PROTOCOLS: ReadonlySet<Protocol> = new Set<Protocol>(['registry', 'alias']);
+// One new Python name, from a manifest line or a lockfile entry. `name` is
+// the PEP 503 normalised form, the only form any check compares;
+// `written` is for display.
+export interface PypiCandidate {
+  name: string;
+  written: string;
+  anchorPath: string;
+  source: 'manifest' | 'lockfile';
+  lockfilePath?: string;
+  specifier: string;
+  depType: DepType;
+  // A non-PyPI registry origin the lockfile itself records, or null.
+  recordedOrigin: string | null;
+}
+
+export interface NameCandidates {
+  npm: NewName[];
+  pypi: PypiCandidate[];
+  // What every Python file on the judged side excluded from the name
+  // checks, by class. Counted where the parser decided (python-delta.ts),
+  // so a line that never became a dependency is counted too.
+  excluded: Record<PythonExclusionClass, number>;
+}
+
+/**
+ * Which ecosystem's name checks a protocol feeds, or null for one that is
+ * not a registry name at all. Every Protocol value has a case and the
+ * default is `never`, so a protocol added later is a compile error until
+ * someone decides where it goes: the next silent filter cannot be written.
+ */
+export function nameEcosystemOf(protocol: Protocol): 'npm' | 'pypi' | null {
+  switch (protocol) {
+    case 'registry':
+    case 'alias':
+      return 'npm';
+    case 'pypi':
+      return 'pypi';
+    // Local wiring: never installed from a registry, and never in the
+    // delta at all (delta.ts EXEMPT_PROTOCOLS).
+    case 'workspace':
+    case 'catalog':
+    case 'link':
+    case 'patch':
+    case 'file':
+      return null;
+    // Not registry names: the tamper check's git-source and url-source
+    // signals judge these instead.
+    case 'git':
+    case 'url':
+      return null;
+    default: {
+      const unclassified: never = protocol;
+      return unclassified;
+    }
+  }
+}
 
 function noteEmptyAlias(ctx: CheckContext, change: DepChange): void {
   const diagnostic = {
@@ -110,12 +166,89 @@ function acceptedAliasTargets(ctx: CheckContext): DepChange[] {
   return changes;
 }
 
+function emptyExcluded(): Record<PythonExclusionClass, number> {
+  const counts = {} as Record<PythonExclusionClass, number>;
+  for (const cls of PYTHON_EXCLUSION_CLASSES) {
+    counts[cls] = 0;
+  }
+  return counts;
+}
+
+// The Python name candidates: added pypi manifest dependencies, then new
+// lockfile names, one per anchor and normalised name. The anchor of a
+// lockfile name a manifest in its directory declares is that manifest
+// (python-delta.ts), so the two walks give one candidate there.
+function pypiCandidates(ctx: CheckContext, manifestChanges: readonly DepChange[]): PypiCandidate[] {
+  const seen = new Set<string>();
+  const candidates: PypiCandidate[] = [];
+  const push = (candidate: PypiCandidate): void => {
+    const key = JSON.stringify([candidate.anchorPath, candidate.name]);
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    candidates.push(candidate);
+  };
+  for (const change of manifestChanges) {
+    if (change.kind !== 'added') {
+      // A changed specifier is not re-checked, as for npm.
+      continue;
+    }
+    push({
+      name: change.registryName,
+      written: change.name,
+      anchorPath: change.manifestPath,
+      source: 'manifest',
+      specifier: change.specifier,
+      depType: change.depType,
+      recordedOrigin: null,
+    });
+  }
+  for (const lockName of ctx.delta.python?.lockNames ?? []) {
+    push({
+      name: lockName.name,
+      written: lockName.written,
+      anchorPath: lockName.anchorPath,
+      source: lockName.anchorPath === lockName.lockfilePath ? 'lockfile' : 'manifest',
+      lockfilePath: lockName.lockfilePath,
+      specifier: lockName.version === null ? '*' : `==${lockName.version}`,
+      depType: 'dependencies',
+      recordedOrigin: lockName.recordedOrigin,
+    });
+  }
+  return candidates;
+}
+
+/**
+ * Every name candidate of the run, per ecosystem, and every Python
+ * exclusion counted. newRegistryNames below is the npm view of it, so no
+ * Python name can reach the npm corpus, the npm registry or the npm
+ * downloads API.
+ */
+export function newNames(ctx: CheckContext): NameCandidates {
+  const pypiChanges: DepChange[] = [];
+  for (const change of ctx.delta.changes) {
+    if (nameEcosystemOf(change.protocol) === 'pypi') {
+      pypiChanges.push(change);
+    }
+  }
+  return {
+    npm: npmNames(ctx),
+    pypi: pypiCandidates(ctx, pypiChanges),
+    excluded: ctx.delta.python?.exclusions ?? emptyExcluded(),
+  };
+}
+
 export function newRegistryNames(ctx: CheckContext): NewName[] {
+  return npmNames(ctx);
+}
+
+function npmNames(ctx: CheckContext): NewName[] {
   const seen = new Set<string>();
   const names: NewName[] = [];
 
   for (const change of [...ctx.delta.changes, ...acceptedAliasTargets(ctx)]) {
-    if (!NAME_PROTOCOLS.has(change.protocol)) {
+    if (nameEcosystemOf(change.protocol) !== 'npm') {
       continue;
     }
     if (change.kind !== 'added' && change.protocol !== 'alias') {

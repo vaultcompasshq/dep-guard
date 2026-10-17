@@ -1569,7 +1569,11 @@ Current diagnostic codes: `audit-anchor-differs`,
 `pnpm-multi-document-lockfile`,
 `pnpm-no-install-script-flag`, `publish-age-allowed`,
 `publish-age-package-unknown`, `publish-age-private-origin-skipped`,
-`publish-age-version-unknown`, `registered-squat-private-origin-skipped`,
+`publish-age-version-unknown`, `pypi-names-not-checked`,
+`pypi-private-index-skipped`, `python-lockfile-unreadable`,
+`python-index-unread-comparison-side`, `python-name-invalid`,
+`python-workspace-unconfirmed`,
+`registered-squat-private-origin-skipped`, `requirements-line-unread`,
 `symlink-cycle`, `symlinked-input-comparison-side`,
 `tamper-resolution-unreadable`,
 `typosquat-asymmetry-private-origin-skipped`,
@@ -1644,6 +1648,19 @@ lockfile; a config file that is present but broken is not an absent one.
 
 The codes, and what each one means:
 
+- `python-index-invalid` (0.13.0) -- on a `--trust-base` run, the trust
+  base copy of a Python file the run reads is a gitlink or another non-file
+  other than a symlink, or does not parse. Its index declarations are a
+  control input, and no declarations is the loosest setting, not the safest
+  (`python-trust.ts`; test `a base copy that is a gitlink still stops a
+  --trust-base run`, scan-pypi.test.ts). A base copy that is a symlink is
+  ruled differently, by the screenSymlinkedInputs rule that a comparison
+  side still holding a link does not block the pull request replacing it:
+  the base then contributes no declarations and no workspace members for
+  that path, so every name in it is looked up (fail closed), and
+  `python-index-unread-comparison-side` names the file (test `a PR that
+  replaces a symlinked base requirements.txt with a regular file passes`).
+  A symlink on the judged side is still `symlinked-input`.
 - `config-invalid` -- a config file is present but unreadable, not JSON,
   not an object, carries an unknown key, or holds a value the gate cannot
   honour. Includes an `ignorePaths` entry that would match everything: a
@@ -1741,7 +1758,7 @@ a whole subsystem rather than one code path.
 
 Degrading means the affected check contributes nothing it could not
 establish offline, and nothing it did establish is taken away. The
-one online step that removes a finding is described in "Standing a
+one online step that lowers a severity is described in "Standing a
 finding down is a different act from suppressing one" below, and it is
 an exception to the second half of that sentence rather than a
 counter-example to it. The
@@ -1880,8 +1897,11 @@ that fails to parse is discarded and rebuilt from an empty state, not a
 `resolveUnknownPackages` (online/unknown-package.ts) is the only thing in
 this engine that LOWERS a severity on the strength of a network answer.
 It does not remove findings, and neither does anything else in the online
-subsystem. The offline checks decide WHAT is reported; the network only
-ever adjusts how loudly. That sentence is the invariant, and everything
+subsystem. The network never removes a finding and never lowers one
+except through `resolveUnknownPackages`. (An earlier version of this
+sentence said the network only ever adjusts how loudly; registered-squat
+and publish-age already added findings, and the PyPI existence step of
+0.13.0 adds a third kind.) That sentence is the invariant, and everything
 below is why it is drawn there rather than one step further.
 
 unknown-package asserts one specific thing: this name was not on the
@@ -2021,18 +2041,26 @@ so it has exactly one point at which it could stop, and that point is
 before it starts. Adding a deadline parameter to it would be a second
 copy of a decision with only one branch.
 
-The order the four steps run in is a priority decision about how the
+The order the five steps run in is a priority decision about how the
 budget is spent, and it is written down because it looks arbitrary and is
-not. unknown-package resolution runs FIRST because it is the only step
-that can withdraw a false positive from the check that actually blocks,
+not (`enrichOnline`, scan.ts). npm unknown-package resolution runs FIRST
+because it is the only step that can stand a blocking false positive down,
 and the only one whose absence gets steadily worse as a release ages away
-from its corpus walk. The other three (typosquat asymmetry, registered-squat,
-publish-age, in that order) only ever add or escalate, so a budget spent
-before them costs a signal that would not have existed offline either; a
-budget spent before the first one leaves a user holding a blocking finding
-they have no way to clear. publish-age runs LAST among the three
-add-or-escalate steps for no reason beyond the order they were written in
--- nothing orders them against each other, only against unknown-package.
+from its corpus walk; a budget spent before it leaves a user holding a
+blocking finding they have no way to clear. PyPI existence runs SECOND
+(0.13.0). The three npm steps after it (typosquat asymmetry,
+registered-squat, publish-age, in that order) add or escalate a signal that
+does not exist offline, so putting PyPI ahead of them is a trade between two
+online-only signals, and the cost is stated rather than hidden: on a tight
+budget an npm registered-squat or publish-age finding can be lost to PyPI
+lookups, and those steps' `online-deadline-exceeded` diagnostics say so. It
+is decided this way because the PyPI step is the only existence check a
+Python name has at all, offline or online, while an npm name has already
+been judged offline by the corpus and the popularity list before step 3
+runs. publish-age runs LAST among the three npm add-or-escalate steps for
+no reason beyond the order they were written in -- nothing orders them
+against each other. Test: `step order: PyPI runs after npm unknown-package
+resolution and before asymmetry` (scan-pypi.test.ts).
 
 The budget is a constant (`DEFAULT_ONLINE_BUDGET_MS`, twenty seconds) and
 not a config key today. If it ever becomes one, it becomes a config key
@@ -3609,3 +3637,120 @@ read` and `a committed node_modules package with a lockfile beside it is
 still not read`. Mutation-checked: restoring the drop turns the first three
 red, dropping the member rule turns the two member tests red, and dropping
 the node_modules exclusion turns its control red.
+
+## Python names are checked, and every Python requirement is counted (0.13.0)
+
+Before 0.13.0 Python manifests were read and every name check skipped them
+without a word: `NAME_PROTOCOLS` admitted only `registry` and `alias`, so a
+`pypi` dependency dropped out before any check saw it, and nothing recorded
+the drop. That is the defect class 0.12.0 closed three times, a filter
+deciding coverage with no diagnostic. Design:
+`docs/design/2026-10-17-python-name-checks-pypi.md`.
+
+- A Python project name is compared only in its PEP 503 normalised form,
+  for lookup, delta keys, dedupe, distance, allow and identity; the written
+  form is display only (`python-names.ts`; `registryName` of a `pypi`
+  dependency; `depKey` in `delta.ts`; tests `re-casing a name is not an
+  added dependency`, python-candidates.test.ts, and `normalised exists,
+  written does not`, scan-pypi.test.ts).
+- Every dependency is either a name candidate for exactly one ecosystem or
+  counted under a named exclusion; no protocol is dropped without a count,
+  and a Python name never reaches the npm corpus, registry or downloads API
+  (`nameEcosystemOf` in `checks/candidates.ts`, a switch with a `never`
+  default; `newRegistryNames` is the npm view of `newNames`; tests `every
+  protocol is classified`, python-candidates.test.ts, and `a Python name
+  never leaves for npm, nor does a Python resemblance`, scan-pypi.test.ts).
+- A PyPI 404 is a critical `unknown-package`; a 2xx vouches only that the
+  project exists; every other answer, and a spent budget, leaves the name
+  unchecked with a diagnostic and a count, never a finding
+  (`online/pypi-client.ts`, `online/pypi-existence.ts`).
+- PyPI existence is asked live and never read from or written to the
+  online cache (`liveFetchPypiProject` in scan.ts; test `a cache never
+  serves PyPI existence`). Any later PyPI cache entry uses a
+  `pypi:<kind>:<normalised>` key; the unprefixed `downloads:`, `created:`
+  and `version-times:` keys are npm keys.
+- Python index declarations, per-name index mappings included, are control
+  inputs: on a `--trust-base` run they are read from the trust base, a
+  head-side change is a proposal, and a base copy that is a gitlink or does
+  not parse is exit 2 (a symlinked base copy contributes no declarations,
+  above). A lockfile's recorded source skips an entry only when it equals a
+  declared origin (`python-trust.ts`, `PythonIndexRule` in
+  `python-sources.ts`). A name skipped at one anchor and looked up at
+  another is not reported as not checked (test `a name looked up at another
+  anchor is not counted as skipped`).
+- A `[tool.uv.sources]` entry of any kind applies only to its declaring
+  project and, from a workspace root, to members under that root's
+  `members` and `exclude`, read from the trust base where the base has the
+  root. For each dependency the NEAREST declaring file decides, as uv
+  decides: the manifest's own sources first, then the deepest root whose
+  scope covers it. An earlier version took whichever declaring file the
+  manifest list put first, so a root sorting before `services/` hid a
+  member's own git override (tests under `uv source precedence: the nearest
+  declaring file wins`). A `path` or `editable` source exempts only when its
+  target is a parsed project of that name, or an archive file that exists
+  on that side and whose wheel or sdist distribution name normalises to
+  that name; a workspace claim needs a parsed member of that name under
+  those `members` (`applyUvSources` in `python-sources.ts`; test `an
+  archive target that is not on the judged side exempts nothing`). Every
+  comparison side gets the same rewrite, by its own sources and members,
+  before the delta is computed: applied to the judged side alone, an
+  untouched git-sourced name read as moved from pypi to git and raised a
+  tamper critical on every pull request, which the real-registry validation
+  found (tests `an unchanged git source is not a change on a --base run`,
+  and, for a trust base that is a different tree from the `--base` side,
+  `an unchanged git source is the same non-PyPI dependency on the trust
+  base as well`, scan-pypi.test.ts).
+- What a diagnostic prints of a string that failed the Python name pattern
+  is only its leading run of name characters, never the rest: an invalid
+  requirement string can carry a URL with a token in its userinfo
+  (`invalidNameFragment` in `python-names.ts`; test `a token after the name
+  of an invalid PEP 508 string reaches no output surface`). The same holds
+  for every name a `python-lockfile-unreadable` reason quotes (one test row
+  per reason, `... never prints the token in python-lockfile-unreadable`)
+  and, by `pathFragment`, for an unread `-r` target (test `an unread -r
+  target prints only its path characters`). A symlinked base copy of a
+  workspace root contributes no `members` (test `contributes no workspace
+  members: a root path source no longer reaches a member`).
+- A requirements line is classified in pip's order: URL and direct
+  reference first (pip's `is_url` scheme set, `ftp:` and `svn:` included),
+  then the archive test, case-insensitive as pip's is, on the
+  extras-stripped string with its version specifier kept, then the path
+  test on the requirement token. Every requirements line is a dependency, a
+  recognised option (any spelling or unique abbreviation pip accepts), or
+  counted under `excluded.unrecognised` (`python-requirement.ts`,
+  `python-options.ts`, `parseRequirements`).
+- Python `allow` and `internalPrefixes` entries carry a `pypi:` prefix; a
+  bare entry is npm-only (`pypiAllowClears` and `isPypiInternalName` in
+  `checks/allow.ts`).
+- Python typosquat compares only against Python names the repository
+  itself declares, on either side; no popularity list is consulted
+  (`checks/python-typosquat.ts`).
+
+Residuals, recorded rather than closed:
+
+- A head-added or head-renamed path or editable target inside the
+  declaring project earns the exemption: the target is subject content,
+  read from the judged side. This is the same class as the npm residual in
+  "A control input is not read from the tree being judged" (a real
+  workspace member added under a glob the base already declares).
+- A target under a skipped directory name (`vendor`, `build` and the rest)
+  is never parsed, so a vendored path dependency gets a false critical.
+  That fails closed: loud, never silent.
+- Index declarations are read per file and not carried along the `-r`
+  include graph, though pip applies an index option from any file in the
+  chain to the whole install; an including file's private names are looked
+  up and give a false critical, which fails loud. Repeat the index line in
+  the including file on the base, or use `internalPrefixes`.
+- A user-level `pip.conf`, `PIP_INDEX_URL`, `UV_INDEX_URL` or CI-level index
+  setting is invisible; such names belong under `internalPrefixes`.
+- A requirements file no pattern matches and no `-r` line reaches is not
+  read.
+- A `[tool.uv.sources]` exemption, even a confirmed one, holds for uv only:
+  `pip install .`, `uv build --no-sources`, other build frontends and every
+  downstream consumer resolve the name from PyPI.
+- A uv workspace root the pull request adds itself has no base copy, so
+  its `members` and `exclude` are read from the head, the same residual the
+  npm link rule records for an install root a pull request adds.
+- A head-written lockfile entry that claims a private source the base
+  already declares is skipped; only a Python lockfile tamper rule could
+  judge whether it should have moved there.

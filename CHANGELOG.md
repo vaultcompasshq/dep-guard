@@ -10,6 +10,80 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+Python dependency names are now checked (targeted at 0.13.0). What can
+newly block, and how to clear each:
+
+- Findings (exit 1) from unknown-package, critical, for a Python name PyPI
+  answers 404 for, on a run with `--online`. Names come from requirements
+  files, `pyproject.toml`, `Pipfile`, `poetry.lock`, `uv.lock`, `pdm.lock`
+  and `Pipfile.lock`, compared in PEP 503 normalised form. A name that only
+  resolves from a private index is skipped when the manifest declares that
+  index (on a `--trust-base` run, when the base declares it); a lockfile's
+  own recorded source skips an entry only when it matches such a
+  declaration. Otherwise list the name under `internalPrefixes` with an
+  entry of the form `pypi:<prefix>`, or clear one finding with an `allow`
+  entry of the form `pypi:<name>`. Bare `allow` and `internalPrefixes`
+  entries stay npm-only.
+- Findings (exit 1) from lockfile-tamper git-source and url-source for
+  Python sources dep-guard did not read before: a git or url line in a
+  requirements file it did not read (a `.txt` basename starting with
+  `requirements` or ending in `requirements.txt`, a `.txt` file directly in
+  a directory named `requirements`, `requirements.in`, and files reached by
+  `-r` in any spelling pip accepts); a URL line with no `#egg=`; a git or
+  path entry in a `Pipfile`; a `[tool.uv.sources]` git or url rewrite; and
+  a `name @ git+` string in `build-system.requires`, `[dependency-groups]`,
+  or the uv and pdm dev tables.
+- Could-not-run (exit 2, `manifest-parse`) for a `Pipfile` that is not
+  valid TOML, or that is valid TOML with a malformed `[[source]]` or a
+  package entry that is neither a string nor a table; for a repository
+  `uv.toml` that is not valid TOML or has a malformed index setting; and
+  for a malformed `build-system.requires`, `[dependency-groups]`, uv or pdm
+  dev table, `[tool.uv.sources]` entry, `[tool.uv.workspace]` table or
+  package-index table in a `pyproject.toml`. Fix the file, or cover it with
+  `ignorePaths` on the base branch.
+- Could-not-run (exit 2, `symlinked-input`) for a newly read requirements
+  file name (`requirements-dev.txt` and the rest above), a `Pipfile` or a
+  `uv.toml` that is a symlink on the side being judged, as
+  `requirements.txt` and `pyproject.toml` already were. Replace the link
+  with a regular file; a comparison side or trust base that still holds the
+  link does not block that pull request.
+- Could-not-run (exit 2, `python-index-invalid`) on a `--trust-base` run
+  when the base copy of a Python file the run reads (and so of its index
+  declarations) is a gitlink or another non-file, or does not parse. A base
+  copy that is a symlink does not stop the run: it contributes no index
+  declarations, so every name in that file is looked up, and
+  `python-index-unread-comparison-side` names it.
+
+### Added
+
+- Every run that reads a Python file prints a `names:` line saying, per
+  ecosystem, how many new names were checked and how, and how many were
+  read but not checked and why; the JSON result carries the same counts
+  under `run.ecosystems`, always present. An offline run with Python names
+  raises `pypi-names-not-checked`.
+- Python typosquat at low, against the other Python names the same
+  repository declares. No PyPI popularity list ships.
+- New diagnostics: `pypi-names-not-checked`, `pypi-private-index-skipped`,
+  `python-index-unread-comparison-side`, `python-lockfile-unreadable`,
+  `python-name-invalid`, `python-workspace-unconfirmed`,
+  `requirements-line-unread`. A PyPI outage gives one
+  `online-check-unreachable` for the PyPI step, with the count and the first
+  names, not one per name.
+
+### Changed
+
+- PyPI lookups share the one online budget and run second, after npm
+  unknown-package resolution; names the budget did not reach are listed in
+  `online-deadline-exceeded`. A PyPI outage or a spent budget never fails a
+  run. `run.online` totals now include PyPI lookups.
+- A bare path or archive file name in a requirements file is no longer read
+  as a package name. A requirements line that is neither a dependency nor a
+  recognised option is counted and named in `requirements-line-unread`
+  instead of being dropped.
+- A Python dependency re-cased or re-separated (`Flask` to `flask`,
+  `python_dateutil` to `python-dateutil`) is the same dependency, not an
+  added one.
+
 ### Security
 
 - The release workflow now installs, builds, tests and packs in a job that

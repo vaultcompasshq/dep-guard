@@ -472,7 +472,14 @@ describe('an ignored Python manifest that parses is still read', () => {
     const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
     const states = await loadStates(repo, { kind: 'audit' });
 
-    expect(result.run.diagnostics.find((entry) => entry.message.includes('backend/requirements.txt'))).toBeUndefined();
+    // The offline pypi-names-not-checked note names the file because its
+    // name WAS read (0.13.0); what must be absent is any note saying it
+    // was not parsed.
+    expect(
+      result.run.diagnostics.find(
+        (entry) => entry.code !== 'pypi-names-not-checked' && entry.message.includes('backend/requirements.txt')
+      )
+    ).toBeUndefined();
     expect(states.after.manifests.map((entry) => entry.path)).toContain('backend/requirements.txt');
   });
 });

@@ -93,7 +93,9 @@ function buildKeyboardNeighbours(): Map<string, string[]> {
   return neighbours;
 }
 
-const KEYBOARD_NEIGHBOURS = buildKeyboardNeighbours();
+// Exported for checks/python-typosquat.ts, which applies the same
+// neighbouring-key rule to Python names.
+export const KEYBOARD_NEIGHBOURS = buildKeyboardNeighbours();
 
 // '-' and '_' are the two separators npm names use interchangeably.
 // Written as split/join rather than a replace with a pattern so no regular

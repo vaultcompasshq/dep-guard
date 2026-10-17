@@ -7,7 +7,11 @@ import { MissingPackagesMapError, parseNpmLockfile } from './lockfiles/npm.js';
 import { parseOnlyBuilt, parsePnpmLockfile } from './lockfiles/pnpm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
 import { parseManifest, workspacePatternsOf, type ParsedManifest } from './manifest.js';
-import { isPythonManifestPath, parsePyproject, parseRequirements } from './python-manifest.js';
+import { isPythonLockfilePath, parsePythonLockfile, pythonLockfileFormat } from './python-lockfiles.js';
+import { isPythonManifestPath, parsePythonManifest, parseRequirements } from './python-manifest.js';
+import { isArchiveFile } from './python-requirement.js';
+import { pathFragment } from './python-names.js';
+import type { PythonLockfile, PythonManifestInfo } from './python-types.js';
 import {
   isReadLockfile,
   parseNpmrcDefaultRegistry,
@@ -206,14 +210,97 @@ function isProjectManifestPath(relPath: string): boolean {
 }
 
 function parseProjectManifest(relPath: string, content: string): ParsedManifest {
-  const name = baseName(relPath);
-  if (name === PYPROJECT_TOML) {
-    return parsePyproject(relPath, content);
-  }
-  if (name === REQUIREMENTS_TXT) {
-    return parseRequirements(relPath, content);
+  if (isPythonManifestPath(relPath)) {
+    return parsePythonManifest(relPath, content);
   }
   return parseManifest(relPath, content);
+}
+
+// How deep a chain of -r and -c includes is followed. pip itself has no
+// limit; a chain this long is either a cycle (stopped anyway, since each
+// file is read once) or not something a real repository writes.
+const MAX_INCLUDE_DEPTH = 8;
+
+function includeNote(info: PythonManifestInfo, line: number, detail: string): void {
+  info.unread.push({ line, reason: 'include-unread', detail });
+  info.exclusions.push({ cls: 'unrecognised', line });
+}
+
+// Follows the -r and -c lines of every requirements file read so far, the
+// way pip does: relative to the including file, at most MAX_INCLUDE_DEPTH
+// levels, each file read once. A target outside the repository, a symlink,
+// or a file this side does not have is not read, and the including line is
+// counted and named instead (requirements-line-unread). A file reached
+// only through -c is read for its index lines, and its names are counted
+// under excluded.constraint rather than checked: a constraint never
+// installs a name by itself.
+async function followRequirementIncludes(source: FileSource, manifests: ParsedManifest[]): Promise<void> {
+  const known = new Set(manifests.map((manifest) => manifest.path));
+  let frontier = manifests.filter((manifest) => manifest.python?.kind === 'requirements');
+  for (let depth = 1; frontier.length > 0; depth += 1) {
+    const next: ParsedManifest[] = [];
+    for (const manifest of frontier) {
+      const info = manifest.python;
+      if (info === undefined) {
+        continue;
+      }
+      for (const include of info.includes) {
+        const dir = parentDir(manifest.path);
+        const joined = path.posix.normalize(dir === '' ? include.target : `${dir}/${include.target}`);
+        // Only path characters of the target are echoed (pathFragment), as
+        // for an invalid name: the target is head-written text.
+        const shown = pathFragment(include.target);
+        if (path.posix.isAbsolute(joined) || joined === '..' || joined.startsWith('../')) {
+          includeNote(info, include.line, `"${shown}" is outside the repository`);
+          continue;
+        }
+        if (known.has(joined)) {
+          continue;
+        }
+        if (depth > MAX_INCLUDE_DEPTH) {
+          includeNote(info, include.line, `"${shown}" is more than ${MAX_INCLUDE_DEPTH} includes deep`);
+          continue;
+        }
+        if (await source.isSymlink(joined)) {
+          includeNote(info, include.line, `"${shown}" is a symlink, which is never followed`);
+          continue;
+        }
+        const content = await source.read(joined);
+        if (content === null) {
+          includeNote(info, include.line, `"${shown}" is not a file on this side`);
+          continue;
+        }
+        known.add(joined);
+        const parsed = parseRequirements(joined, content, include.constraint ? { constraint: true } : {});
+        manifests.push(parsed);
+        next.push(parsed);
+      }
+    }
+    frontier = next;
+  }
+}
+
+// Every Python lockfile this side has, read for names. A symlink is never
+// read; it is reported unreadable like a file that does not parse.
+async function loadPythonLockfiles(source: FileSource, files: readonly string[]): Promise<PythonLockfile[]> {
+  const lockfiles: PythonLockfile[] = [];
+  for (const relPath of files.filter(isPythonLockfilePath).sort()) {
+    if (await source.isSymlink(relPath)) {
+      lockfiles.push({
+        path: relPath,
+        format: pythonLockfileFormat(relPath) ?? 'uv',
+        entries: [],
+        unreadable: 'it is a symlink, which is never read',
+        invalidNames: [],
+      });
+      continue;
+    }
+    const content = await source.read(relPath);
+    if (content !== null) {
+      lockfiles.push(parsePythonLockfile(relPath, content));
+    }
+  }
+  return lockfiles;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1226,6 +1313,25 @@ function partitionWorkspacePatterns(
 // read more (MB2, reading members), "excludes" where it is to exempt less
 // (B1, confirming a link). No directory with a node_modules segment is a
 // member, as in discoverWorkspaceDirs.
+/**
+ * Whether a directory, relative to a uv workspace root, is a member under
+ * that root's [tool.uv.workspace] `members` and not under its `exclude`,
+ * with the same exact-matching rule the npm workspace patterns use. A
+ * member pattern that cannot be matched exactly covers nothing, and an
+ * exclude pattern that cannot be matched exactly excludes: both read as
+ * "not a member", which exempts less.
+ */
+export function uvWorkspaceCovers(
+  members: readonly string[],
+  exclude: readonly string[],
+  relDir: string
+): boolean {
+  if (!members.some((pattern) => workspacePatternsCover([pattern], relDir, 'excludes'))) {
+    return false;
+  }
+  return !exclude.some((pattern) => workspacePatternsCover([pattern], relDir, 'covers'));
+}
+
 function workspacePatternsCover(
   patterns: readonly string[],
   relDir: string,
@@ -1772,7 +1878,11 @@ async function loadState(
   prefix: string,
   isIgnoredPath: (relPath: string) => boolean = () => false
 ): Promise<RepoState> {
-  const filesInPrefix = (await source.listFiles()).filter((relPath) => underPrefix(relPath, prefix));
+  const listedFiles = await source.listFiles();
+  const filesInPrefix = listedFiles.filter((relPath) => underPrefix(relPath, prefix));
+  // A [tool.uv.sources] path to an archive exempts only when the file is
+  // really on this side (python-sources.ts, pathTargetConfirms).
+  const pythonArchiveFiles = listedFiles.filter(isArchiveFile);
   // Lockfiles are never dropped for a directory name, and neither is a
   // manifest with a lockfile beside it: that directory is an install root,
   // a project of its own, whatever it is called. Reading its lockfile while
@@ -1979,6 +2089,8 @@ async function loadState(
       });
     }
   }
+  await followRequirementIncludes(source, manifests);
+  const pythonLockfiles = await loadPythonLockfiles(source, files);
 
   const lockfileDirs = uniquePaths(listedLockfiles.map(parentDir)).sort((left, right) => {
     if (left === right) {
@@ -2074,6 +2186,8 @@ async function loadState(
     // confirmWorkspaceLocalNames.
     workspaceLocalNames: new Set([...workspaceLocalNamesByDir.values()].flatMap((names) => [...names])),
     workspaceLocalNamesByDir,
+    pythonLockfiles,
+    pythonArchiveFiles,
   };
 }
 
