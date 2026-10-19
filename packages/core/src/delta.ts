@@ -21,6 +21,18 @@ export interface DepChange {
   // when lockfiles sit in several directories.
   lockfilePath?: string;
   lockfileFormat?: LockfileFormat;
+  // True when the dependency was declared by a Python manifest
+  // (requirements file, pyproject.toml, Pipfile): no npm or pnpm lockfile
+  // records it.
+  python?: true;
+  // Python only, carried from ManifestDep.pipGrammar: the specifier is a URL
+  // the user wrote, in pip's grammar, where a VCS ref is what follows the
+  // last "@" of the URL path and the "#" fragment is never a ref. Absent on
+  // a "<url>#<rev>" dep-guard built from a poetry, uv or Pipfile table.
+  pipGrammar?: true;
+  // Python only, carried from ManifestDep.gitTable: a git table whose pin is
+  // judged from its own rev key alone, never from the specifier text.
+  gitTable?: { rev: string | null };
   before?: LockEntry;
   after?: LockEntry;
 }
@@ -498,6 +510,15 @@ function pickCounterpart(after: LockEntry, beforeEntries: LockEntry[]): Counterp
 function parentDirOf(filePath: string): string {
   const slash = filePath.lastIndexOf('/');
   return slash === -1 ? '' : filePath.slice(0, slash);
+}
+
+// Where a dependency's commit pin comes from, as one comparable string:
+// pip's grammar, a git table with the rev that can pin it (null when its
+// ref came from a branch or tag key, or nothing pins it), or neither. Two
+// sides with the same specifier text but different provenance install
+// different things, so computeDelta does not treat them as held.
+function pinProvenance(dep: ManifestDep): string {
+  return JSON.stringify([dep.pipGrammar === true, dep.gitTable === undefined ? 'none' : dep.gitTable.rev]);
 }
 
 function isPackageJson(filePath: string): boolean {
@@ -1324,7 +1345,15 @@ export function computeDelta(
       const afterSelection = selectEntry(afterLockfile, dep, 'after');
       const selections = [beforeSelection, afterSelection];
 
-      const specifierHeld = previous !== undefined && previous.specifier === dep.specifier;
+      // A Python git specifier is display text: where its pin comes from
+      // (pip grammar, or a table and whether its ref came from a pinning
+      // key) is not in the string, so it is part of what has to hold. A rev
+      // rewritten as a branch of the same text, or a table rewritten as a
+      // pip-grammar URL of the same text, is a change.
+      const specifierHeld =
+        previous !== undefined &&
+        previous.specifier === dep.specifier &&
+        pinProvenance(previous) === pinProvenance(dep);
       if (specifierHeld && !lockEntriesDiffer(beforeSelection.entry, afterSelection.entry)) {
         // T8-2: this dependency leaves no other trace in the scan, so an
         // ambiguity that could have decided whether the tampered entry or
@@ -1352,6 +1381,9 @@ export function computeDelta(
         protocol: dep.protocol,
         manifestPath: manifest.path,
         ...(afterLockfile === null ? {} : { lockfilePath: afterLockfile.path, lockfileFormat: afterLockfile.format }),
+        ...(manifest.python === undefined ? {} : { python: true as const }),
+        ...(manifest.python !== undefined && dep.pipGrammar === true ? { pipGrammar: true as const } : {}),
+        ...(manifest.python !== undefined && dep.gitTable !== undefined ? { gitTable: dep.gitTable } : {}),
         before: beforeSelection.entry,
         after: afterSelection.entry,
       });

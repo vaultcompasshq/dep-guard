@@ -6,6 +6,7 @@ import { parseRequirementsOptions } from './python-options.js';
 import { classifyRequirement, isPipUrl, urlDependencyName, urlProtocol } from './python-requirement.js';
 import {
   emptyIndexDeclarations,
+  isFullCommitId,
   type PythonExclusionClass,
   type PythonIndexDeclarations,
   type PythonManifestInfo,
@@ -100,6 +101,68 @@ function writtenDep(name: string, specifier: string, protocol: ManifestDep['prot
   return { name, registryName: name, specifier, depType, protocol };
 }
 
+// A git or url dependency whose specifier is a URL the user wrote, verbatim:
+// pip's grammar (ManifestDep.pipGrammar). Every site that passes user text
+// through as the specifier uses this; the poetry and Pipfile git tables,
+// which build "<url>#<rev>" from their own rev key, use writtenDep.
+function userUrlDep(name: string, url: string, depType: DepType): ManifestDep {
+  return { ...writtenDep(name, url, urlProtocol(url), depType), pipGrammar: true };
+}
+
+// A poetry or Pipfile git table: the specifier is "<git>#<ref>" for display
+// and identity, and the pin is judged from `rev` alone (ManifestDep.gitTable).
+function gitTableDep(name: string, git: string, ref: string | undefined, rev: string | null, depType: DepType): ManifestDep {
+  return { ...writtenDep(name, ref === undefined ? git : `${git}#${ref}`, 'git', depType), gitTable: { rev } };
+}
+
+// The table's own commit key, when it is a non-empty string.
+function commitKey(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+// True when a table's `git` value already carries ref or fragment text of
+// its own: a "#" anywhere, or an "@" in its path (after the netloc of a
+// "scheme://" URL, or after the ":" of a scp-like "user@host:path"; an
+// "@" in userinfo such as "git@host" is not in the path). The installer
+// appends the table's ref to this value (pipenv builds "git+<git>@<ref>"),
+// so with either present the ref pip reads is not the table's: "#" makes
+// it fragment text, which pip ignores, and a path "@" moves where the ref
+// split falls.
+function gitValueCarriesRef(git: string): boolean {
+  if (git.includes('#')) {
+    return true;
+  }
+  const scheme = git.indexOf('://');
+  let urlPath: string;
+  if (scheme !== -1) {
+    const rest = git.slice(scheme + 3);
+    const slash = rest.indexOf('/');
+    urlPath = slash === -1 ? '' : rest.slice(slash);
+  } else {
+    const colon = git.indexOf(':');
+    urlPath = colon === -1 ? git : git.slice(colon + 1);
+  }
+  return urlPath.includes('@');
+}
+
+// The rev that can pin a git table (ManifestDep.gitTable): its own commit
+// key, unless the git value carries ref text of its own
+// (gitValueCarriesRef), in which case nothing pins it.
+function pinningRev(git: string, value: unknown): string | null {
+  return gitValueCarriesRef(git) ? null : commitKey(value);
+}
+
+// The same for a poetry or uv git table, which can also carry branch and
+// tag keys. poetry resolves the reference as branch, then tag, then rev, so
+// a rev beside either installs the branch or tag; uv rejects more than one
+// ref key, and is refused the same way in case a reader does not.
+function tableRev(record: Record<string, unknown>, git: string): string | null {
+  if (commitKey(record.branch) !== null || commitKey(record.tag) !== null) {
+    return null;
+  }
+  return pinningRev(git, record.rev);
+}
+
 function exclusionClassOf(protocol: 'git' | 'url'): PythonExclusionClass {
   return protocol === 'git' ? 'vcs' : 'url';
 }
@@ -186,7 +249,7 @@ function addWide(index: PythonIndexDeclarations, raw: string, option: string, al
 function readEditable(target: string, line: number, deps: ManifestDep[], info: PythonManifestInfo): void {
   info.exclusions.push({ cls: 'editable', line });
   if (isPipUrl(target)) {
-    deps.push(writtenDep(urlDependencyName(target), target, urlProtocol(target), 'dependencies'));
+    deps.push(userUrlDep(urlDependencyName(target), target, 'dependencies'));
     return;
   }
   deps.push(writtenDep(target, target, 'file', 'dependencies'));
@@ -287,7 +350,7 @@ export function parseRequirements(
     }
     switch (classified.kind) {
       case 'url':
-        deps.push(writtenDep(classified.name, classified.specifier, classified.protocol, 'dependencies'));
+        deps.push(userUrlDep(classified.name, classified.specifier, 'dependencies'));
         info.exclusions.push({ cls: exclusionClassOf(classified.protocol), line, name: classified.name });
         break;
       case 'path':
@@ -413,11 +476,16 @@ function noteInvalidName(info: PythonManifestInfo, written: string): void {
 // (PDM's dev groups write local projects this way). The option is
 // stripped and the line is excluded.editable; a VCS or remote URL target
 // stays a git or url dependency so the tamper check still judges it.
+//
+// The target ends at the first whitespace or ";", as PDM reads it (its URL
+// pattern is [^\s;]+) and as classifyRequirement cuts a URL: anything after
+// that is not part of what installs, so it must not reach the specifier,
+// where it could supply an "@<sha>" the installed URL does not have.
 function editableString(spec: string): string | null {
   const trimmed = spec.trim();
   for (const option of ['-e ', '-e\t', '--editable ', '--editable\t', '--editable=']) {
     if (trimmed.startsWith(option)) {
-      return trimmed.slice(option.length).trim();
+      return trimmed.slice(option.length).trim().split(/[\s;]/)[0] ?? '';
     }
   }
   return null;
@@ -437,7 +505,7 @@ function requirementStrings(
     if (editable !== null) {
       info.exclusions.push({ cls: 'editable' });
       if (isPipUrl(editable) && !editable.toLowerCase().startsWith('file:')) {
-        deps.push(writtenDep(urlDependencyName(editable), editable, urlProtocol(editable), depType));
+        deps.push(userUrlDep(urlDependencyName(editable), editable, depType));
       }
       continue;
     }
@@ -447,7 +515,7 @@ function requirementStrings(
         noteInvalidName(info, spec.trim());
         break;
       case 'url':
-        deps.push(writtenDep(classified.name, classified.specifier, classified.protocol, depType));
+        deps.push(userUrlDep(classified.name, classified.specifier, depType));
         info.exclusions.push({ cls: exclusionClassOf(classified.protocol), name: classified.name });
         break;
       case 'path':
@@ -477,6 +545,7 @@ function poetryDeps(
       continue;
     }
     const items = Array.isArray(value) ? value : [value];
+    const gitItems: ManifestDep[] = [];
     for (const item of items) {
       if (typeof item === 'string') {
         deps.push(pypiDep(name, item, depType));
@@ -487,8 +556,10 @@ function poetryDeps(
         throw new DepGuardError(`${filePath}: [tool.poetry] dependency "${name}" could not be read`, 'manifest-parse');
       }
       if (typeof record.git === 'string') {
-        const rev = [record.rev, record.tag, record.branch].find((entry) => typeof entry === 'string' && entry !== '');
-        deps.push(writtenDep(name, typeof rev === 'string' ? `${record.git}#${rev}` : record.git, 'git', depType));
+        const ref = [record.rev, record.tag, record.branch].find((entry) => typeof entry === 'string' && entry !== '');
+        const dep = gitTableDep(name, record.git, typeof ref === 'string' ? ref : undefined, tableRev(record, record.git), depType);
+        deps.push(dep);
+        gitItems.push(dep);
         info.exclusions.push({ cls: 'vcs', name });
         continue;
       }
@@ -506,6 +577,20 @@ function poetryDeps(
         info.index.perName.push({ dep: normalizePypiName(name), index: record.source });
       }
       deps.push(pypiDep(name, typeof record.version === 'string' ? record.version : '*', depType));
+    }
+    unpinAllUnlessAllPinned(gitItems);
+  }
+}
+
+// A dependency with several git items, one per marker, installs whichever
+// one the platform selects, so it is pinned only when every item is. When
+// they disagree every item reads unpinned: the tamper check reports one
+// finding per dependency and source host, and it must be the worst one,
+// whichever item came first.
+function unpinAllUnlessAllPinned(gitItems: readonly ManifestDep[]): void {
+  if (!gitItems.every((dep) => isFullCommitId(dep.gitTable?.rev))) {
+    for (const dep of gitItems) {
+      dep.gitTable = { rev: null };
     }
   }
 }
@@ -578,7 +663,8 @@ function uvSourceOf(filePath: string, name: string, record: Record<string, unkno
   const key = `tool.uv.sources.${name}`;
   if (typeof record.git === 'string') {
     const ref = [record.rev, record.tag, record.branch].find((entry) => typeof entry === 'string' && entry !== '');
-    return { kind: 'git', value: record.git, ...(typeof ref === 'string' ? { ref } : {}) };
+    const rev = tableRev(record, record.git);
+    return { kind: 'git', value: record.git, ...(typeof ref === 'string' ? { ref } : {}), ...(rev === null ? {} : { rev }) };
   }
   if (typeof record.url === 'string') {
     return { kind: 'url', value: record.url };
@@ -803,15 +889,15 @@ function pipfileSection(
       throw malformed(filePath, `${key}.${name}`);
     }
     if (typeof record.git === 'string') {
-      const ref = typeof record.ref === 'string' && record.ref !== '' ? `#${record.ref}` : '';
-      deps.push(writtenDep(name, `${record.git}${ref}`, 'git', depType));
+      const ref = commitKey(record.ref);
+      deps.push(gitTableDep(name, record.git, ref ?? undefined, pinningRev(record.git, record.ref), depType));
       info.exclusions.push({ cls: record.editable === true ? 'editable' : 'vcs', name });
       continue;
     }
     const location = typeof record.file === 'string' ? record.file : typeof record.path === 'string' ? record.path : null;
     if (location !== null) {
       if (isPipUrl(location)) {
-        deps.push(writtenDep(name, location, urlProtocol(location), depType));
+        deps.push(userUrlDep(name, location, depType));
         info.exclusions.push({ cls: record.editable === true ? 'editable' : exclusionClassOf(urlProtocol(location)), name });
       } else {
         deps.push(writtenDep(name, location, 'file', depType));

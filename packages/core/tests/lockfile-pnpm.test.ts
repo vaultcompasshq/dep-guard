@@ -455,12 +455,49 @@ describe('parsePnpmLockfile error handling', () => {
 });
 
 describe('parsePnpmLockfile "packages: null" handling', () => {
-  test('a dangling "packages:" key with no value (parses as null) throws lockfile-parse', () => {
+  test('a dangling "packages:" key with no value (parses as null) throws lockfile-parse when a dependency needs an entry', () => {
     // This is the same truncated-hand-edit shape the non-plain-object
     // throw already exists for -- "packages:" with nothing after it
     // parses to null, not to an empty mapping, and must not be confused
-    // with the genuinely absent-key valid-empty case.
-    expectLockfileParse(() => parsePnpmLockfile(PATH, "lockfileVersion: '9.0'\npackages:\n"));
+    // with the genuinely absent-key valid-empty case while an importer
+    // records a dependency that only a packages entry can resolve.
+    expectLockfileParse(() =>
+      parsePnpmLockfile(
+        PATH,
+        "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      lodash:\n        specifier: ^4.17.21\n        version: 4.17.21\npackages:\n"
+      )
+    );
+  });
+
+  test.each([
+    ['a v5 importer on a registry version', 'lockfileVersion: 5.4\nimporters:\n  .:\n    dependencies:\n      lodash: 4.17.21\npackages:\n'],
+    ['a v5 single-project top-level registry dependency', 'lockfileVersion: 5.4\ndependencies:\n  lodash: 4.17.21\npackages:\n'],
+    ['a file: dependency, which has a packages entry', 'lockfileVersion: 5.4\nimporters:\n  .:\n    dependencies:\n      sdk: file:vendor/sdk\npackages:\n'],
+    ['one link and one registry dependency', 'lockfileVersion: 5.4\nimporters:\n  a:\n    dependencies:\n      x: link:../x\n  b:\n    devDependencies:\n      lodash: 4.17.21\npackages:\n'],
+    ['a dependency section that is not a mapping', "lockfileVersion: 5.4\nimporters:\n  .:\n    dependencies: 'x'\npackages:\n"],
+    ['an importer that is not a mapping', "lockfileVersion: 5.4\nimporters:\n  .: 'x'\npackages:\n"],
+    ['a v6 dependency with no version string', "lockfileVersion: '6.0'\nimporters:\n  .:\n    dependencies:\n      x:\n        specifier: link:../x\npackages:\n"],
+  ])('"packages:" null with %s still throws lockfile-parse', (_label, content) => {
+    expectLockfileParse(() => parsePnpmLockfile(PATH, content));
+  });
+
+  // vercel/turborepo's monorepo_with_shared_file_deps fixture: a v5.4
+  // workspace whose every dependency is a link: has a bare "packages:".
+  test('"packages:" null in a lockfile whose every dependency is a link: is valid-empty', () => {
+    const content =
+      'lockfileVersion: 5.4\n\nimporters:\n\n  .:\n    specifiers: {}\n\n  apps/docs:\n    specifiers:\n      vendor-sdk: file:../../vendored/sdk\n    dependencies:\n      vendor-sdk: link:../../vendored/sdk\n\npackages:\n';
+    const result = parsePnpmLockfile(PATH, content);
+    expect(result.entries.size).toBe(0);
+  });
+
+  test('"packages:" null in a v9 lockfile whose every dependency is a link: is valid-empty', () => {
+    const content =
+      "lockfileVersion: '9.0'\nimporters:\n  .:\n    devDependencies:\n      x:\n        specifier: workspace:*\n        version: link:packages/x\npackages:\n";
+    expect(parsePnpmLockfile(PATH, content).entries.size).toBe(0);
+  });
+
+  test('"packages:" null in a lockfile that records no dependency at all is valid-empty, like an absent key', () => {
+    expect(parsePnpmLockfile(PATH, "lockfileVersion: '9.0'\npackages:\n").entries.size).toBe(0);
   });
 
   test('an absent "packages" key entirely is still valid-empty, not a throw', () => {

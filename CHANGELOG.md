@@ -10,6 +10,84 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+Fixes found by running dep-guard against public repositories. No verdict
+is loosened beyond what each entry states.
+
+### Fixed
+
+- A Python git requirement pinned by a full commit id in pip's and uv's own
+  form, `name @ git+https://host/o/r.git@<40 or 64 hex>` (or a requirements
+  line `git+https://host/o/r.git@<sha>#egg=name`), was read as unpinned and
+  reported `critical` with `commitPinned: false` even with no earlier
+  revision to compare against. The ref after the last `@` of the URL path
+  now counts, under the same full-object-id rule as the `#<sha>` form. An
+  `@` in userinfo, a short SHA, a branch, a tag, any other length, an hg,
+  svn or bzr URL, and the scp-like form are still unpinned. The `@` form is
+  read for Python dependencies only.
+- A Python git URL the user wrote with the commit id in the fragment,
+  `name @ git+https://host/o/r.git#<sha>` (in a requirements file or a
+  `pyproject.toml` requirement list), was credited as a commit pin and
+  reported at `low`. pip ignores a fragment that is not `egg=` or
+  `subdirectory=` and installs the default branch, so it is now unpinned
+  and `critical`. Which reading applies follows where the specifier came
+  from, not its shape: a URL the user wrote is read in pip's `@<ref>` form
+  only, and a poetry, `[tool.uv.sources]` or `Pipfile` git table pins by
+  its own commit key alone (`rev`, or `ref` in a `Pipfile`) when that is a
+  full commit id. A `#<sha>` or `@<sha>` written inside the table's `git`
+  value, which was credited as a pin before, and a `tag` or `branch` key,
+  however hex it looks, no longer pin. Nor does a full-sha `rev` or `ref`
+  when the table's `git` value contains a `#` anywhere or an `@` in its
+  path (a `git@host` userinfo is fine): the installer appends the ref to
+  that value, so pip would read fragment text or a different ref and
+  install something else. A poetry or uv `rev` beside a `branch` or `tag`
+  key does not pin either (poetry installs the branch or tag). A dependency
+  with several git items or `[tool.uv.sources]` entries, one per marker, is
+  pinned only when every one of them is; otherwise it is reported unpinned,
+  whichever item comes first. With `--base` or `--trust-base`, a Python git
+  dependency whose specifier text held but whose pin provenance changed (a
+  `rev` rewritten as a `branch` of the same text, or a table rewritten as a
+  pip-grammar URL of the same text) was skipped as unchanged; it is now
+  judged as a change. This can turn a green audit or pull request red.
+- One git dependency declared twice in the same manifest, one declaration
+  pinned and one on a branch (two requirements lines with different
+  markers, a `[project].dependencies` item and an optional extra, a poetry
+  main dependency and a dev group), was reported by whichever came first:
+  pinned first read `low` with `commitPinned: true`, the same file with the
+  lines swapped read `critical`. The worse of the two is now kept whatever
+  the order: the higher severity, and at equal severity the one not
+  credited as a commit pin. Both declarations pinned still read `low`.
+- An editable URL in a `pyproject.toml` requirement list (`"-e
+  git+https://..."`, as PDM dev groups write) kept everything after it as
+  part of the URL, so trailing text such as ` x@<sha>` could make a URL
+  that installs a branch read as pinned. The URL now ends at the first
+  whitespace or `;`, as PDM and the requirement classifier read it.
+- The same Python finding named an unrelated npm lockfile as its
+  `lockfilePath` (whichever npm or pnpm lockfile the scan read first). A
+  Python dependency's git-source and url-source findings now carry no
+  `lockfilePath`.
+- A `pnpm-lock.yaml` with a bare `packages:` (null) was a `lockfile-parse`
+  exit 2 even when every dependency it records is a `link:`, which has no
+  packages entry. That lockfile now reads as empty. A null `packages` with
+  any other dependency recorded is still refused.
+- Only the first lockfile that did not parse was reported; fixing it
+  revealed the next. Every one on the scanned side is now listed in one
+  `lockfile-parse` error, up to ten, the way the manifest-parse error lists
+  manifests. A single failure keeps its message unchanged. The exit code is
+  still 2.
+- The `trust-base-same-tree` refusal said a pull request's merge ref "looks
+  exactly like this when the base has not moved", which reads as though
+  every pull request does. It now names the two cases: the head commit
+  against its own merge when the base has not moved, and the base branch
+  against a pull request with no net change.
+- The `names:` line printed `pypi 0 not checked for existence` (or `pypi 0
+  of 0 checked`) when a Python manifest had no names to look up. It now
+  reads `pypi 0 checked (no PyPI names to check)`.
+- The README said a head-side change to a uv workspace root's `members` is
+  reported as `python index changed`. It is not: the base copy's members
+  decide the scope of each `[tool.uv.sources]` entry, and a name that only
+  the head's wider members bring into that scope is checked like any other,
+  with `python-workspace-unconfirmed`. The README now says so.
+
 ## [0.16.0] - 2026-10-19
 
 Targets 0.16.0, a minor: both changes below can turn a green run red,
