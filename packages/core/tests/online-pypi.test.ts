@@ -95,6 +95,22 @@ describe('fetchPypiProject', () => {
     const fake = fetchSequence(() => response(status, 'no'));
     await expect(fetchPypiProject('x', { fetchImpl: fake.impl, ...NO_SLEEP })).rejects.toThrow(String(status));
   });
+
+  // U5, the client half (0.16.0): an unchecked name carries the status the
+  // client gave up on, so the error has to carry it, retried or not.
+  test.each([
+    ['a 503 after the retry', [503, 503], 503],
+    ['a 302', [302], 302],
+    ['a 403', [403], 403],
+    ['a 429 after the retry', [429, 429], 429],
+  ])('U5 %s throws carrying its status', async (_label, statuses, expected) => {
+    const fake = fetchSequence(...statuses.map((status) => () => response(status, 'no')));
+    const error = await fetchPypiProject('x', { fetchImpl: fake.impl, ...NO_SLEEP }).then(
+      () => null,
+      (err: unknown) => err as { status?: number }
+    );
+    expect(error?.status).toBe(expected);
+  });
 });
 
 function candidate(name: string, anchorPath = 'requirements.txt', source: 'manifest' | 'lockfile' = 'manifest'): PypiCandidate {

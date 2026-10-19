@@ -68,13 +68,24 @@ export const PYPI_ENTRY_PREFIX = 'pypi:';
  * context's `allowed` sink, as allowClears does for an npm name.
  */
 export function pypiAllowClears(ctx: CheckContext, name: string): boolean {
-  for (const entry of ctx.config.allow) {
+  if (isPypiAllowed(name, ctx.config.allow)) {
+    ctx.allowed.push(`${PYPI_ENTRY_PREFIX}${name}`);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The same match as pypiAllowClears, recording nothing: for a caller that
+ * asks whether an entry covers a name without clearing a finding.
+ */
+export function isPypiAllowed(name: string, allow: readonly string[]): boolean {
+  for (const entry of allow) {
     if (!entry.startsWith(PYPI_ENTRY_PREFIX)) {
       continue;
     }
     const allowed = normalizePypiName(entry.slice(PYPI_ENTRY_PREFIX.length).trim());
     if (allowed.length > 0 && allowed === name) {
-      ctx.allowed.push(`${PYPI_ENTRY_PREFIX}${name}`);
       return true;
     }
   }

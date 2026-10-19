@@ -10,6 +10,195 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+Targets 0.16.0, a minor: both changes below can turn a green run red,
+which the stability policy files under verdicts that may move in a minor.
+Design: `docs/design/2026-10-18-head-defined-projects-and-ignore-paths.md`.
+
+### Security
+
+- **A pull request could wire a directory the base ignores into the
+  install, and the base's `ignorePaths` dropped every finding there, exit
+  0.** The wiring could be a `file:`, `link:` or `portal:` dependency or a
+  bare local path (`"./fixtures/helper"`), a dependency on a directory
+  reached through a committed symlink (including a link whose text climbs
+  out of another symlinked directory with `..`, which is resolved the way
+  the operating system resolves it), a workspace member reached through a
+  symlinked directory (a link a pattern names, or one a pattern passes
+  through, as in `packages/*` where `packages` is itself a link, including
+  links nested under it), a reference from a stray manifest
+  that the change itself wires in (references are transitive: a stray's
+  reference the base already had does not excuse the manifest it reaches
+  once the change installs the stray), a widened `workspaces` glob, a
+  lockfile added beside the manifest, a requirements include (`-r` or
+  `-c`), or a stray manifest that re-anchored a root-lockfile finding by
+  declaring the same name. The run even said "no control input changed in
+  this pull request". A target this tool cannot place inside the
+  repository (an absolute or home path, a relative path that leaves the
+  root, a symlink that does either) now fails closed: every ignored
+  manifest of that kind keeps its findings unless the base has the same
+  specifier in the same file, through symlinks with the same target text.
+  Now `ignorePaths` drops a
+  finding only when its path is not a project on the changed tree, or when
+  every reason it is a project is also a reason on the reference side (the
+  trust base on a `--trust-base` run, else the `--base` ref, else `HEAD`
+  for `--staged`). Everything else is kept, counted in the new `ignoreKept`,
+  marked `ignoreOverride` on the finding, reported as an
+  `ignore-path-project-kept` note and, under `--trust-base`, proposed as a
+  change to `ignorePaths` (`trustBase.projectPathsChanged`,
+  `trustBase.ignoredPathsMadeProjects`). A changed yarn, bun or v1 npm
+  lockfile below the root is excused by `ignorePaths` on the same terms, not
+  counting the reason that lockfile itself gives.
+
+  Consumer costs, stated plainly:
+  - A green pull request, `--base` run or staged commit that wires an
+    ignored path into the install and has findings there now exits 1.
+  - `lockfile-tamper` findings on a project the reference side installs
+    under an ignored path are no longer dropped, as `allow` never covers
+    that rule. This includes an `ignorePaths` entry naming a lockfile
+    itself (`"package-lock.json"`), and a fixture directory holding a
+    `package.json` beside its own lockfile.
+
+  Remedy: move the directory out of the ignored path, or out of the
+  install; or accept the finding with `allow` or the baseline. Either
+  control has to land on the base branch in a separate change first,
+  since a pull request's own control edits are proposals.
+
+  Residual, named: a project the base branch already installs under an
+  ignored path, the same way, keeps every finding other than
+  `lockfile-tamper` dropped. Both the wiring and the entry are base-written,
+  so this is the adopter's standing choice; any pull request can add a
+  malicious dependency inside such a directory and exit 0, with only the
+  `ignore-path-dropped` note, which now says how many dropped findings were
+  on installed projects.
+
+  Known open: a target that differs from the directory only in case
+  (`file:Fixtures/helper` on a case-insensitive macOS or Windows runner) is
+  not matched to it; a yarn `patch:` specifier wrapping a `file:` target is
+  not a reason; and `ignoreKept` counts a kept finding the baseline then
+  suppresses.
+
+  Symlinked workspace directories, stated plainly: a symlink a workspace
+  pattern names or passes through is followed inside the repository, and
+  each manifest under the directory it reaches is a member exactly when the
+  pattern covers its path through the link, the way npm, pnpm and uv expand
+  it. The reason carries that path, the pattern and every link text on the
+  way, so a widened pattern, a retargeted link or a nested link pointed
+  elsewhere keeps the findings, and a repository whose links and patterns
+  did not change is excused as before. A link to a file, or to a path with
+  nothing listed under it, is not a member directory and says nothing. A
+  link that cannot be placed (it leaves the repository, is absolute, cannot
+  be read, runs past 40 hops, or loops back to a directory already on its
+  own chain) fails closed: every ignored manifest of that kind keeps its
+  findings unless the base has the same link texts and the same workspace
+  patterns. The note says the symlink could not be followed, or for a loop
+  that following it loops back into a directory already on its path. A
+  symlink whose text cannot be read is never excused. The links under one
+  workspace input are walked at most 10,000 times; an input whose links fan
+  out past that limit fails closed in a way no base can excuse, so every
+  ignored manifest of that kind keeps its findings, and the note says the
+  symlinks under that input's link fan out past the limit. Only a
+  pathological link graph reaches it. The walks of every input on one side
+  together stop at 100,000 visits the same way, so a tree with many fanning
+  install roots cannot make the scan run without bound; the note then says
+  the symlink walks on that side ran past the limit in all.
+
+  Every one of those fail-closed cases, and an unplaceable `file:` target,
+  npm lockfile link entry or requirements include, also reads every
+  manifest of that kind past the skipped-directory-name filter (a uv
+  workspace member, which is never read for names, excepted): a member
+  under `build/` or `vendor/` the tool could not place is read for names
+  instead of being skipped with a `manifest-skipped-dirname` note.
+  Consumer cost: on a side with such a link or target, a manifest under a
+  skipped directory name that does not parse now stops the scan (exit 2)
+  unless ignorePaths covers it; before, it was not read.
+
+- **A scan of a subdirectory dropped a manifest under `build/` while saying
+  every manifest there was treated as a project, exit 0.** Present since
+  0.15.0. When a file outside the scanned directory that decides which
+  manifests are projects could not be read (a broken root
+  `pnpm-workspace.yaml` or `package-lock.json`, for example), the
+  `classification-input-unread` note said every manifest under the scanned
+  directory was treated as a project, but a manifest there under a skipped
+  directory name (`app/build/a/package.json` on a scan of `app`) was still
+  skipped with a `manifest-skipped-dirname` note, so a malicious name in it
+  passed, in staged, audit and `--base` runs alike. A scan of the root
+  stops on the same tree. Now, while that note is raised, every manifest
+  under the scanned directory outside `node_modules` is read for names.
+  Consumer cost: on such a scan, a manifest under a skipped directory name
+  that does not parse stops the scan (exit 2) whatever ignorePaths says,
+  as any other manifest under the scanned directory already did; before,
+  it was not read.
+
+- **A pull request whose names outran the online budget, or met a registry
+  outage, passed with only a diagnostic.** For a Python name the PyPI
+  lookup is the only existence check, so this was a silent pass. Now, on a
+  run with `--base` or `--trust-base` and online lookups on, a candidate
+  name an online step left unchecked (the budget was spent, or the npm or
+  PyPI client counted the answer as unreachable: a network error, a timeout,
+  a 5xx after the retry, a 429, any other 4xx except 404, and on PyPI a 3xx
+  or a 2xx naming another project) makes the run exit 2 with the full
+  report: `run.online.unchecked` lists every name with its step, reason and
+  status, `run.couldNotRun` carries `online-names-unchecked`, the text
+  report and stderr print the names, and SARIF marks the invocation
+  `executionSuccessful: false` with one error notification. A name the
+  `allow` list clears, a confirmed workspace sibling, an internal name, and
+  a name from a private registry or index are never counted. When the base
+  config says `"online": true` and the command line turns online off
+  (`--no-online`, which the Action passes unless its `online` input is
+  true), every candidate counts as unchecked with the reason
+  `online-disabled`. Plain and audit runs are unchanged: diagnostics only.
+  The new `onlineUnchecked` config key (`"fail"`, the default, or `"note"`)
+  restores the diagnostic in pull-request mode; under `--trust-base` it is
+  read from the trust base, and a head change to it is a proposal.
+
+  Consumer costs, stated plainly:
+  - A pull request with more new names than the online budget covers, or
+    run during a registry outage, now exits 2.
+  - A run with online disabled on the command line, including the Action's
+    default, exits 2 when the base config says `"online": true`. Set the
+    Action's `online` input to true, or set `"onlineUnchecked": "note"`.
+
+  Remedies: raise `onlineBudgetMs` on the base branch, set
+  `"onlineUnchecked": "note"` on the base branch (each in a separate change
+  first), or split the change. Conductor reads any family gate's exit 2 as
+  could-not-run and composes it to its own exit 2, so the umbrella run is
+  red too whether or not the findings are read.
+
+  Known open: a name declared only in an ignored stray fixture still counts
+  as unchecked; and the `online-disabled` reason text says "the base
+  config" on a `--base` run without `--trust-base`, where the config in
+  effect governs.
+
+### Fixed
+
+- **Python: a requirements `-r` or `-c` include through a symlinked
+  directory was not read for names.** Present since 0.13.0. The scan read
+  the include by normalizing its text, so `-r sub/../deps.list` where `sub`
+  is a symlink was looked for at the root, not beside the link's target,
+  and on a git side (the index in a staged scan, a `--base` or
+  `--trust-base` ref) `-r sub/deps.list` was not found at all, since a git
+  side lists the file only at its real path. The include was reported
+  unread (`requirements-line-unread`) and its names were never checked, so
+  online a PyPI 404 there was never raised. The include is now placed the
+  way the operating system opens it, through the side's own symlinks, and
+  read at its real path. A file that is itself a symlink is still never
+  read, although pip would read it (known open since 0.13.0).
+- The `symlinked-input` message names the kind of file it refused (a
+  lockfile, a `package.json`, a `pyproject.toml`, a `Pipfile` or a
+  requirements file); it said "a lockfile or a package.json" for all of
+  them.
+
+### Added
+
+- `ScanResult.ignoreKept`, `ScanResult.ignoreRuleApplied`, `trustBase.projectPathsChanged`,
+  `trustBase.ignoredPathsMadeProjects`, `Finding.ignoreOverride`,
+  `run.online.unchecked`, `run.couldNotRun`, and the SARIF
+  `run.properties.ignoreKept` and `run.properties.onlineUnchecked`. All
+  additive. `ScanResult.exitCode` widens to `0 | 1 | 2` for the one
+  could-not-run that is reported with a result. The text summary line gains
+  `N kept over ignorePaths` on every run that had a side to compare
+  against (`ignoreRuleApplied`).
+
 ## [0.15.0] - 2026-10-17
 
 No verdict is loosened. A manifest that does not parse still stops the scan

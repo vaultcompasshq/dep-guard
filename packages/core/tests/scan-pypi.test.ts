@@ -478,7 +478,10 @@ describe('index declarations', () => {
     write(dir, 'requirements/base.txt', 'flask\nrequests\n');
     commit(dir);
 
-    await expect(audit(dir, { trustBase: 'base' })).rejects.toMatchObject({ code: 'symlinked-input' });
+    await expect(audit(dir, { trustBase: 'base' })).rejects.toMatchObject({
+      code: 'symlinked-input',
+      message: expect.stringContaining('dep-guard does not parse a requirements file through a symlink'),
+    });
   });
 
   test('a base copy that is a gitlink still stops a --trust-base run', async () => {
@@ -1156,5 +1159,329 @@ describe('a --trust-base and --base run with a separate trust base', () => {
     });
 
     expect(result.findings.filter((finding) => finding.ruleId === 'typosquat' || finding.ruleId === 'lockfile-tamper')).toEqual([]);
+  });
+});
+
+// Audit B2 (docs/design/2026-10-18-head-defined-projects-and-ignore-paths.md,
+// section 8): on a --base or --trust-base run, a candidate name an online
+// step left unchecked is a could-not-run, exit 2, with the full report.
+// Each test names its id. An onlineBudgetMs of 0 is a budget spent before
+// the first step, with no request made.
+describe('an unchecked name does not pass a pull request (0.16.0)', () => {
+  const NONEXIST = 'zz-dg-audit-nonexist-1018';
+
+  function npmLock(packages: Record<string, Record<string, unknown>>): string {
+    return JSON.stringify({ lockfileVersion: 3, packages: { '': { name: 'app', version: '1.0.0' }, ...packages } });
+  }
+
+  const LODASH_ENTRY = {
+    version: '4.17.21',
+    resolved: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
+    integrity: 'sha512-lodash',
+  };
+
+  // The adv/p1 shape: the base declares requests; the head adds a name PyPI
+  // does not have and a transposition of requests.
+  function p1(baseConfig: Record<string, unknown> = {}, headConfig: Record<string, unknown> | null = null): string {
+    const dir = initRepo();
+    write(dir, 'requirements.txt', 'requests==2.31.0\n');
+    write(dir, '.dep-guard.json', JSON.stringify(baseConfig));
+    commit(dir, 'base');
+    tag(dir, 'base');
+    write(dir, 'requirements.txt', `requests==2.31.0\n${NONEXIST}==1.0.0\nreqeusts==1.0.0\n`);
+    if (headConfig !== null) {
+      write(dir, '.dep-guard.json', JSON.stringify(headConfig));
+    }
+    commit(dir, 'head');
+    return dir;
+  }
+
+  function pullRequest(dir: string, extra: Partial<Parameters<typeof ScanFn>[0]> = {}) {
+    return scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'base' },
+      trustBase: 'base',
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+      ...extra,
+    });
+  }
+
+  const entries = (result: Awaited<ReturnType<typeof ScanFn>>) => result.run.online.unchecked?.names ?? [];
+
+  test('U1 a spent budget on a pull request is exit 2 with both names and the full report', async () => {
+    const dir = p1();
+
+    const result = await pullRequest(dir, { onlineBudgetMs: 0 });
+
+    expect(result.exitCode).toBe(2);
+    expect(entries(result)).toEqual([
+      { name: 'reqeusts', ecosystem: 'pypi', step: 'pypi-existence', reason: 'budget' },
+      { name: NONEXIST, ecosystem: 'pypi', step: 'pypi-existence', reason: 'budget' },
+    ]);
+    expect(result.run.online.unchecked?.count).toBe(2);
+    expect(result.run.couldNotRun?.code).toBe('online-names-unchecked');
+    expect(result.run.couldNotRun?.message).toContain('could not run: 2 candidate name(s) were not checked online');
+    // The full report: the offline resemblance finding is still there.
+    expect(result.findings.some((finding) => finding.packageName === 'reqeusts')).toBe(true);
+  });
+
+  test('U2 npm names queued for registered-squat and publish-age, budget spent: exit 2 with the steps named', async () => {
+    const dir = initRepo();
+    write(dir, 'package.json', JSON.stringify({ name: 'app', version: '1.0.0', dependencies: {} }));
+    write(dir, 'package-lock.json', npmLock({}));
+    commit(dir, 'base');
+    tag(dir, 'base');
+    write(dir, 'package.json', JSON.stringify({ name: 'app', version: '1.0.0', dependencies: { lodash: '^4.17.21' } }));
+    write(dir, 'package-lock.json', npmLock({ 'node_modules/lodash': LODASH_ENTRY }));
+    commit(dir, 'head');
+
+    const result = await pullRequest(dir, { onlineBudgetMs: 0 });
+
+    expect(result.exitCode).toBe(2);
+    expect(entries(result)).toEqual([
+      { name: 'lodash', ecosystem: 'npm', step: 'publish-age', reason: 'budget' },
+      { name: 'lodash', ecosystem: 'npm', step: 'registered-squat', reason: 'budget' },
+    ]);
+    // One name left unchecked by two steps is one candidate name; the
+    // per-step detail stays beside it.
+    expect(result.run.couldNotRun?.message).toContain(
+      'could not run: 1 candidate name(s) were not checked online ' +
+        '(lodash: online budget spent (publish-age); online budget spent (registered-squat))'
+    );
+  });
+
+  test('U3 a PyPI 404 for one name and a spent budget for the other: one critical and one unchecked name, exit 2', async () => {
+    const dir = p1();
+    let now = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    fetchPypiProjectMock.mockImplementation(async () => {
+      now += 5_000;
+      return 'absent';
+    });
+
+    const result = await pullRequest(dir, { onlineBudgetMs: 1_000 });
+
+    expect(lookedUp()).toEqual(['reqeusts']);
+    expect(result.findings.filter((finding) => finding.severity === 'critical').map((finding) => finding.packageName)).toEqual([
+      'reqeusts',
+    ]);
+    expect(entries(result)).toEqual([{ name: NONEXIST, ecosystem: 'pypi', step: 'pypi-existence', reason: 'budget' }]);
+    expect(result.exitCode).toBe(2);
+  });
+
+  test('U4 every name answered, one 404: exit 1 and nothing unchecked', async () => {
+    const dir = p1();
+    fetchPypiProjectMock.mockImplementation(async (name) => (name === NONEXIST ? 'absent' : 'exists'));
+
+    const result = await pullRequest(dir);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.run.online.unchecked).toEqual({ count: 0, names: [] });
+    expect(result.run.couldNotRun).toBeUndefined();
+  });
+
+  test('U5 every unreachable answer is unchecked, with its status where known', async () => {
+    const dir = initRepo();
+    write(dir, 'requirements.txt', 'requests==2.31.0\n');
+    write(dir, 'package.json', JSON.stringify({ name: 'app', version: '1.0.0', dependencies: {} }));
+    commit(dir, 'base');
+    tag(dir, 'base');
+    write(dir, 'requirements.txt', 'requests==2.31.0\nalpha==1\nbravo==1\ncharlie==1\ndelta==1\n');
+    write(dir, 'package.json', JSON.stringify({ name: 'app', version: '1.0.0', dependencies: { 'zz-unknown-npm-name': '^1.0.0' } }));
+    commit(dir, 'head');
+    const failure = (message: string, status?: number) =>
+      Object.assign(new Error(message), status === undefined ? {} : { status });
+    fetchPypiProjectMock.mockImplementation(async (name) => {
+      if (name === 'alpha') throw failure('giving up after 2 attempt(s): request failed: 503', 503);
+      if (name === 'bravo') throw failure('PyPI answered 302, a redirect, which is not followed', 302);
+      if (name === 'charlie') throw failure('request failed: 403 Forbidden', 403);
+      throw failure('unexpected response: the body does not describe the project that was asked for');
+    });
+    fetchPackumentMock.mockRejectedValue(failure('giving up after 2 attempt(s): request failed: 429', 429));
+
+    const result = await pullRequest(dir);
+
+    expect(result.exitCode).toBe(2);
+    expect(entries(result).filter((entry) => entry.step === 'pypi-existence' || entry.step === 'unknown-package')).toEqual([
+      { name: 'alpha', ecosystem: 'pypi', step: 'pypi-existence', reason: 'unreachable', status: 503 },
+      { name: 'bravo', ecosystem: 'pypi', step: 'pypi-existence', reason: 'unreachable', status: 302 },
+      { name: 'charlie', ecosystem: 'pypi', step: 'pypi-existence', reason: 'unreachable', status: 403 },
+      { name: 'delta', ecosystem: 'pypi', step: 'pypi-existence', reason: 'unreachable' },
+      { name: 'zz-unknown-npm-name', ecosystem: 'npm', step: 'unknown-package', reason: 'unreachable', status: 429 },
+    ]);
+  });
+
+  test('U6 allowed, workspace-local and internal names are never counted', async () => {
+    const dir = initRepo();
+    const config = { allow: ['lodash', 'pypi:reqeusts'], internalPrefixes: ['pypi:zz-'] };
+    write(dir, '.dep-guard.json', JSON.stringify(config));
+    write(dir, 'requirements.txt', 'requests==2.31.0\n');
+    write(dir, 'package.json', JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/*'], dependencies: {} }));
+    write(dir, 'packages/sib/package.json', JSON.stringify({ name: 'sib', version: '1.0.0' }));
+    write(dir, 'package-lock.json', npmLock({}));
+    commit(dir, 'base');
+    tag(dir, 'base');
+    write(dir, 'requirements.txt', `requests==2.31.0\n${NONEXIST}==1.0.0\nreqeusts==1.0.0\n`);
+    write(
+      dir,
+      'package.json',
+      JSON.stringify({ name: 'app', version: '1.0.0', workspaces: ['packages/*'], dependencies: { lodash: '^4.17.21', sib: '^1.0.0' } })
+    );
+    write(
+      dir,
+      'package-lock.json',
+      npmLock({
+        'node_modules/lodash': LODASH_ENTRY,
+        'node_modules/sib': { resolved: 'packages/sib', link: true },
+      })
+    );
+    commit(dir, 'head');
+
+    const result = await pullRequest(dir, { onlineBudgetMs: 0 });
+
+    expect(result.run.online.unchecked).toEqual({ count: 0, names: [] });
+    expect(result.run.couldNotRun).toBeUndefined();
+    expect(result.findings.filter((finding) => finding.severity !== 'low')).toEqual([]);
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('U7 a plain run and an audit keep the diagnostics only', async () => {
+    const dir = initRepo();
+    write(dir, 'requirements.txt', 'requests==2.31.0\n');
+    commit(dir, 'base');
+    write(dir, 'requirements.txt', `requests==2.31.0\n${NONEXIST}==1.0.0\nreqeusts==1.0.0\n`);
+    execFileSync('git', ['add', '-A'], { cwd: dir });
+
+    const staged = await scan({ repoRoot: dir, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS, online: true, onlineBudgetMs: 0 });
+    const audited = await audit(dir, { onlineBudgetMs: 0 });
+
+    for (const result of [staged, audited]) {
+      expect(result.exitCode).toBe(0);
+      expect(result.run.couldNotRun).toBeUndefined();
+      expect(result.run.diagnostics.map((entry) => entry.code)).toContain('online-deadline-exceeded');
+    }
+    expect(audited.run.online.unchecked?.count).toBeGreaterThan(0);
+  });
+
+  test('U8 the base sets onlineUnchecked note: exit 0, the count still reported', async () => {
+    const dir = p1({ onlineUnchecked: 'note' });
+
+    const result = await pullRequest(dir, { onlineBudgetMs: 0 });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.run.online.unchecked?.count).toBe(2);
+    expect(result.run.couldNotRun).toBeUndefined();
+  });
+
+  test('U9 only the head sets onlineUnchecked note: exit 2, and the config proposal names the key', async () => {
+    const dir = p1({}, { onlineUnchecked: 'note' });
+
+    const result = await pullRequest(dir, { onlineBudgetMs: 0 });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.trustBase?.proposals.join('\n')).toContain('onlineUnchecked set to note');
+  });
+
+  test('U10 twelve unchecked names: the line lists ten and a count, the JSON all twelve', async () => {
+    const dir = initRepo();
+    write(dir, 'requirements.txt', 'requests==2.31.0\n');
+    commit(dir, 'base');
+    tag(dir, 'base');
+    const names = Array.from({ length: 12 }, (_unused, index) => `name-${String(index + 1).padStart(2, '0')}`);
+    write(dir, 'requirements.txt', `requests==2.31.0\n${names.map((name) => `${name}==1`).join('\n')}\n`);
+    commit(dir, 'head');
+
+    const result = await pullRequest(dir, { onlineBudgetMs: 0 });
+
+    expect(result.run.online.unchecked?.names.map((entry) => entry.name)).toEqual(names);
+    const message = result.run.couldNotRun?.message ?? '';
+    expect(message).toContain('name-10: online budget spent (pypi-existence), and 2 more)');
+    expect(message).not.toContain('name-11');
+    expect(renderText(result)).toContain(message);
+  });
+
+  test('U12 check with --trust-base and --online, budget spent: exit 2', async () => {
+    const dir = initRepo();
+    write(dir, '.dep-guard.json', '{}');
+    commit(dir, 'base');
+    tag(dir, 'base');
+    write(dir, 'README.md', 'head\n');
+    commit(dir, 'head');
+    const { checkSingle } = await import('../src/scan.js');
+
+    const result = await checkSingle({
+      repoRoot: dir,
+      name: 'lodash',
+      corpusDir: FIXTURE_CORPUS,
+      trustBase: 'base',
+      online: true,
+      onlineBudgetMs: 0,
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.run.couldNotRun?.code).toBe('online-names-unchecked');
+  });
+
+  test('U13 the base config requires online and the command line turned it off: every candidate is unchecked', async () => {
+    const dir = p1({ online: true });
+
+    const result = await pullRequest(dir, { online: false });
+
+    expect(fetchPypiProjectMock).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(2);
+    expect(entries(result)).toEqual([
+      { name: 'reqeusts', ecosystem: 'pypi', step: 'pypi-existence', reason: 'online-disabled' },
+      { name: NONEXIST, ecosystem: 'pypi', step: 'pypi-existence', reason: 'online-disabled' },
+    ]);
+    expect(result.run.couldNotRun?.message).toContain(
+      'online lookups disabled on the command line while the base config requires them'
+    );
+  });
+
+  test.each([
+    ['false', { online: false }],
+    ['absent', {}],
+  ])('U14 a base config with online %s and --no-online is unchanged', async (_label, baseConfig) => {
+    const dir = p1(baseConfig);
+
+    const result = await pullRequest(dir, { online: false });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.run.online.unchecked).toBeUndefined();
+    expect(result.run.couldNotRun).toBeUndefined();
+  });
+
+  test('U15 a budget spent before the asymmetry step names the queued low typosquat with that step', async () => {
+    const dir = initRepo();
+    write(dir, 'package.json', JSON.stringify({ name: 'app', version: '1.0.0', dependencies: { lodash: '^4.17.21' } }));
+    write(dir, 'package-lock.json', npmLock({ 'node_modules/lodash': LODASH_ENTRY }));
+    commit(dir, 'base');
+    tag(dir, 'base');
+    write(
+      dir,
+      'package.json',
+      JSON.stringify({ name: 'app', version: '1.0.0', dependencies: { lodash: '^4.17.21', lodahs: '^1.0.0' } })
+    );
+    commit(dir, 'head');
+    let now = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    fetchPackumentMock.mockImplementation(async () => {
+      now += 5_000;
+      return {
+        createdAt: '2020-01-01T00:00:00.000Z',
+        latestVersion: '1.0.0',
+        latestPublishedAt: '2020-01-01T00:00:00.000Z',
+        deprecated: false,
+        unpublished: false,
+        securityHolder: false,
+        versionTimes: {},
+      };
+    });
+
+    const result = await pullRequest(dir, { onlineBudgetMs: 1_000 });
+
+    expect(entries(result)).toContainEqual({ name: 'lodahs', ecosystem: 'npm', step: 'asymmetry', reason: 'budget' });
+    expect(result.exitCode).toBe(2);
   });
 });

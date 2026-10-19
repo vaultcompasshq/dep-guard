@@ -25,6 +25,12 @@ export interface Finding {
   lockfilePath?: string;
   fingerprint: string;
   details?: Record<string, unknown>;
+  // Set on a finding ignorePaths would have dropped and did not, because
+  // the change makes its path a project the reference side does not
+  // install that way (0.16.0): the entries that matched, and how the path
+  // is installed. Never part of the fingerprint, and never placed in
+  // details.signal, which the fingerprint hashes.
+  ignoreOverride?: { entries: string[]; position: string };
 }
 
 export interface Diagnostic {

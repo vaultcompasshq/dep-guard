@@ -139,5 +139,11 @@ export async function fetchJson(url: string, options: FetchOptions = {}): Promis
     await sleepImpl(delayMs);
   }
 
-  throw new Error(`giving up on ${url} after ${attempts} attempt(s): ${lastError?.message ?? 'unknown error'}`);
+  // The last status rides along, so a caller can say which answer it gave
+  // up on (a 503, a 429). Never a 404: that status is not retried.
+  const status = (lastError as { status?: unknown } | null)?.status;
+  throw Object.assign(
+    new Error(`giving up on ${url} after ${attempts} attempt(s): ${lastError?.message ?? 'unknown error'}`),
+    typeof status === 'number' ? { status } : {}
+  );
 }

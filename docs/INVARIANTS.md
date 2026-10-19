@@ -1306,7 +1306,10 @@ Manifests that do not parse (0.15.0; design
   `portal:` specifier or of a `"link": true` npm lockfile entry. pnpm
   `importers` and `yarn.lock` workspace entries are not inputs. Nothing
   under `node_modules` is a project this way. Every input is subject
-  content and can only add a project path (`classifySide`, `git-source.ts`).
+  content and can only add a project path (`classifySide`, `git-source.ts`);
+  a negation inside one input (a `!` workspace pattern) removes only a path
+  that input alone would add, never one another input adds, since each
+  input is evaluated with its own negations only (0.16.0).
   A failure at the root manifest or at a member the root workspace walk
   read is a project by its parse site, whatever the classification says:
   the walk can reach a member the listing shows under no pattern (a
@@ -1323,13 +1326,22 @@ Manifests that do not parse (0.15.0; design
   when the judged side or the `--base` or `HEAD` comparison side counts the
   path as a project; a comparison-side error only when that side does. The
   trust base contributes `ignorePaths` only, never project paths; its own
-  errors are decided by its own projects (`settleParseFailures`).
+  errors are decided by its own projects (`settleParseFailures`). Its
+  reasons excuse an `ignorePaths` drop, never make a parse failure fatal
+  (0.16.0, "ignorePaths cannot cover a path the change wires into the
+  install").
 - The project set is computed from the whole listing whatever the scan
   prefix; out-of-prefix files are read for classification only and raise
   no diagnostics except `classification-input-unread`, and an unreadable
   input that would stop a root scan makes every manifest under the prefix a
   project. An out-of-prefix stray a root scan would drop contributes
-  nothing.
+  nothing. "Every manifest under the prefix" holds for the read gate too
+  (fix round 7 of 0.16.0; the gap was pre-existing since 0.15.0): while a
+  side has such an input, every manifest under the prefix outside
+  `node_modules` is read past the skipped-directory-name filter, so a
+  manifest under `build/` inside the prefix is read for names and, when it
+  does not parse, stops the scan. See "ignorePaths cannot cover a path the
+  change wires into the install", the subdirectory read gate.
 - Every fatal manifest parse error of every side and every parse site (the
   root manifest, a root workspace member, every other manifest) is reported
   in one exit 2, ten paths at most, judged side first, then root, members
@@ -1675,6 +1687,14 @@ could not judge it" or "this coverage did not run", and it is deliberately
 not a finding, because inventing a finding for a package the engine cannot
 name is how a gate becomes noise people learn to skip.
 
+One exit is not a finding and not a diagnostic either (0.16.0, audit B2):
+`run.couldNotRun`, today only `online-names-unchecked`, a `--base` or
+`--trust-base` run that left a candidate name unchecked online. The run
+scanned, the report is complete, and `exitCode` is 2. It is a separate
+field precisely so that this section stays true of every diagnostic,
+including the `online-deadline-exceeded` and `online-check-unreachable`
+notes that accompany it. `evaluateGate` stays 0 or 1.
+
 The obligation this creates runs the other way: any coverage the engine
 cannot provide must produce a diagnostic rather than silence, because
 silence is indistinguishable from a clean result. That is why a missing
@@ -1691,7 +1711,7 @@ is correct.
 Current diagnostic codes: `audit-anchor-differs`,
 `audit-no-tamper-comparison`, `check-single-name-only`,
 `classification-input-unread`, `delta-ambiguous-lock-entry`, `delta-new-lock-entries`,
-`ignore-path-dropped`,
+`ignore-path-dropped`, `ignore-path-project-kept`,
 `ignore-path-unmatched`, `lockfile-binary-skipped`,
 `lockfile-downgrade-acknowledged`, `lockfile-format-manifest-only`,
 `lockfile-missing`, `lockfile-nested-changed`, `lockfile-nested-ignored`,
@@ -1891,6 +1911,12 @@ problem degrades to the offline result with a diagnostic, and never blocks.
 
 The rule above is a sentence; this is what it obligates, now that it governs
 a whole subsystem rather than one code path.
+
+Degrading is diagnostic-only on a plain run and on an audit. On a run with
+`--base` or `--trust-base` (and `check --trust-base`) it is also exit 2,
+since 0.16.0: see "An unchecked name does not pass a pull request (0.16.0)"
+below. The findings themselves degrade exactly as described here on every
+run; only the exit differs.
 
 Degrading means the affected check contributes nothing it could not
 establish offline, and nothing it did establish is taken away. The
@@ -3800,7 +3826,9 @@ deciding coverage with no diagnostic. Design:
 - A PyPI 404 is a critical `unknown-package`; a 2xx vouches only that the
   project exists; every other answer, and a spent budget, leaves the name
   unchecked with a diagnostic and a count, never a finding
-  (`online/pypi-client.ts`, `online/pypi-existence.ts`).
+  (`online/pypi-client.ts`, `online/pypi-existence.ts`), and in
+  pull-request mode a could-not-run, exit 2 (0.16.0; "An unchecked name
+  does not pass a pull request").
 - PyPI existence is asked live and never read from or written to the
   online cache (`liveFetchPypiProject` in scan.ts; test `a cache never
   serves PyPI existence`). Any later PyPI cache entry uses a
@@ -3948,3 +3976,662 @@ as its own bullet states.
   finding is low, so the floor can change an exit only under `failOn: low`
   (accepted: `wss` against `ws` is no longer reported there). Test:
   `typosquat length floor`.
+
+## ignorePaths cannot cover a path the change wires into the install (0.16.0)
+
+Design: `docs/design/2026-10-18-head-defined-projects-and-ignore-paths.md`
+(audit B1). Until 0.16.0 `applyPathFilters` dropped every finding whose
+`manifestPath` an entry matched. On a `--trust-base` run the entries are the
+base's, but every input that decides what is installed is head content, so
+a pull request could wire a directory the base ignores into the install and
+the base's entry erased its findings, exit 0, "no control input changed".
+
+- **Reasons.** Each side records every reason a path is a project, not just
+  the first: the tuple (rule, install root directory, input path, pattern
+  text when the workspace match was inexact), `RepoState.projects.reasons`,
+  built by `classifySide` in `git-source.ts` over the whole listing whatever
+  the scan prefix, on every side the run loads, including the trust base of
+  a `--staged --trust-base` run (`loadRefProjects`, a classification-only
+  load that never throws). The rules are classifySide's 1 to 5 plus
+  requirements-include: a requirements file another requirements file
+  includes with `-r` or `-c`, followed over the whole listing with the
+  loader's rules (relative to the including file, at most eight levels,
+  each file once). That reason does not change which files stop the scan.
+  Each workspace input (the root `workspaces` field, `pnpm-workspace.yaml`,
+  a nested install root's field and yaml) is evaluated with only its own
+  negations.
+- **R1.** On a run with a reference side, `ignorePaths` drops a finding
+  only when its anchor is not a project on the judged side, or when every
+  reason the judged side records for the anchor is also recorded on the
+  reference side. Otherwise the finding is kept, counted in `ignoreKept`,
+  carries `ignoreOverride` (`entries`, `position`), and goes on to the
+  baseline and the gate. `ignored` keeps its meaning (findings dropped).
+- **The anchor.** `manifestPath`, or for a lockfile path the project
+  manifest in its directory (`projectManifestForLockfile`). When the anchor
+  is not a judged project and the finding carries `lockfilePath`, and that
+  lockfile records an entry under the finding's package name, the entry is
+  matched against `lockfilePath` instead, so a stray manifest declaring a
+  root-lockfile name cannot pull that finding into an ignored directory.
+  The record check is an implementation refinement over the design note:
+  `tamper.ts` stamps the delta's primary lockfile on every finding it
+  raises, including one about a stray's own git specifier or a requirements
+  line, and those are facts about the manifest that section 2 of the design
+  drops as before. The fingerprint is unchanged, and `ignoreOverride` is
+  never placed in `details.signal`.
+- **The reference side.** The trust base on a `--trust-base` run, with or
+  without `--base`, and only the trust base, even with `--staged`. Without
+  `--trust-base`: the `--base` ref, or `HEAD` for `--staged`. An audit, and
+  a staged run with no committed `HEAD` and no trust base, have none, and
+  drop as before. A reference side loaded without a classification excuses
+  nothing. A reference side with an out-of-prefix input it could not read
+  (`classification-input-unread`) excuses nothing under the prefix: that
+  expansion is never a reason. A judged state reaching the filter without
+  `projects` while a reference side exists is an internal error
+  (`internal-error`), never read as "nothing kept".
+- **Tamper on a base-installed project.** When every judged reason is on
+  the reference side, a `lockfile-tamper` finding is still kept, as `allow`
+  never covers that rule. This includes an entry naming a lockfile itself,
+  whose directory's manifest (the root, for the root lockfile) is a project.
+- **R2.** Every path under an entry, under the scan prefix, that the judged
+  side makes a project with a reason the reference side lacks is reported
+  whether or not a finding was kept there: an `ignore-path-project-kept`
+  diagnostic per path on every run R1 applies to, and on `--trust-base` a
+  proposal per path (ten at most, then one count line), with
+  `trustBase.projectPathsChanged` and the uncapped, sorted
+  `trustBase.ignoredPathsMadeProjects`. An entry whose only matches were
+  kept findings or such paths is not `ignore-path-unmatched`.
+- **What ignorePaths still does, and the residual.** A manifest no side
+  classifies as a project is dropped as before. A project the reference
+  side already installs the same way keeps every non-tamper finding
+  dropped: the adopter's standing choice, both inputs base-written. Named
+  plainly: on such a base any pull request can add a malicious dependency
+  inside that directory and exit 0, with only the `ignore-path-dropped`
+  note, which says "N of them on installed projects (P1, P2)" (projects on
+  the reference side, or on an audit on the judged side). A diagnostic, no
+  exit change.
+- **The nested-lockfile exemption follows R1.** A changed nested lockfile
+  this tool does not read (yarn, bun, v1 npm) is excused by `ignorePaths`
+  only when R1 would drop a finding anchored to the manifest in its
+  directory, without the beside-lockfile reason that lockfile itself
+  gives. Otherwise it is judged: `lockfile-nested-changed` in place of
+  `lockfile-nested-ignored`, no exit change, and the hint names the wiring.
+  The matched entry still counts as matched.
+- **One classification, two consumers.** The link exemption
+  (`confirmWorkspaceLocalNames`, via `reconfirmWorkspaceLocalNames`) reads
+  the trust base's `projects.workspaceFields`: keyed on "the base has a
+  parsed `package.json` at the install root's path", lockfile or not, the
+  field only, never `pnpm-workspace.yaml`. One deliberate difference from
+  0.15.0, which read the trust base's scanned manifests: a base
+  `package.json` under a skipped directory name that the base did not read
+  now also supplies the base's field, which exempts less, never more.
+- **Known open.** The reason diff is complete over the rules classifySide
+  implements and no further: `overrides` and `resolutions` `file:` targets
+  (audit N4) and Python path sources (`[tool.uv.sources]` path entries,
+  poetry path dependencies, pip local paths and `-e`) are not project
+  reasons, so R1 does not keep their findings. A file reached only through
+  `-r` is not read by a scan of its own directory at all (the including
+  file is outside the prefix), so there is nothing for R1 to keep there; a
+  root scan reads it.
+- **Bare local paths are reference targets.** A dependency specifier npm
+  reads as a local directory with no protocol (`./x`, `../x`, `/x`, `~/x`,
+  a drive path; `isLocalPathSpecifier` in `manifest.ts`, npm-package-arg's
+  isFilespec) is a rule-5 reference target, the whole specifier being the
+  path, exactly as `file:`, `link:` and `portal:` are.
+- **A target that cannot be placed fails closed.** A reference target, an
+  npm lockfile link entry's resolved path, or a requirements `-r`/`-c`
+  include that this tool cannot place inside the repository (absolute,
+  `~`, a drive path, a relative path that leaves the root, which can come
+  back in through the checkout directory's own name, or a symlink on the
+  way that does any of these, cannot be read, or runs past 40 hops) is
+  recorded on every `package.json` (for an include, every requirements
+  file) on that side, with a pattern of its text and, when the walk read
+  any symlink on the way, every such link's path and text
+  (`tracedPattern` in `git-source.ts`). Only the same text in the same
+  input, through links with the same text, on the reference side excuses
+  it: a head that keeps the specifier and retargets a link on its path is a
+  new reason. A link whose text, or whose symlink answer, cannot be read is
+  recorded with that side's own serial number, which no other side's
+  reason carries, so it is never excused. A reason only: which files stop
+  the scan on a parse error is unchanged.
+- **Symlinked target directories are followed.** A reference or link
+  target, or an include, whose path (the target itself or any directory
+  above it) is a symlink on that side is followed inside the repository,
+  each link read relative to its own directory (`resolveLinkedDir`; the git
+  side reads the link text from the blob, the working tree uses readlink),
+  and the reason lands on the manifest at the resolved path, the one the
+  scan reads.
+- **Link text and include text are walked physically.** The text of a
+  symlink and a requirements `-r`/`-c` target are opened by the operating
+  system, so they are resolved with the realpath walk over the side's
+  FileSource (`walkPhysicalPath`), never by string normalization and never
+  on disk: one segment at a time from an already-real directory, `.`
+  skipped, `..` popping the path resolved so far (so `sub/..` after a
+  symlinked `sub` is the parent of the link's target), a symlinked name
+  replaced by its own text walked from the link's parent, sharing the 40-hop
+  budget; climbing above the root, absolute or home text, or a read failure
+  is null, which every caller fails closed on. A package.json specifier and
+  an npm lockfile link entry's resolved path stay string-normalized first,
+  as npm's path.resolve does, and only the result is then walked. The
+  scan's own include reader (`followRequirementIncludes`), which loads the
+  names that are checked, places an include with the same walk and reads it
+  at the resolved path through the side's FileSource, so it reads through a
+  symlinked directory on a git side too; an include whose last segment is
+  itself a symlink is still not read (`requirements-line-unread`).
+- **A workspace member reached through a symlinked directory is mapped,
+  not sprayed (fix round 4).** A listed symlink outside node_modules whose
+  path a workspace pattern covers (exactly or inexactly,
+  `workspaceCoverage`, for the root `workspaces` field, the root
+  `pnpm-workspace.yaml` and every rule-4 install root; for a uv root,
+  `uvWorkspaceCovers`) or passes through (a proper prefix of the pattern,
+  or a trailing `**`, matches it; `workspacePatternsReachBelow`; an inexact
+  npm pattern counts) is followed with the walk above
+  (`markSymlinkedMembers` in `git-source.ts`):
+  - a link that reaches a listed file, or a path with nothing listed under
+    it, is not a member directory and gives no reason (this closes the
+    file-symlink over-keep under `**`);
+  - a link that reaches a directory R maps it: each listed manifest
+    R/sub/name is a member exactly when the same coverage that marks a
+    listed member covers link/sub, the path a package manager sees, and
+    gets that member's position and promotion. Its reason's pattern is
+    `["symlinked-member", link/sub, covering pattern or null, ...every link
+    read on the way]`, so a widened pattern (a path newly covered has no
+    reason on the base), a changed inexact pattern text, a retargeted link
+    or the same manifest reached through another link path is a new reason,
+    and an unchanged repository records identical reasons and is excused;
+  - every listed symlink under R is a further candidate at its path through
+    the link, followed the same way, with the links already read counted
+    against the one 40-hop budget.
+  A link that cannot be placed (it leaves the repository, is absolute or
+  home text, cannot be read, runs past the hop budget, or reaches a
+  directory already entered on its own chain) fails closed: the reason on every manifest of that kind on the
+  side, its pattern `["unfollowed-symlink", path through the links, the
+  input's canonical patterns (positives and negations, each sorted; for uv
+  the members and the exclude list), ...every link read]`. So only the same
+  links and the same patterns on the reference side excuse it: a widened
+  pattern is a new reason here too, and a link whose text or symlink answer
+  cannot be read carries the side's own serial and is never excused. A
+  placeable link adds no reason to any manifest outside the directory it
+  reaches. A reason only, as for an unplaceable target: neither kind of
+  reason makes a parse failure fatal. The `ignore-path-project-kept` note
+  names the links a mapped member was reached through, and for the
+  fail-closed reason says the symlink could not be followed (for a loop,
+  that following it loops back into a directory already on its path) and
+  that the path "counts as a project here", not that the change made it
+  one (`projectReasonText` in `git-source.ts`, `onlyUnfollowedLinks` in
+  `scan.ts`).
+- **The visit limit's reason is one no reference side excuses (fix round
+  5, corrected in fix round 6).** The symlinked member walk of one
+  workspace input makes at most 10,000 visits (`MAX_SYMLINKED_VISITS`),
+  counted per input (fix round 6; round 5 counted every input of a side
+  together, which let one input's fan-out cut another input's walk short
+  and drop the member that walk would have placed). A walk that still has
+  a link to visit once its budget is spent stops and puts one reason on
+  every manifest of that kind on the side, its pattern
+  `["symlink-fan-out", the input's canonical patterns, the side's
+  serial]`. The serial differs on every classified side, so no reference
+  side has that reason and a link past the limit, never read, cannot hide
+  a retarget. A repository past the limit therefore keeps every ignored
+  manifest of that kind, changed or not; the note says the symlinks under
+  the top-level link whose walk spent that input's budget fan out past
+  the limit, so each input's note names its own link. Round 5's wording,
+  "fails closed in a way nothing excuses", held only for ignorePaths: the
+  reason did not reach the skipped-directory-name read gate, so a member
+  under `build/` past the limit was dropped with a
+  `manifest-skipped-dirname` note and the run exited 0. The stand-in
+  below closes that. The physical walk of each listed link is done once
+  per side and reused (`walkLink` in `git-source.ts`): it reads only that
+  side's source from the link's own directory, so its target and the
+  links it reads do not depend on the chain that reached it, and the
+  reuse changes no result.
+- **A fail-closed reason stands in for promotion (fix round 6).** Every
+  fail-closed reason of an input that promotes also adds each manifest it
+  lands on to the side's `promoted` set (`standIn` in `git-source.ts`),
+  the set the skipped-directory-name read gate consults
+  (`readDespiteSkippedName`). The sites: the symlinked member walk's
+  unplaceable link (out of the repository, absolute, unreadable, past the
+  hop budget), its loop branch and its visit limit, for the root and
+  install-root workspace inputs; rule 5's fallback for an unplaceable
+  `file:` target or npm lockfile link entry; and the requirements include
+  fallback. The uv member walk does not promote, so its fail-closed
+  reasons do not stand in either: a uv member is parsed only to decide
+  whether it stops the scan, placed or not. A stand-in gives no position,
+  so it never makes a parse failure fatal whatever ignorePaths says; a
+  stand-in under `build/` that does not parse is judged as a manifest
+  outside any skipped name is, dropped with `manifest-unparsed` when
+  ignorePaths covers it and stopping the scan with the ordinary advice
+  when it does not. That second half is new: before round 6 such a file
+  was never read, so an unrelated broken manifest under `build/` on a
+  side with a fail-closed link now stops the scan unless ignorePaths
+  covers it. Dropping it instead would let a member the walk could not
+  place, written to fail this parser while a package manager still
+  installs it, pass with exit 0.
+- **The subdirectory read gate (fix round 7; pre-existing since 0.15.0).**
+  On a scan of a subdirectory, a side whose classification has an input
+  outside the prefix that could not be read and that a root scan would
+  have stopped on (`stoppingUnreadInputs` in `git-source.ts`, the one
+  decision behind both the `classification-input-unread` diagnostic and
+  the "every manifest under the prefix" protection in
+  `settleParseFailures`) reads every project manifest under the prefix
+  outside `node_modules` past the skipped-directory-name filter
+  (`readDespiteSkippedName`): a stand-in with no position, as `standIn`
+  gives. Before this, the diagnostic said every manifest under the prefix
+  was treated as a project while the read gate consulted `promoted` alone,
+  so `app/build/a/package.json` declaring a known-malicious name was
+  dropped with `manifest-skipped-dirname` and the scan of `app` exited 0
+  (a broken root `pnpm-workspace.yaml` or `package-lock.json`, staged and
+  audit; a root scan exits 2 on the same tree). The unread inputs are
+  decided once, when the side is loaded, against the comparison sides
+  already loaded (the judged side is loaded last in every mode), and
+  `settleParseFailures` raises the diagnostic from that same list and
+  throws an internal error if a side is settled against different
+  comparison sides than it was loaded against, so the diagnostic and the
+  gate cannot disagree. The stand-in is side-local: a comparison side's
+  unread input promotes that side's manifests, not the judged side's.
+  It covers nothing outside the prefix (the read gate only sees files
+  under it, and the condition checks `underPrefix` again) and nothing
+  under `node_modules`.
+- **The side-wide visit limit (fix round 7).** Over the per-input budget
+  sits one limit per side, `MAX_SIDE_SYMLINKED_VISITS` (100000) visits by
+  every input's symlinked member walk together. Once it is reached, the
+  next visit of any input fails closed exactly as the per-input limit
+  does: one reason on every manifest of that kind on the side, pattern
+  `["symlink-fan-out", the input's canonical patterns, the side's
+  serial]`, never excusable, plus the stand-in; the note reads "the
+  symlink walks on this side ran past the limit of 100000 visits in all
+  before the symlink X" (cause `side-fan-out`). Ten inputs can each spend
+  their own 10000 first, so TMPX7p's guarantee (another input's fan-out
+  does not take a member's position) holds up to nine fanning inputs; past
+  the side limit a member the remaining inputs would have placed has the
+  stand-in only, no position, so a broken one under ignorePaths is
+  dropped with `manifest-unparsed`. Accepted: only a side where ten inputs
+  fan out pathologically reaches it, and its findings are still read.
+- **Known behavior: a self-link under `**` over-keeps.** A link back to a
+  directory on its own path (`packages/a/self -> .` under `packages/**`)
+  is a loop, and a loop fails closed, so a new ignored manifest anywhere on
+  the side, outside the patterns too, is kept (a manifest new on the head
+  has no base reason). Accepted as rare; pinned by RC2.
+- **Reasons are transitive.** A judged reason counts as present on the
+  reference side only when its source manifest is itself excused, or is
+  not a project on the judged side at all: the input for reference-target,
+  requirements-include and uv-member; the install root's `package.json` for
+  root-member, install-root-member and link-target; none for root and
+  beside-lockfile. Without this, a base stray that references another
+  ignored manifest records that reason on the base, and a pull request that
+  wires only the stray into the install excused the manifest it reaches.
+  Excused is the greatest fixed point (`excusedProjects` in `scan.ts`):
+  every judged project whose reasons all appear on the reference side, less
+  any whose reason's source is not excused, repeated until nothing changes;
+  at most one pass per judged project path, and a run that did not settle
+  within that excuses nothing. A cycle of base-standing references stays
+  excused.
+- **The text summary's kept count.** `N kept over ignorePaths` prints, at
+  zero too, exactly when `ScanResult.ignoreRuleApplied` is true, which
+  `applyPathFilters` sets when the run had a reference side. It is never
+  derived from the mode: a staged run with no committed `HEAD` and no trust
+  base has none.
+- **Known open, after the implementation review (2026-10-18).** A target
+  that differs only in case from the listed directory (`file:Fixtures/helper`
+  on a case-insensitive macOS or Windows runner, where npm installs it) is
+  not matched to that directory, so its findings are dropped. A yarn
+  `patch:` specifier wrapping a `file:` target is not a reason. `ignoreKept`
+  counts a kept finding that the baseline then suppresses. The
+  `online-disabled` reason text says "the base config requires them" on a
+  `--base`-only run, where the config in effect is the head's. (A workspace
+  member reached only through a symlinked directory, open here until the
+  re-check of 2026-10-18, is now a member at its real path; see above.)
+  TB5, pre-existing since 0.13.0: a requirements include whose last
+  segment is itself a file symlink is noted (`requirements-line-unread`)
+  and not read for names, although pip reads it; the directories on its
+  path are followed.
+
+Tests (`nested-manifests.test.ts`, describe `a change that wires an ignored
+path into the install (0.16.0)`): `H1 a file: dependency on an ignored
+directory keeps its findings and is proposed`, `H1n the file: reason alone
+keeps the findings` (pnpm-lock.yaml, and no lockfile), `H1b a base that
+already counts the path as a project through rule 3 does not excuse a new
+file: wiring`, `H2 a workspaces glob widened over an ignored directory
+keeps its findings`, `H3 a project the base already installs that way
+keeps ignorePaths, with the standing choice noted`, `H3t a lockfile-tamper
+finding on a project the base installs is never dropped`, `H4 a manifest
+under an ignored path that nothing installs is dropped as before`, `H5 a
+lockfile added beside an ignored manifest keeps its findings`, `H6 a scan
+of the ignored directory itself keeps the findings and makes the same
+proposal`, `H7 a reference side whose out-of-prefix input is unreadable
+excuses nothing under the prefix` and its control, `H8 an inexact
+workspace pattern whose text changes is a new reason`, `H8b the same
+inexact pattern on both sides excuses, with no proposal`, `H9 the same
+rule applies to a --base run without --trust-base, as a diagnostic`, `H10
+a staged change is judged against HEAD without --trust-base and against
+the trust base with it`, `H11 an audit has no reference side and drops as
+before`, `H12 a pull request that removes the wiring is dropped, with no
+proposal`, `H13 an entry whose only matches were kept findings is not
+reported unmatched`, `H14 both states reaching the filter carry projects,
+and a judged state without them is an internal error`, `H15 a stray
+declaring a root-lockfile name does not pull its tamper finding into an
+ignored path`, `H15c a stray under an ignored path with its own git
+specifier is still dropped`, `H16 a requirements file the root includes
+with -r keeps its findings`, `H16s the include is seen from a scan of the
+ignored directory, outside which it is written`, `H17 a
+pnpm-workspace.yaml negation does not cancel a member the workspaces field
+adds`, `H18 a nested lockfile whose only wiring is itself stays excused by
+ignorePaths`, `H19 a nested lockfile in a directory the change wires in is
+judged, and the hint names the wiring`, `H20 --staged --trust-base judges
+against the trust base, not HEAD`, `H21 with --base X --trust-base Y, Y
+decides even where X installs the path`, `H22 --trust-base without --base
+applies the rule with the trust base as reference`, `H23 the proposal is
+made when the newly wired path has no findings`, `H24 twelve wired paths
+give ten proposal lines and one count line; JSON lists all twelve`, `H25
+an audit of a tree that installs an ignored path says so in the dropped
+note`, `H26 a clean pull request reports the new fields at zero`, `H27 the
+link exemption still reads the base field where the base has the
+package.json and no lockfile`, `H28 a kept finding has the fingerprint it
+would have with no ignorePaths`, and from the implementation review: `H29
+a bare relative-path dependency on an ignored directory keeps its
+findings` (no lockfile, pnpm-lock.yaml), `H29c a bare-path wiring the base
+already has keeps ignorePaths`, `H30 ... cannot be placed, so every ignored
+package.json keeps its findings` (an absolute bare path, an absolute file:
+path, a relative path that leaves the repository), `H30c the same absolute
+specifier on the base is the same reason and excuses`, `H31 a file: target
+reached through a symlinked directory keeps the real manifest's findings`
+(without a lockfile, with a full npm lockfile), `H31c a symlinked wiring the
+base already has keeps ignorePaths`, `H31o a symlinked target that leaves
+the repository fails closed over every ignored package.json`, `H32 a
+reference from a newly wired manifest is not excused by a stray's identical
+base reason` (no lockfile, pnpm-lock.yaml), `H32d the kept status
+propagates down a chain of stray references`, `H32c a reference chain the
+base already installs keeps ignorePaths`, `H32y a base-standing reference
+cycle stays excused`, `H33 an absolute requirements include fails closed
+over every ignored requirements file`, `H34 the rule is recorded as applied
+only on a run with a reference side`; from the re-check: `H32r the kept
+status propagates down a reverse-named chain that needs a second pass`,
+`H35 a link whose text climbs out of a symlinked directory is followed
+physically`, `H35c the same climbing link the base already has keeps
+ignorePaths`, `H36 a requirements include that climbs out of a symlinked
+directory is followed physically`, `H37 a workspace member that is a
+symlinked directory keeps the real manifest's findings` (the workspaces
+field, pnpm-workspace.yaml), `H37c a symlinked member the base already has
+keeps ignorePaths`, `H37o a symlinked member that leaves the repository
+fails closed over every ignored package.json`, `H37i an install root's
+symlinked member keeps the real manifest's findings`, `H38 a workspace
+pattern that passes through a symlinked directory makes the member behind
+it a project`, `H38c a
+symlinked workspace directory the base already has keeps ignorePaths`,
+`H39 a uv workspace member that is a symlinked directory is a member at its
+real path`, `H39p an ignored symlinked uv member that is not TOML exits 2`,
+`H39b a uv members pattern that passes through a symlinked directory makes
+the member behind it a project`; from fix round 4: `B4 a pattern widened
+through a symlinked directory the base already has keeps its findings`
+(the workspaces field, pnpm-workspace.yaml), `B4i an inexact pattern
+through a symlinked directory whose text changes is a new reason`, `B4u a
+uv members pattern widened through a symlinked directory the base already
+has is a new reason`, `FK1 a placeable symlink under a pattern does not
+make a new stray outside it a project` (a directory symlink, a file
+symlink), `FK1c a new manifest the pattern reaches only through a
+placeable link is kept, and a stray beside it is not`, `TB1 a head that
+retargets a link nested under a symlinked workspace directory keeps its
+findings`, `TB2 an unchanged nested link chain still excuses a manifest
+change behind it and beside it`, `U5 a pattern widened past an
+unplaceable symlinked member keeps its findings`; from the second re-check: `H32r4 the kept status propagates down a
+four-level reverse-named chain`, `ZZ1 a head that retargets a pass-through
+symlinked workspace directory keeps its findings`, `ZZ1n a head that
+retargets a pass-through symlinked directory to a new directory keeps its
+findings`, `ZZ1m a head that retargets a placeable symlinked member keeps
+its findings`, `ZZ2 a head that retargets an unplaceable symlinked member
+keeps its findings` (absolute, through the checkout directory name), `ZZ2c
+the same unplaceable symlinked member the base already has keeps
+ignorePaths`, `ZZ5 a head that retargets a link on an unplaceable file:
+specifier keeps its findings`, `ZZ6 a head that retargets a link on an
+unplaceable requirements include keeps its findings`, `ZZ3 an include that
+climbs out of a symlinked directory is read for names`, `ZZ3c an include
+written as the real path is read for names`, `ZZ3g an include through a
+symlinked directory is read for names on a git side`, `ZZ3w an include
+through a symlinked directory is read for names on the working tree`; from
+fix round 5: `RC1 a retarget past the symlink fan-out limit keeps its
+findings`, `RC1c the same retarget of a symlinked member with no fan-out
+keeps its findings`, `RC2 a self-link under ** fails closed, so a new
+ignored stray outside the patterns is kept`, `RC2b a retargeted link in a
+two-link loop keeps its findings`, `RC2c an unchanged two-link loop the
+base already has still excuses a manifest change`; from fix round 6
+(staged mode, the index judged): `TMPX7 a fan-out under one input does not
+drop a member another input reaches under build/`, `TMPX7c the same member
+with no fan-out keeps its findings`, `TMPX7p past another input's fan-out
+the member keeps its position, so a broken one stops the scan`, `TMPX6 a
+fan-out under the same input does not drop a member under build/`, `N1
+each input's fan-out reason names its own link`, `TMPX8 %s to a member
+under build/ does not drop it` (an absolute link; a link out and back in
+through the checkout name), `TMPX8c a member under build/ reached only
+past a link loop is not dropped`, `TMPX9 a file: target under build/ the
+tool cannot place is not dropped`, `TMPX9r a requirements include under
+build/ the tool cannot place is not dropped`, `TMPX10 a fail-closed link
+and an unrelated broken manifest under build/ (%s)` (covered by
+ignorePaths: dropped, exit 0; not covered: exit 2 with the ordinary
+advice); from fix round 7: `SD1 a subdirectory scan with %s outside it`
+(a broken root pnpm-workspace.yaml; a broken root package-lock.json), each
+with `reads a manifest under build/ for names (%s)` (staged, audit) and
+`reads a manifest under build/ for names on the working tree under
+--base`, `SD1n a subdirectory scan with an unread input still does not
+read under node_modules`, `SD1c control: a subdirectory scan with every
+input readable still skips build/`, `SC1 past the side-wide visit limit a
+later input fails closed and still reads its member for names`; and
+in output-text.test.ts `H34
+printed, at zero, only when the run applied the ignorePaths project rule`.
+CLI (`trust-base-cli.test.ts`): `H1 CLI
+text`, `H1 CLI JSON`, `H1 CLI SARIF`. Changed by this rule: `ignoring the
+root lockfile no longer silences a lockfile-tamper finding on it (0.16.0)`
+and `a surviving pattern that drops findings reports the highest severity
+it dropped` (scan.test.ts), `ignorePaths on the base no longer clears a
+tamper finding in a nested project the base installs (0.16.0)`
+(silent-passes.test.ts).
+
+Mutations, each applied alone, the test files named run
+(`nested-manifests.test.ts`, plus `audit-2026-10-12.test.ts`,
+`scan.test.ts`, `silent-passes.test.ts` or `trust-base-cli.test.ts` after a
+build where the row needs them), and reverted (2026-10-18). Every test the
+design's table requires went red; the column lists everything that did.
+
+| Mutation | Went red |
+|---|---|
+| Drop on an entry match before consulting reasons | H1, H1b, H1n (both), H2, H3t, H5, H6, H7, H8, H9, H10, H13, H14, H16, H16s, H17, H20, H21, H22, H28 |
+| Read the reference reasons from the judged side (ignorePaths consumer) | H1, H1b, H1n (both), H2, H5, H6, H8, H9, H10, H13, H16, H16s, H17, H19, H20, H21, H22, H23, H24, H28 |
+| Read the link exemption's base field from the head (link consumer) | H2, H27, `under --trust-base a workspaces glob the pull request adds does not confirm its own link` |
+| Excuse by path instead of by reasons | H1b, H8 |
+| Inexact-pattern reasons never excuse | H8b |
+| Skip the proposal line | H1, H1b, H2, H5, H16, H16s, H23, H24, H1 CLI text, JSON, SARIF |
+| No reason for `file:` targets (the rule ignores reference-target reasons) | H1, H1n (both), H19, H21, H23, H24 |
+| The unread-input expansion excuses everything under the prefix | H7 |
+| The reference side's unread inputs ignored | H7 |
+| R1 in audit mode | H11, H25 |
+| Drop tamper on a base-installed project | H3t, `ignoring the root lockfile no longer silences a lockfile-tamper finding on it (0.16.0)`, `ignorePaths on the base no longer clears a tamper finding in a nested project the base installs (0.16.0)` |
+| Keep non-tamper on a base-installed project | H3, H7 control, H8b, H10 |
+| Match `manifestPath` for a non-project anchor | H15 |
+| Match `lockfilePath` without the record check | H15c, `a surviving pattern that drops findings reports the highest severity it dropped` |
+| No requirements-include reasons | H16, H16s |
+| Requirements includes from the scan prefix only | H16s |
+| Field and yaml negations evaluated together | H17 |
+| Count the judged lockfile's own rule-3 reason | H18 |
+| Nested exemption on ignorePaths alone | H19 |
+| HEAD as reference for `--staged --trust-base` | H10, H20 |
+| The `--base` side as reference under `--trust-base` | H21 |
+| Missing judged `projects` read as nothing kept | H14 |
+| Link check keyed on the base having a lockfile there | H27 |
+| `ignoreOverride` placed in `details.signal` | H28 |
+| Bare local paths left out of rule 5 | H29 (both), H30 (absolute bare path) |
+| An unplaceable target dropped instead of covering every manifest | H30 (all three), H31o |
+| Symlinked target directories not followed | H31 (both), H31o |
+
+The implementation-review rows above were run against
+`nested-manifests.test.ts` alone. Still to be run for this round: a
+reason whose source is not excused still counts (expected red: H32, H32d),
+no propagation pass (H32d), seeding the fixed point empty (H32c, H32y),
+an unplaceable include dropped (H33), `ignoreRuleApplied` always true
+(H34 core) and the text summary read from the mode (H34 text). Also still
+to be run, from the re-check: one propagation pass that returns its
+partial set (the `settled = false` assignment dropped; expected red:
+H32r4, which the second re-check showed exits 0 with w dropped and
+x, y, z proposed under it; the three-level H32r stays green under it,
+since the final check against the partial set catches one level),
+link text string-normalized instead of walked (H35), include text
+string-normalized instead of walked (H36), symlinked members skipped
+(H37 (both), H37o, H37i, H39, H39p), the pass-through check dropped (H38,
+H39b), and the unfollowable-member fallback dropped (H37o). From the
+second re-check: M13, the fail-closed symlink reason keyed back on the
+link's path only (expected red: ZZ1, ZZ2 (both)); M13b, the rule-5 and
+include fallbacks keyed back on the written text only (expected red: ZZ5,
+ZZ6); M14, the scan-side include reader back to string normalization
+(expected red: ZZ3, ZZ3g). From fix round 4, pending: M13c, links nested
+under a symlinked directory not followed (expected red: TB1); M15, the
+covering pattern dropped from the symlinked-member reason key (expected
+red: B4i; B4 itself stays green under M15, since a path the base pattern
+does not cover has no base reason at all, whatever the key); M15b, the
+patterns dropped from the fail-closed key (expected red: U5); M16, the
+blanket spray restored for placeable links (expected red: FK1 (both),
+FK1c, H38); M17, a link that reaches a file failed closed instead of
+skipped (expected red: FK1 (a file symlink)). Deleting the early return
+for a file or empty target alone is not a mutation that can go red: the
+mapping under a file finds no manifest and no nested link, so it gives no
+reason either way. From fix round 5, pending: M18, the visit limit's key
+without the side's serial (expected red: RC1); M19, the loop branch skips
+instead of failing closed (expected red: RC2, RC2b). From fix round 6,
+pending: M22, fail-closed without the stand-in (`standIn` calls removed
+from the symlinked member walk, rule 5 and the include fallback; expected
+red: TMPX6, TMPX8 (both), TMPX8c, TMPX9, TMPX9r, TMPX10 (not covered by
+ignorePaths); TMPX7 stays green under M22, since the per-input budget
+alone lets the apps/* input place the member); M23, the visit budget
+shared over every input of a side again (expected red: TMPX7p, N1; TMPX7
+stays green under M23, since the stand-in alone reads the member, so
+TMPX7p, which needs the member's position, is what pins the per-input
+budget). From fix round 7, pending: M24, the subdirectory stand-in removed
+(`readDespiteSkippedName` back to `promoted` alone; expected red: the four
+SD1 staged and audit cases and the two SD1 `--base` cases, all six red on
+the pre-fix code in TDD; SD1n and SD1c stay green under M24); M25, the
+side-wide cap removed (the `MAX_SIDE_SYMLINKED_VISITS` check dropped;
+expected red: SC1, whose r10 reason is then a followed member reason, not
+`side-fan-out`; not yet shown red, since SC1 was written with the cap in
+place).
+
+## An unchecked name does not pass a pull request (0.16.0)
+
+Design section 8 (audit B2, and the 2026-09-29 ruling F8). On a run with
+`--base` or `--trust-base` (and `check --trust-base`) with online lookups
+on, a candidate name an online step left unchecked makes the run exit 2,
+with the report built in full: `run.couldNotRun` is `{ code:
+"online-names-unchecked", message }`, `exitCode` is 2, `evaluateGate`
+stays 0 or 1 (scan.ts, `settleOnlineUnchecked`).
+
+- Only "it exists" or a 404 is a checked name. Unchecked is `budget` (the
+  budget was spent before the name came up), `unreachable` (an answer the
+  client already counts as unreachable: network error, timeout, a 5xx after
+  the retry, a 429, any other 4xx except 404, and on PyPI a 3xx or a 2xx
+  naming another project; with the HTTP status where known, carried on the
+  client's error, `online/http.ts` and `online/pypi-client.ts`), or
+  `online-disabled`. A tombstone, a security-holding placeholder and a
+  packument with no usable version are answers, so checked; a name absent
+  from a downloads response is unanswered, so unchecked.
+- Every step reports its own unchecked names through one sink
+  (`online/unchecked.ts`): npm unknown-package resolution, PyPI existence,
+  the typosquat asymmetry step (whose budget gate is in scan.ts, listing
+  the names the step would have sent), registered-squat and publish-age.
+- Never counted: a name an `allow` entry clears (filtered after the steps,
+  without recording a clearance, since PyPI looks a name up before asking
+  `allow`), an internal name, a confirmed workspace sibling and a name from
+  a private registry or index (both skipped by the steps themselves; the
+  workspace exclusion stays per lockfile directory).
+- `"online": true` on the governing config (the trust base's under
+  `--trust-base`, else the config in effect) with online turned off on the
+  command line makes every candidate unchecked with `online-disabled`. The
+  candidates are enumerated by the steps themselves, over copies, against a
+  budget already spent, so no request is made.
+- `onlineUnchecked` (`"fail"`, the default, or `"note"`) is read from the
+  governing config; under `--trust-base` a head change to it is a config
+  proposal (`describeConfigChange`). `"note"` keeps the diagnostic and still
+  reports the count.
+- JSON: `run.online.unchecked` `{ count, names: [{ name, ecosystem, step,
+  reason, status? }] }`, sorted, uncapped, present whenever online is on or
+  the online-disabled rule applied. Text: one line after the findings,
+  counting distinct names (one name two steps left unchecked is one, shown
+  with both steps' reasons), ten names at most then a count; stderr carries
+  the same line with its code. `count` in the JSON stays the number of
+  per-step entries.
+  SARIF: `invocations[0].executionSuccessful` false with one error
+  notification, merged into the single invocation beside the proposal
+  notes; `run.properties.onlineUnchecked`. The Action's exit-2 text names
+  the cause. Conductor reads any family gate's exit 2 as could-not-run.
+- Plain and audit runs keep diagnostics only, and report the names.
+- Known open: publish-age's private-origin skip keys on the head-written
+  resolved URL (`online/publish-age.ts`). A foreign-host entry is a high
+  `lockfile-tamper` finding, so it is not a silent route, but under
+  `failOn: "critical"` that name passes with publish-age unchecked.
+- Known open, the other direction: the online steps run before
+  `ignorePaths` is applied, so a name declared only in a manifest whose
+  findings `ignorePaths` then drops (a stray fixture nothing installs) is
+  still a candidate and still counts as unchecked. A pull request whose
+  only new names sit in such a fixture exits 2 when the budget is spent or
+  the registry does not answer, although no answer could have changed its
+  verdict. Fail-closed, so not a silent pass; awaiting a ruling (found on
+  eslint's `tests/fixtures`, 2026-10-18).
+- Known open: the `online-disabled` reason text says "while the base config
+  requires them" on a `--base` run without `--trust-base`, where the
+  governing config is the one in effect, not the base's.
+
+Tests (`scan-pypi.test.ts`, describe `an unchecked name does not pass a
+pull request (0.16.0)`): `U1 a spent budget on a pull request is exit 2
+with both names and the full report`, `U2 npm names queued for
+registered-squat and publish-age, budget spent: exit 2 with the steps
+named`, `U3 a PyPI 404 for one name and a spent budget for the other: one
+critical and one unchecked name, exit 2`, `U4 every name answered, one
+404: exit 1 and nothing unchecked`, `U5 every unreachable answer is
+unchecked, with its status where known` (and the client half, `U5 ...
+throws carrying its status` in online-pypi.test.ts), `U6 allowed,
+workspace-local and internal names are never counted`, `U7 a plain run and
+an audit keep the diagnostics only`, `U8 the base sets onlineUnchecked
+note: exit 0, the count still reported`, `U9 only the head sets
+onlineUnchecked note: exit 2, and the config proposal names the key`, `U10
+twelve unchecked names: the line lists ten and a count, the JSON all
+twelve`, `U12 check with --trust-base and --online, budget spent: exit 2`,
+`U13 the base config requires online and the command line turned it off:
+every candidate is unchecked`, `U14 a base config with online false and
+--no-online is unchanged` (and absent), `U15 a budget spent before the
+asymmetry step names the queued low typosquat with that step`. CLI
+(`trust-base-cli.test.ts`): `U11 SARIF with a proposal: one invocation
+holding the proposal note and the error`, `U11 SARIF without a proposal:
+an invocation with the error alone`, `U11 JSON: run.online.unchecked and
+run.couldNotRun, exit 2`, `U10 text and stderr list ten names and a
+count`. Changed by this rule (scan-online.test.ts): `a fetch failure
+degrades cleanly: offline findings survive, a diagnostic is added, and a
+--base run exits 2`, `a registry failure leaves unknown-package exactly as
+the offline scan had it` (now exit 2 with the name listed), and the
+downloads mock of the describe `scan(): --online resolves unknown-package
+against the registry`, which now answers every name.
+
+Mutations, each applied alone, `scan-pypi.test.ts` and
+`scan-online.test.ts` run (and `trust-base-cli.test.ts` after a build for
+the rows that need the CLI), and reverted (2026-10-18):
+
+| Mutation | Went red |
+|---|---|
+| Unchecked names become medium findings instead of exit 2 | U1, U2, U3, U5, U9, U10 (core and CLI), U11 (all three), U13, U15, `a fetch failure degrades cleanly: ...`, `a registry failure leaves unknown-package exactly as the offline scan had it` |
+| B2 on plain and audit runs | U7, `budget exhausted mid-ecosystem: ...`, `PyPI 5xx: no finding, ...` |
+| Ignore `onlineUnchecked` | U8 |
+| Read `onlineUnchecked` from the head | U9 |
+| A PyPI 404 recorded as unchecked | U3, U4 |
+| Only 5xx and 429 count as unreachable | U5, the same two scan-online tests |
+| No allow and no internal filter on the unchecked set | U6 |
+| No allow filter on the unchecked set | U6 |
+| Collect only the PyPI step | U2, U5, U12, U15, the same two scan-online tests |
+| Drop registered-squat's names / publish-age's / unknown-package's / the asymmetry step's | U2 and U12 / U2 / U5 and `a registry failure ...` / U15 |
+| Ignore `--no-online` when the base config says online true | U13 |
+| The online-disabled rule without the base requiring online | U14 (both), and five scan-online tests that run with online off on a `--base` run |
+| Each notification in its own invocation | U11 SARIF with a proposal |
+| Drop the proposal notes beside the error | U11 SARIF with a proposal |
+| `executionSuccessful` left true | U11 SARIF with a proposal, U11 SARIF without a proposal |
+
+U6 does not go red under the first row, which the design's table expected:
+that mutation turns the counted names into findings, and U6's names are
+never counted, so it is pinned by the two filter rows instead. Removing
+only the internal-name filter from the unchecked set survives: every step
+already skips internal names before it reports one, so that filter is a
+second guard with no distinguishable behaviour. The workspace-local half of
+"count allowed or workspace-local names" was not mutated on its own: the
+exclusion lives in the steps' own candidate filters (`candidates.ts`,
+publish-age's `workspaceLocalNames`), which the offline checks share, so a
+mutation there moves offline findings too.

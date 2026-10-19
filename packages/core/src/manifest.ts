@@ -149,6 +149,12 @@ const HOSTED_GIT_SCHEMES = ['github:', 'gitlab:', 'bitbucket:', 'gist:', 'source
 // most contain a slash.
 const LOCAL_PATH_SPEC = /^(?:[.]|~[/]|[/\\]|[a-zA-Z]:)/;
 
+// True when npm reads this dependency specifier, as written, as a local
+// directory with no protocol prefix ("./x", "../x", "/x", "~/x", "C:x").
+export function isLocalPathSpecifier(specifier: string): boolean {
+  return LOCAL_PATH_SPEC.test(specifier);
+}
+
 // The bare "owner/repo" shorthand, with an optional "#ref": npm treats a
 // dependency specifier of this shape as github:owner/repo. This is
 // hosted-git-info's isGitHubShorthand rule, kept as close to verbatim as

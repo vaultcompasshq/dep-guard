@@ -34,6 +34,7 @@ import { isInternalName } from '../checks/allow.js';
 import { isNonPublicName } from './registry-scope.js';
 import type { DownloadCountsResult } from './registry-client.js';
 import type { Diagnostic, Finding } from '../types.js';
+import { unreachable, type UncheckedSink } from './unchecked.js';
 
 export const ASYMMETRY_DOWNLOAD_FLOOR = 2_000;
 
@@ -45,11 +46,31 @@ export interface AsymmetryDeps {
   fetchWeeklyDownloads(names: string[]): Promise<DownloadCountsResult>;
 }
 
+// The names this step would send, without its diagnostics: what scan.ts
+// lists as unchecked when the budget is spent before the step starts (it
+// has one bulk request and so one point at which it could stop).
+export function asymmetryCandidateNames(findings: readonly Omit<Finding, 'fingerprint'>[], ctx: CheckContext): string[] {
+  const names = new Set<string>();
+  for (const finding of findings) {
+    if (
+      finding.ruleId === 'typosquat' &&
+      finding.severity === 'low' &&
+      !isPythonFinding(finding) &&
+      !isInternalName(finding.packageName, ctx.config.internalScopes, ctx.config.internalPrefixes) &&
+      !isNonPublicName(ctx, finding.packageName)
+    ) {
+      names.add(finding.packageName);
+    }
+  }
+  return [...names];
+}
+
 export async function applyTyposquatAsymmetry(
   findings: Omit<Finding, 'fingerprint'>[],
   ctx: CheckContext,
   deps: AsymmetryDeps,
-  diagnostics: Diagnostic[]
+  diagnostics: Diagnostic[],
+  unchecked: UncheckedSink = () => {}
 ): Promise<void> {
   const candidates: Omit<Finding, 'fingerprint'>[] = [];
   for (const finding of findings) {
@@ -86,6 +107,9 @@ export async function applyTyposquatAsymmetry(
   try {
     downloadsResult = await deps.fetchWeeklyDownloads(candidates.map((f) => f.packageName));
   } catch (err) {
+    for (const finding of candidates) {
+      unchecked(unreachable(finding.packageName, 'npm', 'asymmetry', err));
+    }
     diagnostics.push({
       code: 'online-check-unreachable',
       message:
@@ -125,6 +149,8 @@ export async function applyTyposquatAsymmetry(
     } else if (downloadsResult.noRecord.has(finding.packageName)) {
       downloads = 0;
     } else {
+      // Unresolved: no answer for this name, so it was not checked.
+      unchecked({ name: finding.packageName, ecosystem: 'npm', step: 'asymmetry', reason: 'unreachable' });
       continue;
     }
     if (downloads >= ASYMMETRY_DOWNLOAD_FLOOR) {

@@ -208,6 +208,22 @@ describe('loadConfig', () => {
   // onlineBudgetMs (issue #75): unset by default, so scan.ts can tell "no
   // opinion configured" apart from an explicit override and pick between
   // the hook default and the much larger pull-request default itself.
+  // onlineUnchecked (0.16.0, audit B2): "fail" or "note", absent by default
+  // (which reads as "fail"); anything else is invalid config.
+  test.each(['fail', 'note'])('onlineUnchecked %s is accepted', (value) => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ onlineUnchecked: value }) });
+    expect(loadConfig(repoRoot).onlineUnchecked).toBe(value);
+  });
+
+  test.each([['off'], [true], [0]])('onlineUnchecked %p is refused as config-invalid', (value) => {
+    const repoRoot = makeRepo({ '.dep-guard.json': JSON.stringify({ onlineUnchecked: value }) });
+    expect(() => loadConfig(repoRoot)).toThrow(DepGuardError);
+  });
+
+  test('onlineUnchecked is undefined by default', () => {
+    expect(loadConfig(makeRepo()).onlineUnchecked).toBeUndefined();
+  });
+
   test('onlineBudgetMs is undefined by default', () => {
     const repoRoot = makeRepo();
     expect(loadConfig(repoRoot).onlineBudgetMs).toBeUndefined();

@@ -38,6 +38,7 @@ import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
 import { isNonPublicName, PUBLIC_REGISTRY_ORIGIN } from './registry-scope.js';
+import { unreachable, type UncheckedSink } from './unchecked.js';
 
 export interface PublishAgeDeps {
   // `versions` names exactly the resolved versions this call needs an
@@ -237,7 +238,8 @@ export async function findPublishAgeFindings(
   deps: PublishAgeDeps,
   diagnostics: Diagnostic[],
   deadline: OnlineDeadline,
-  now: () => number = Date.now
+  now: () => number = Date.now,
+  unchecked: UncheckedSink = () => {}
 ): Promise<Omit<Finding, 'fingerprint'>[]> {
   const candidates = collectCandidates(ctx, diagnostics);
   if (candidates.length === 0) {
@@ -271,9 +273,14 @@ export async function findPublishAgeFindings(
   const findings: Omit<Finding, 'fingerprint'>[] = [];
   let skippedByDeadline = 0;
 
+  const groupNames = (group: readonly Candidate[]): string[] => [...new Set(group.map((candidate) => candidate.name))];
+
   for (const [lookupName, group] of byLookupName) {
     if (deadline.expired()) {
       skippedByDeadline += group.length;
+      for (const name of groupNames(group)) {
+        unchecked({ name, ecosystem: 'npm', step: 'publish-age', reason: 'budget' });
+      }
       continue;
     }
 
@@ -284,6 +291,9 @@ export async function findPublishAgeFindings(
         group.map((candidate) => candidate.version)
       );
     } catch (err) {
+      for (const name of groupNames(group)) {
+        unchecked(unreachable(name, 'npm', 'publish-age', err));
+      }
       diagnostics.push({
         code: 'online-check-unreachable',
         message:

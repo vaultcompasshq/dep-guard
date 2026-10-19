@@ -107,7 +107,69 @@ export interface RepoState {
   // ignorePaths covers them (manifest-unparsed), counted in
   // run.ecosystems.*.notParsed. Absent on a state built by hand.
   notParsed?: string[];
+  // Which manifests are projects on this side, and every reason each one
+  // is (git-source.ts, classifySide), computed over the whole listing
+  // whatever the scan prefix. The ignorePaths rule and the link exemption
+  // both read this one value (docs/design/2026-10-18-head-defined-projects-
+  // and-ignore-paths.md). Set on every side git-source.ts loads; absent on
+  // a state built by hand.
+  projects?: ProjectClassification;
 }
+
+// What makes a manifest a project: classifySide's rules 1 to 5, plus a
+// requirements file another requirements file includes with -r or -c.
+export type ProjectRule =
+  | 'root'
+  | 'root-member'
+  | 'install-root-member'
+  | 'uv-member'
+  | 'beside-lockfile'
+  | 'reference-target'
+  | 'link-target'
+  | 'requirements-include';
+
+// One reason a path is a project on one side: the rule, the install root
+// directory it is relative to, the input file that says so, and the
+// workspace pattern text when the match was not exact. Two sides record
+// the same reason exactly when all four agree.
+export interface ProjectReason {
+  rule: ProjectRule;
+  root: string;
+  input: string;
+  pattern?: string;
+  // For messages only, never part of the key: the symlinks a workspace
+  // member was reached through, or the one symlink that could not be
+  // followed (every manifest of that kind on the side then carries it).
+  // An unfollowed link's cause, when it is not that the link could not be
+  // read or placed: 'cycle' when it loops back into a directory already on
+  // its path, 'fan-out' when the links under it run past the visit limit of
+  // one input, 'side-fan-out' when the walks of every input on the side
+  // together run past the side's visit limit.
+  link?: { paths: string[]; followed: boolean; cause?: 'cycle' | 'fan-out' | 'side-fan-out' };
+}
+
+export interface ProjectClassification {
+  // Every project path on this side, with every reason it is one.
+  reasons: ReadonlyMap<string, readonly ProjectReason[]>;
+  // The "workspaces" field of every package.json on this side that parsed,
+  // keyed by its path, as written (each with its own negations), and an
+  // empty list when the field is absent. The link exemption reads this.
+  workspaceFields: ReadonlyMap<string, readonly string[]>;
+  // Inputs outside the scan prefix that could not be read and would have
+  // stopped a root scan (classification-input-unread). A side with any
+  // excuses nothing under the prefix.
+  unreadInputs: readonly string[];
+}
+
+export function projectReasonKey(reason: ProjectReason): string {
+  return JSON.stringify([reason.rule, reason.root, reason.input, reason.pattern ?? null]);
+}
+
+export const EMPTY_PROJECTS: ProjectClassification = {
+  reasons: new Map(),
+  workspaceFields: new Map(),
+  unreadInputs: [],
+};
 
 const SCOPE_PIN_SUFFIX = ':registry';
 

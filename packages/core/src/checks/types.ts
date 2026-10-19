@@ -43,6 +43,11 @@ export interface ResolvedConfig {
   // one budget covers every online step in a run rather than one per
   // request.
   onlineBudgetMs?: number;
+  // "fail" (the default when absent) or "note": whether a --base or
+  // --trust-base run exits 2 when a candidate name was left unchecked by
+  // an online step (online/unchecked.ts). Optional so a hand-built config
+  // in a test need not name it.
+  onlineUnchecked?: 'fail' | 'note';
   // "PATH:BLOBID" entries, each acknowledging one exact set of bytes for
   // one root lockfile so the lockfile downgrade rule lets it through (see
   // delta.ts). Read from the comparison side's config only. Optional so a

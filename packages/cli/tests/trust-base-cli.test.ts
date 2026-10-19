@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -200,6 +200,8 @@ describe('dep-guard scan --trust-base', () => {
       configShapeChange: null,
       baselineShapeChange: null,
       npmrcShapeChange: null,
+      projectPathsChanged: false,
+      ignoredPathsMadeProjects: [],
     });
     expect(result.exitCode).toBe(1);
     expect(run.exitCode).toBe(1);
@@ -337,6 +339,194 @@ describe('dep-guard scan: a lockfile downgrade is could-not-run at the CLI', () 
 
     expect(run.exitCode).toBe(2);
     expect(run.stderr).toContain('(lockfile-downgrade)');
+  }, CLI_TIMEOUT_MS);
+});
+
+// H1 at the CLI (docs/design/2026-10-18-head-defined-projects-and-ignore-paths.md,
+// section 7, "the CLI case"): a pull request that wires a directory the base
+// ignores into the install keeps its findings, in every output format.
+describe('a change that wires an ignored path into the install, at the CLI (0.16.0)', () => {
+  async function writeDeep(relPath: string, content: string): Promise<void> {
+    await mkdir(path.dirname(path.join(repo, relPath)), { recursive: true });
+    await write(relPath, content);
+  }
+
+  async function makeWiringPullRequest(): Promise<void> {
+    await write('package.json', manifestJson({}));
+    await write('package-lock.json', lockJson({}));
+    await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['fixtures'] }));
+    await commitAll('base state');
+    await git('checkout', '-q', '-b', 'feature');
+    await write('package.json', manifestJson({ helper: 'file:fixtures/helper' }));
+    await writeDeep('fixtures/helper/package.json', manifestJson({ [UNKNOWN_NAME]: '1.0.0' }));
+    await commitAll('wire fixtures/helper into the install');
+  }
+
+  const PROPOSAL =
+    'ignorePaths: this change makes ignored path fixtures/helper/package.json a project ' +
+    '(the target of a file:, link: or portal: dependency); its findings are kept';
+
+  test('H1 CLI text: the finding is kept, the proposal printed, and the summary counts it', async () => {
+    await makeWiringPullRequest();
+
+    const run = await runCli(['scan', '--base', 'main', '--trust-base', 'main', '--corpus-dir', FIXTURE_CORPUS]);
+
+    expect(run.exitCode).toBe(1);
+    expect(run.stdout).toContain(UNKNOWN_NAME);
+    expect(run.stdout).toContain(`  ${PROPOSAL}`);
+    expect(run.stdout).not.toContain('no control input changed in this pull request');
+    expect(run.stdout).toMatch(/0 ignored, [1-9]\d* kept over ignorePaths, /);
+  }, CLI_TIMEOUT_MS);
+
+  test('H1 CLI JSON: ignoreKept, the trustBase fields, and ignoreOverride on the finding', async () => {
+    await makeWiringPullRequest();
+
+    const run = await runCli([
+      'scan',
+      '--base',
+      'main',
+      '--trust-base',
+      'main',
+      '--format',
+      'json',
+      '--corpus-dir',
+      FIXTURE_CORPUS,
+    ]);
+
+    const result = JSON.parse(run.stdout.trim()) as ScanResult;
+    expect(result.ignored).toBe(0);
+    expect(result.ignoreKept).toBe(result.findings.length);
+    expect(result.trustBase?.proposals).toEqual([PROPOSAL]);
+    expect(result.trustBase?.projectPathsChanged).toBe(true);
+    expect(result.trustBase?.ignoredPathsMadeProjects).toEqual(['fixtures/helper/package.json']);
+    expect(result.findings[0].ignoreOverride).toEqual({
+      entries: ['fixtures'],
+      position: 'the target of a file:, link: or portal: dependency',
+    });
+    expect(run.exitCode).toBe(1);
+  }, CLI_TIMEOUT_MS);
+
+  test('H1 CLI SARIF: the proposal is a notification and the kept result carries ignoreOverride', async () => {
+    await makeWiringPullRequest();
+
+    const run = await runCli([
+      'scan',
+      '--base',
+      'main',
+      '--trust-base',
+      'main',
+      '--format',
+      'sarif',
+      '--corpus-dir',
+      FIXTURE_CORPUS,
+    ]);
+
+    const sarif = JSON.parse(run.stdout) as {
+      runs: {
+        properties: Record<string, unknown>;
+        results: { properties: Record<string, unknown> }[];
+        invocations?: { toolExecutionNotifications: { message: { text: string } }[] }[];
+      }[];
+    };
+    const sarifRun = sarif.runs[0];
+    expect(sarifRun.properties.ignoreKept).toBe(sarifRun.results.length);
+    expect(sarifRun.results[0].properties.ignoreOverride).toEqual({
+      entries: ['fixtures'],
+      position: 'the target of a file:, link: or portal: dependency',
+    });
+    const texts = (sarifRun.invocations?.[0]?.toolExecutionNotifications ?? []).map((note) => note.message.text);
+    expect(texts).toEqual([`${PROPOSAL} (control inputs read from main)`]);
+  }, CLI_TIMEOUT_MS);
+});
+
+// Audit B2 at the CLI (design note section 8, U10 and U11). An online
+// budget of 0 is spent before the first step, so no request is made.
+describe('an unchecked name on a pull request is exit 2 with the full report, at the CLI (0.16.0)', () => {
+  async function makeP1(headConfig: Record<string, unknown> | null = null): Promise<void> {
+    await write('requirements.txt', 'requests==2.31.0\n');
+    await write('.dep-guard.json', '{}');
+    await commitAll('base state');
+    await git('checkout', '-q', '-b', 'feature');
+    await write('requirements.txt', 'requests==2.31.0\nzz-dg-audit-nonexist-1018==1.0.0\nreqeusts==1.0.0\n');
+    if (headConfig !== null) {
+      await write('.dep-guard.json', JSON.stringify(headConfig));
+    }
+    await commitAll('add two names');
+  }
+
+  const ARGS = ['--base', 'main', '--trust-base', 'main', '--online', '--online-budget-ms', '0', '--corpus-dir', FIXTURE_CORPUS];
+
+  type SarifInvocations = {
+    runs: {
+      properties: Record<string, unknown>;
+      invocations?: {
+        executionSuccessful: boolean;
+        toolExecutionNotifications: { descriptor: { id: string }; level: string; message: { text: string } }[];
+      }[];
+    }[];
+  };
+
+  test('U11 SARIF with a proposal: one invocation holding the proposal note and the error', async () => {
+    await makeP1({ failOn: 'critical' });
+
+    const run = await runCli(['scan', ...ARGS, '--format', 'sarif']);
+
+    expect(run.exitCode).toBe(2);
+    const sarifRun = (JSON.parse(run.stdout) as SarifInvocations).runs[0];
+    expect(sarifRun.invocations).toHaveLength(1);
+    const invocation = sarifRun.invocations?.[0];
+    expect(invocation?.executionSuccessful).toBe(false);
+    expect(invocation?.toolExecutionNotifications.map((note) => [note.descriptor.id, note.level])).toEqual([
+      [SARIF_TRUST_BASE_NOTIFICATION_ID, 'note'],
+      ['dep-guard/could-not-run', 'error'],
+    ]);
+    expect(invocation?.toolExecutionNotifications[1].message.text).toContain('(online-names-unchecked)');
+    expect(sarifRun.properties.onlineUnchecked).toBe(2);
+    expect(run.stderr).toContain('(online-names-unchecked)');
+  }, CLI_TIMEOUT_MS);
+
+  test('U11 SARIF without a proposal: an invocation with the error alone', async () => {
+    await makeP1();
+
+    const run = await runCli(['scan', ...ARGS, '--format', 'sarif']);
+
+    expect(run.exitCode).toBe(2);
+    const invocations = (JSON.parse(run.stdout) as SarifInvocations).runs[0].invocations ?? [];
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0].executionSuccessful).toBe(false);
+    expect(invocations[0].toolExecutionNotifications.map((note) => note.level)).toEqual(['error']);
+  }, CLI_TIMEOUT_MS);
+
+  test('U11 JSON: run.online.unchecked and run.couldNotRun, exit 2', async () => {
+    await makeP1({ failOn: 'critical' });
+
+    const run = await runCli(['scan', ...ARGS, '--format', 'json']);
+
+    expect(run.exitCode).toBe(2);
+    const result = JSON.parse(run.stdout.trim()) as ScanResult;
+    expect(result.exitCode).toBe(2);
+    expect(result.run.online.unchecked?.count).toBe(2);
+    expect(result.run.couldNotRun?.code).toBe('online-names-unchecked');
+    expect(result.trustBase?.proposals.length).toBeGreaterThan(0);
+  }, CLI_TIMEOUT_MS);
+
+  test('U10 text and stderr list ten names and a count', async () => {
+    await write('requirements.txt', 'requests==2.31.0\n');
+    await commitAll('base state');
+    await git('checkout', '-q', '-b', 'feature');
+    const names = Array.from({ length: 12 }, (_unused, index) => `name-${String(index + 1).padStart(2, '0')}`);
+    await write('requirements.txt', `requests==2.31.0\n${names.map((name) => `${name}==1`).join('\n')}\n`);
+    await commitAll('add twelve names');
+
+    const run = await runCli(['scan', ...ARGS]);
+
+    expect(run.exitCode).toBe(2);
+    for (const stream of [run.stdout, run.stderr]) {
+      expect(stream).toContain('could not run: 12 candidate name(s) were not checked online (name-01:');
+      expect(stream).toContain('name-10: online budget spent (pypi-existence), and 2 more)');
+      expect(stream).not.toContain('name-11:');
+    }
+    expect(run.stderr).toContain('(online-names-unchecked)');
   }, CLI_TIMEOUT_MS);
 });
 

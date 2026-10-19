@@ -955,7 +955,7 @@ runs:
             exit 1
             ;;
           2)
-            printf '::error::dep-guard could not complete its checks (exit 2): for example an unresolvable trust base, a missing corpus, a scan path that is not a repository, invalid config, a lockfile or manifest it cannot parse or that is a symlink, a workspace pattern it cannot expand, or a lockfile set change it refuses (lockfile-downgrade). The reason is on the log above. This is not a clean scan.\n'
+            printf '::error::dep-guard could not complete its checks (exit 2): for example an unresolvable trust base, a missing corpus, a scan path that is not a repository, invalid config, a lockfile or manifest it cannot parse or that is a symlink, a workspace pattern it cannot expand, a lockfile set change it refuses (lockfile-downgrade), or candidate names not checked online (online-names-unchecked: the online budget ran out, a registry did not answer, or online lookups were off while the base config requires them). The reason is on the log above. This is not a clean scan.\n'
             exit 2
             ;;
           *)
