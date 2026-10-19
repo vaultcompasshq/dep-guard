@@ -1,21 +1,38 @@
 import { execFile, spawn } from 'node:child_process';
-import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { lstat, readFile, readdir, readlink, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 import { MissingPackagesMapError, parseNpmLockfile } from './lockfiles/npm.js';
 import { parseOnlyBuilt, parsePnpmLockfile } from './lockfiles/pnpm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
-import { isReadableJson, parseManifest, workspacePatternsOf, type ParsedManifest } from './manifest.js';
+import {
+  isLocalPathSpecifier,
+  isReadableJson,
+  parseManifest,
+  workspacePatternsOf,
+  type ParsedManifest,
+} from './manifest.js';
 import { isPythonLockfilePath, parsePythonLockfile, pythonLockfileFormat } from './python-lockfiles.js';
-import { isPythonManifestPath, isReadableToml, parsePythonManifest, parseRequirements } from './python-manifest.js';
+import {
+  isPythonManifestPath,
+  isReadableToml,
+  isRequirementsPath,
+  parsePythonManifest,
+  parseRequirements,
+} from './python-manifest.js';
 import { isArchiveFile } from './python-requirement.js';
 import { pathFragment } from './python-names.js';
 import type { PythonLockfile, PythonManifestInfo } from './python-types.js';
 import {
+  EMPTY_PROJECTS,
   isReadLockfile,
   parseNpmrcDefaultRegistry,
   parseNpmrcPins,
+  projectReasonKey,
+  type ProjectClassification,
+  type ProjectReason,
+  type ProjectRule,
   type RepoState,
 } from './state.js';
 import { withoutByteOrderMark } from './text.js';
@@ -234,12 +251,16 @@ function includeNote(info: PythonManifestInfo, line: number, detail: string): vo
 
 // Follows the -r and -c lines of every requirements file read so far, the
 // way pip does: relative to the including file, at most MAX_INCLUDE_DEPTH
-// levels, each file read once. A target outside the repository, a symlink,
-// or a file this side does not have is not read, and the including line is
-// counted and named instead (requirements-line-unread). A file reached
-// only through -c is read for its index lines, and its names are counted
-// under excluded.constraint rather than checked: a constraint never
-// installs a name by itself.
+// levels, each file read once. The target is placed as the operating
+// system opens it (walkPhysicalPath, the walk the classifier uses), so a
+// ".." after a symlinked directory climbs out of the link's target and a
+// file under a symlinked directory is read at its real path, which a git
+// side lists. A target that cannot be placed inside the repository, a file
+// that is itself a symlink, or a file this side does not have is not read,
+// and the including line is counted and named instead
+// (requirements-line-unread). A file reached only through -c is read for
+// its index lines, and its names are counted under excluded.constraint
+// rather than checked: a constraint never installs a name by itself.
 async function followRequirementIncludes(source: FileSource, manifests: ParsedManifest[]): Promise<void> {
   const known = new Set(manifests.map((manifest) => manifest.path));
   let frontier = manifests.filter((manifest) => manifest.python?.kind === 'requirements');
@@ -252,25 +273,36 @@ async function followRequirementIncludes(source: FileSource, manifests: ParsedMa
       }
       for (const include of info.includes) {
         const dir = parentDir(manifest.path);
-        const joined = path.posix.normalize(dir === '' ? include.target : `${dir}/${include.target}`);
         // Only path characters of the target are echoed (pathFragment), as
         // for an invalid name: the target is head-written text.
         const shown = pathFragment(include.target);
-        if (path.posix.isAbsolute(joined) || joined === '..' || joined.startsWith('../')) {
-          includeNote(info, include.line, `"${shown}" is outside the repository`);
+        const cleaned = include.target.replace(/\\/g, '/');
+        const placed = await walkPhysicalPath(source, dir, cleaned);
+        if (placed === null) {
+          includeNote(info, include.line, `"${shown}" is outside the repository or runs through a link that cannot be followed`);
           continue;
         }
-        if (known.has(joined)) {
+        // The walk follows a link on the last segment too; pip would open
+        // that file, and this reader never does, as before. The directory
+        // part is walked on its own to ask whether the file is a link, and
+        // before the known check, since the walk names the link's target.
+        const slash = cleaned.lastIndexOf('/');
+        const fileName = cleaned.slice(slash + 1);
+        if (fileName !== '' && fileName !== '.' && fileName !== '..') {
+          const parent = await walkPhysicalPath(source, dir, slash === -1 ? '' : cleaned.slice(0, slash));
+          if (parent === null || (await source.isSymlink(joinRepoPath(parent, fileName)))) {
+            includeNote(info, include.line, `"${shown}" is a symlink, which is never followed`);
+            continue;
+          }
+        }
+        if (known.has(placed)) {
           continue;
         }
         if (depth > MAX_INCLUDE_DEPTH) {
           includeNote(info, include.line, `"${shown}" is more than ${MAX_INCLUDE_DEPTH} includes deep`);
           continue;
         }
-        if (await source.isSymlink(joined)) {
-          includeNote(info, include.line, `"${shown}" is a symlink, which is never followed`);
-          continue;
-        }
+        const joined = placed;
         const content = await source.read(joined);
         if (content === null) {
           includeNote(info, include.line, `"${shown}" is not a file on this side`);
@@ -483,6 +515,10 @@ interface FileSource {
   // git side, lstat on the working tree. The link is never followed to
   // answer this.
   isSymlink(relPath: string): Promise<boolean>;
+  // The text of the symlink at this path, as stored (the blob on a git
+  // side, readlink on the working tree), or null when the path is not a
+  // symlink. Never followed.
+  readLink(relPath: string): Promise<string | null>;
   // True when workspace pattern segments are matched against this side's
   // directory names without regard to case. Only a git side of a
   // repository whose core.ignorecase is true answers yes; it only ever
@@ -663,6 +699,12 @@ function gitSource(
     async isSymlink(relPath: string): Promise<boolean> {
       return (await loaded()).symlinks.has(relPath);
     },
+    async readLink(relPath: string): Promise<string | null> {
+      if (!(await loaded()).symlinks.has(relPath)) {
+        return null;
+      }
+      return readBlob(root, `${revision}:${relPath}`);
+    },
     // npm on a case-insensitive file system maps "lib/a" onto a directory
     // spelled "Lib/A", and git records that a checkout is on such a file
     // system in core.ignorecase. An unset or unreadable setting is false,
@@ -825,6 +867,17 @@ async function createWorkingTreeSource(
       } catch (err) {
         if (isMissingPathError(err)) {
           return false;
+        }
+        throw unreadable(relPath, err);
+      }
+    },
+
+    async readLink(relPath: string): Promise<string | null> {
+      try {
+        return await readlink(path.join(root, relPath), 'utf8');
+      } catch (err) {
+        if (isMissingPathError(err) || errorCode(err) === 'EINVAL') {
+          return null; // absent, or not a symlink
         }
         throw unreadable(relPath, err);
       }
@@ -1343,20 +1396,86 @@ function workspacePatternsCover(
   relDir: string,
   unsupported: 'covers' | 'excludes'
 ): boolean {
+  const coverage = workspaceCoverage(patterns, relDir);
+  return coverage.exact || (unsupported === 'covers' && coverage.inexact.length > 0);
+}
+
+// How one list of workspace patterns reaches a directory: `exact` when a
+// pattern this module matches exactly covers it, and `inexact` the text of
+// every positive pattern it cannot match exactly (which "covers" under the
+// stricter reading). A matching negation in the same list reaches nothing.
+function workspaceCoverage(patterns: readonly string[], relDir: string): { exact: boolean; inexact: string[] } {
+  const none = { exact: false, inexact: [] };
   if (relDir === '' || relDir.split('/').includes(NEVER_A_PACKAGE_DIR)) {
-    return false;
+    return none;
   }
   const { positives, negatedPatterns } = partitionWorkspacePatterns(patterns);
   if (negatedPatterns.some((negated) => matchNpmGlob(negated, relDir))) {
+    return none;
+  }
+  let exact = false;
+  const inexact: string[] = [];
+  for (const raw of positives) {
+    const pattern = collapseSlashes(raw.replace(/\\/g, '/'));
+    if (pattern === '') {
+      continue;
+    }
+    if (patternReach(pattern) !== 'inside' || UNEXPANDABLE_GLOB_SYNTAX.test(pattern)) {
+      inexact.push(raw);
+      continue;
+    }
+    if (matchNpmGlob(pattern, relDir)) {
+      exact = true;
+    }
+  }
+  return { exact, inexact };
+}
+
+// One input's workspace patterns as the key of a fail-closed reason: the
+// positives and the negations as matching reads them, each list
+// canonical and sorted, so the same patterns written in another order are
+// the same key and any change to what they cover is a different one.
+function canonicalPatterns(patterns: readonly string[]): string {
+  const { positives, negatedPatterns } = partitionWorkspacePatterns(patterns);
+  return JSON.stringify([canonicalPatternList(positives), canonicalPatternList(negatedPatterns)]);
+}
+
+function canonicalPatternList(patterns: readonly string[]): string[] {
+  return [...new Set(patterns.map((raw) => collapseSlashes(raw.replace(/\\/g, '/'))))].sort();
+}
+
+// Whether expanding a list of workspace patterns would pass through relDir
+// to reach a directory strictly below it: a proper prefix of a pattern's
+// segments matches relDir, or a pattern ending in "**" matches it and can
+// continue past it. A pattern this module cannot match exactly counts when
+// inexactCounts is set, as it covers in workspaceCoverage. Negations are
+// not applied: this only decides whether to fail closed on a symlinked
+// directory at that position.
+function workspacePatternsReachBelow(patterns: readonly string[], relDir: string, inexactCounts: boolean): boolean {
+  if (relDir === '' || relDir.split('/').includes(NEVER_A_PACKAGE_DIR)) {
     return false;
   }
-  return positives.some((raw) => {
+  const { positives } = partitionWorkspacePatterns(patterns);
+  for (const raw of positives) {
     const pattern = collapseSlashes(raw.replace(/\\/g, '/'));
-    if (pattern === '' || patternReach(pattern) !== 'inside' || UNEXPANDABLE_GLOB_SYNTAX.test(pattern)) {
-      return pattern !== '' && unsupported === 'covers';
+    if (pattern === '') {
+      continue;
     }
-    return matchNpmGlob(pattern, relDir);
-  });
+    if (patternReach(pattern) !== 'inside' || UNEXPANDABLE_GLOB_SYNTAX.test(pattern)) {
+      if (inexactCounts) {
+        return true;
+      }
+      continue;
+    }
+    const segments = pattern.split('/');
+    for (let count = 1; count <= segments.length; count += 1) {
+      const continues = count < segments.length || segments[count - 1] === '**';
+      if (continues && matchNpmGlob(segments.slice(0, count).join('/'), relDir)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 async function discoverWorkspaceDirs(
@@ -1658,6 +1777,18 @@ const JUDGED: SideRole = { kind: 'judged' };
 // nothing and every entry in it is judged as new. That is the stricter
 // direction, and it is what lets the pull request that replaces the link
 // with a regular file pass. Returns the paths treated as absent.
+// The kind of file a parsed input is, for a message.
+function inputKindText(relPath: string): string {
+  if (isRecognisedLockfilePath(relPath)) {
+    return 'a lockfile';
+  }
+  const name = baseName(relPath);
+  if (isPackageJsonPath(relPath)) {
+    return 'a package.json';
+  }
+  return name === PYPROJECT_TOML || name === 'Pipfile' ? `a ${name}` : 'a requirements file';
+}
+
 async function screenSymlinkedInputs(
   source: FileSource,
   relPaths: string[],
@@ -1671,8 +1802,8 @@ async function screenSymlinkedInputs(
     }
     if (role.kind === 'judged') {
       throw new DepGuardError(
-        `${relPath}: is a symlink on the side being judged. dep-guard does not parse a lockfile or a ` +
-          'package.json through a symlink; replace the link with a regular file. A comparison side ' +
+        `${relPath}: is a symlink on the side being judged. dep-guard does not parse ${inputKindText(relPath)} ` +
+          'through a symlink; replace the link with a regular file. A comparison side ' +
           'that still has the link does not block that change',
         'symlinked-input'
       );
@@ -1767,9 +1898,14 @@ function inactiveNpmLockfileReason(
 // lockfile is what installs the manifests it covers and nothing else: a
 // sibling that is real in one npm project says nothing about a manifest
 // that a pnpm lockfile in another directory installs from the registry.
+// The trust base's side of that question is its RepoState.projects
+// `workspaceFields`, the same classification the ignorePaths rule reads:
+// one value per side, two consumers. Keyed on "the base has a package.json
+// at that path", whether or not the base has a lockfile there, and only the
+// field is read, never pnpm-workspace.yaml.
 export interface WorkspaceSource {
   label: string;
-  manifests: readonly ParsedManifest[];
+  workspaceFields: ReadonlyMap<string, readonly string[]>;
 }
 
 export function confirmWorkspaceLocalNames(
@@ -1791,8 +1927,8 @@ export function confirmWorkspaceLocalNames(
     const dir = parentDir(lockfile.path);
     const rootManifestPath = manifestPathIn(dir);
     const headPatterns = manifests.find((manifest) => manifest.path === rootManifestPath)?.workspaces ?? [];
-    const baseRoot = workspaceSource?.manifests.find((manifest) => manifest.path === rootManifestPath);
-    const patterns = baseRoot === undefined ? headPatterns : baseRoot.workspaces ?? [];
+    const baseRoot = workspaceSource?.workspaceFields.get(rootManifestPath);
+    const patterns = baseRoot === undefined ? headPatterns : baseRoot;
     const failures = new Map<string, string>();
     for (const link of links) {
       const reason = ((): string | null => {
@@ -1871,7 +2007,18 @@ export function reconfirmWorkspaceLocalNames(
     (judged.lockfileInventory ?? []).map((entry) => entry.path),
     judged.manifests,
     diagnostics,
-    { label: trustedLabel, manifests: trusted.manifests }
+    {
+      label: trustedLabel,
+      // A state built by hand has no classification; its parsed manifests
+      // stand in for the field, as before the shared value existed.
+      workspaceFields:
+        trusted.projects?.workspaceFields ??
+        new Map(
+          trusted.manifests
+            .filter((manifest) => isPackageJsonPath(manifest.path))
+            .map((manifest) => [manifest.path, manifest.workspaces ?? []])
+        ),
+    }
   );
   return {
     ...judged,
@@ -1900,12 +2047,21 @@ export function reconfirmWorkspaceLocalNames(
 //      root, or a pyproject.toml named by [tool.uv.workspace].members and
 //      not exclude of a pyproject.toml beside uv.lock;
 //   5. the package.json in the directory a file:, link: or portal:
-//      specifier of a parsed package.json resolves to, or in the resolved
-//      directory of a "link": true entry of a parsed npm lockfile.
+//      specifier, or a bare local path ("./x", "../x"), of a parsed
+//      package.json resolves to, or in the resolved directory of a
+//      "link": true entry of a parsed npm lockfile, followed through any
+//      symlinked directory on this side. A target that cannot be placed
+//      inside the repository is a reason on every package.json, never on
+//      none (see rule 5 below).
 //
 // Nothing under node_modules is a project this way. Every input is subject
 // content, and a claim in one can only add a path to the set, which makes a
-// parse error fatal; none can remove one. The set is computed from the whole
+// parse error fatal. A negation inside one input (a "!" workspace pattern)
+// can remove a path that input alone would add, never one another input
+// adds: each input is evaluated with only its own negations. Every reason
+// a path is a project is recorded, not just the first (RepoState.projects),
+// plus one rule the parse decision does not use: a requirements file
+// another requirements file includes. The set is computed from the whole
 // listing whatever the scan prefix: a file outside the prefix is read for
 // this and nothing else, raises no diagnostic of its own, and when it cannot
 // be read (and a root scan would have stopped on it) every manifest under
@@ -1966,10 +2122,16 @@ interface SideClassification {
   // is a project only through a Python lockfile beside it, or as a uv
   // workspace member, is not: whether its names are read is its own change
   // (open point 2 of the design), so it is parsed only to decide whether it
-  // stops the scan.
+  // stops the scan. A fail-closed reason of an input that promotes adds its
+  // manifests here too, with no position (classifySide, standIn).
   promoted: Set<string>;
   // Inputs outside the scan prefix that could not be read.
   inputFailures: ClassificationInputFailure[];
+  // Every reason each path is a project, not only the first, including
+  // requirements includes (RepoState.projects).
+  reasons: Map<string, ProjectReason[]>;
+  // The "workspaces" field of every package.json that parsed.
+  workspaceFields: Map<string, string[]>;
 }
 
 interface ParseFailure {
@@ -1998,6 +2160,11 @@ interface LoadedSide {
   isIgnoredPath: (relPath: string) => boolean;
   classification: SideClassification;
   failures: ParseFailure[];
+  // The comparison sides this side was loaded against (none for a
+  // comparison side), and the unread inputs decided against them
+  // (stoppingUnreadInputs), which the read gate already used.
+  loadedAgainst: readonly LoadedSide[];
+  unreadInputs: readonly string[];
 }
 
 type ParseOutcome = { manifest: ParsedManifest } | { error: DepGuardError };
@@ -2073,10 +2240,13 @@ function dirRelativeTo(root: string, dir: string): string | null {
 
 // The repository directory a local specifier or a link entry names,
 // relative to the directory it is written in, or null when it leaves the
-// repository or is absolute.
+// repository or is absolute. String normalization, as npm's path.resolve
+// does for a specifier: only package.json specifiers and npm lockfile link
+// entries are read this way. Symlink text and requirements includes are
+// opened by the operating system and go through walkPhysicalPath instead.
 function localTargetDir(fromDir: string, target: string): string | null {
   const cleaned = target.replace(/\\/g, '/');
-  if (cleaned.startsWith('//') || cleaned.startsWith('~') || path.posix.isAbsolute(cleaned) || /^[a-zA-Z]:/.test(cleaned)) {
+  if (unplaceablePathText(cleaned)) {
     return null;
   }
   const joined = path.posix.normalize(fromDir === '' ? cleaned || '.' : `${fromDir}/${cleaned}`);
@@ -2084,6 +2254,143 @@ function localTargetDir(fromDir: string, target: string): string | null {
     return null;
   }
   return joined === '.' ? '' : joined.replace(/\/+$/, '');
+}
+
+// Linux's MAXSYMLINKS: how many links one path is followed through.
+const MAX_SYMLINK_HOPS = 40;
+
+// Text this tool never places inside the repository: absolute, home,
+// drive-letter or "//" paths.
+function unplaceablePathText(text: string): boolean {
+  return text.startsWith('//') || text.startsWith('~') || path.posix.isAbsolute(text) || /^[a-zA-Z]:/.test(text);
+}
+
+// The repository path that path text names when the operating system
+// opens it from fromDir, a directory that is already real (no symlink on
+// it): the realpath walk over this side's FileSource, never the disk, since
+// a git side has no files there. One segment at a time: "." is skipped,
+// ".." pops the path resolved so far (so after a symlinked segment it
+// climbs out of the link's target, not out of the link's own directory), a
+// name is appended and, when it is a symlink on this side, its text is
+// walked the same way from the link's parent. Null when the text, or any
+// link on it, is absolute or home, climbs above the root, cannot be read,
+// or runs past MAX_SYMLINK_HOPS. Never throws: a path that cannot be placed
+// is one every caller fails closed on. When a trace is given, every link
+// the walk reads is appended to it as [path, text], and a link whose text
+// (or whose symlink answer) cannot be read as [path, null].
+async function walkPhysicalPath(
+  source: FileSource,
+  fromDir: string,
+  text: string,
+  trace?: LinkTrace
+): Promise<string | null> {
+  const cleaned = text.replace(/\\/g, '/');
+  if (unplaceablePathText(cleaned)) {
+    return null;
+  }
+  const resolved = fromDir === '' ? [] : fromDir.split('/');
+  let pending = cleaned.split('/');
+  let hops = 0;
+  let current = fromDir;
+  try {
+    while (pending.length > 0) {
+      const [segment, ...rest] = pending;
+      pending = rest;
+      if (segment === '' || segment === '.') {
+        continue;
+      }
+      if (segment === '..') {
+        if (resolved.length === 0) {
+          return null;
+        }
+        resolved.pop();
+        continue;
+      }
+      resolved.push(segment);
+      current = resolved.join('/');
+      if (!(await source.isSymlink(current))) {
+        continue;
+      }
+      hops += 1;
+      if (hops > MAX_SYMLINK_HOPS) {
+        return null;
+      }
+      const linkText = await source.readLink(current);
+      trace?.push([current, linkText]);
+      if (linkText === null) {
+        return null;
+      }
+      const linkCleaned = linkText.replace(/\\/g, '/');
+      if (unplaceablePathText(linkCleaned)) {
+        return null;
+      }
+      resolved.pop(); // the link's text is read from the link's own directory
+      pending = [...linkCleaned.split('/'), ...pending];
+    }
+  } catch {
+    trace?.push([current, null]);
+    return null;
+  }
+  return resolved.join('/');
+}
+
+// The links a walk read, each as [path, text], text null when it could
+// not be read.
+type LinkTrace = Array<[string, string | null]>;
+
+// Each classified side gets its own serial, so a pattern that carries it
+// can never equal a pattern the other side recorded.
+let classifiedSides = 0;
+
+// The pattern of a fail-closed reason: the written text alone when no
+// link was read on the way, as before; otherwise the text with every link
+// read (path and text, sorted, once each), so the same text through a
+// link the other side points somewhere else is a different reason. A link
+// whose text could not be read is not known to be the same link on the
+// other side, so it carries this side's own serial and is never excused.
+function tracedPattern(text: string, trace: LinkTrace, side: number): string {
+  if (trace.length === 0) {
+    return text;
+  }
+  return JSON.stringify([text, ...traceKey(trace, side)]);
+}
+
+// Every link a trace read, as sorted, de-duplicated text: [path, text], or
+// [path, null, side] for one that could not be read.
+function traceKey(trace: LinkTrace, side: number): string[] {
+  return [
+    ...new Set(trace.map(([linkPath, linkText]) => JSON.stringify(linkText === null ? [linkPath, null, side] : [linkPath, linkText]))),
+  ].sort();
+}
+
+// How many virtual paths the symlinked member walk of one input visits
+// before it stops and fails closed: a chain of links that fans out (two
+// links to one directory, under each of which two more, and so on) cannot
+// make the classifier run for exponential time. A side's walks together
+// make at most this many visits per workspace input. A real monorepo's
+// links come nowhere near it.
+const MAX_SYMLINKED_VISITS = 10_000;
+
+// How many visits the symlinked member walks of every input on one side make
+// together before the next visit stops and fails closed, as the per-input
+// limit does, for that input and every later one that still has a link to
+// visit. The per-input limit alone bounds a side by the number of inputs,
+// and a tree can have as many install roots as it likes: 50 roots each
+// reaching one 2^15 fan-out took about 25 s. Ten inputs can each run to
+// their own limit before this one is reached, so it only comes into play
+// on a side where at least ten inputs fan out pathologically, or many
+// inputs together make a hundred thousand visits; a real monorepo makes a
+// handful of visits per committed symlink per input.
+const MAX_SIDE_SYMLINKED_VISITS = 100_000;
+
+// The repository path a target path names once every symlink on it is
+// followed on this side (the target itself or any directory above it),
+// each link's text walked physically from its own directory; or null when
+// a link on it leaves the repository, is absolute, cannot be read, or the
+// hops run out. The target itself is already normalized text, so walking it
+// from the root follows only what is a link on it.
+function resolveLinkedDir(source: FileSource, target: string, trace?: LinkTrace): Promise<string | null> {
+  return walkPhysicalPath(source, '', target, trace);
 }
 
 // pnpm-workspace.yaml "packages", or null when the file is not YAML.
@@ -2137,6 +2444,8 @@ async function classifySide(
   parse: ManifestParser,
   npmLockfiles: Map<string, ParsedLockfile>
 ): Promise<SideClassification> {
+  classifiedSides += 1;
+  const side = classifiedSides;
   const listed = new Set(listedFiles);
   const packageJsons = listedFiles.filter((relPath) => isPackageJsonPath(relPath) && !underNodeModules(relPath));
   const lockfilePaths = listedFiles.filter(
@@ -2210,7 +2519,19 @@ async function classifySide(
 
   const positions = new Map<string, ProtectedPosition>();
   const promoted = new Set<string>();
-  const mark = (relPath: string, position: ProtectedPosition, promote: boolean): void => {
+  const reasons = new Map<string, ProjectReason[]>();
+  const reasonKeys = new Set<string>();
+  const addReason = (relPath: string, reason: ProjectReason): void => {
+    const key = JSON.stringify([relPath, projectReasonKey(reason)]);
+    if (reasonKeys.has(key)) {
+      return;
+    }
+    reasonKeys.add(key);
+    const list = reasons.get(relPath) ?? [];
+    list.push(reason);
+    reasons.set(relPath, list);
+  };
+  const mark = (relPath: string, position: ProtectedPosition, promote: boolean, reason: ProjectReason): void => {
     if (underNodeModules(relPath)) {
       return;
     }
@@ -2220,18 +2541,278 @@ async function classifySide(
     if (promote) {
       promoted.add(relPath);
     }
+    addReason(relPath, reason);
   };
-  const markMembers = (rootDir: string, patterns: string[], position: ProtectedPosition, promote: boolean): void => {
+  // A fail-closed reason for an input that promotes (a symlinked member walk
+  // that could not finish, a local target or an include that cannot be
+  // placed) stands in for the promotion it could not decide: the manifest
+  // it lands on is read past the skipped-directory-name filter, so a member
+  // under build/ or vendor/ the walk never placed is still read for names.
+  // It gives no position, so it does not make a parse failure fatal
+  // whatever ignorePaths says: a stand-in that does not parse is judged as
+  // a manifest outside any skipped name is.
+  const standIn = (relPath: string): void => {
+    if (!underNodeModules(relPath)) {
+      promoted.add(relPath);
+    }
+  };
+  // Whether a listed path is itself a symlink on this side, asked once. A
+  // path whose answer cannot be read counts as one: the walk that follows
+  // it then fails, and the caller fails closed.
+  const symlinkAnswers = new Map<string, boolean>();
+  const listedSymlink = async (relPath: string): Promise<boolean> => {
+    let answer = symlinkAnswers.get(relPath);
+    if (answer === undefined) {
+      try {
+        answer = await source.isSymlink(relPath);
+      } catch {
+        answer = true;
+      }
+      symlinkAnswers.set(relPath, answer);
+    }
+    return answer;
+  };
+  // Every listed symlink outside node_modules on this side, found once.
+  let listedSymlinks: string[] | null = null;
+  const allListedSymlinks = async (): Promise<string[]> => {
+    if (listedSymlinks === null) {
+      const found: string[] = [];
+      for (const relPath of listedFiles) {
+        if (!underNodeModules(relPath) && (await listedSymlink(relPath))) {
+          found.push(relPath);
+        }
+      }
+      listedSymlinks = found;
+    }
+    return listedSymlinks;
+  };
+  // The physical walk of each listed link on this side, done once. The walk
+  // reads only this side's source, from the link's own directory, so the
+  // path it reaches and the links it reads on the way are the same every
+  // time it is asked, whatever chain of links led to it.
+  const linkWalks = new Map<string, { target: string | null; read: LinkTrace }>();
+  // The visits every input's symlinked member walk on this side has made
+  // together (MAX_SIDE_SYMLINKED_VISITS).
+  let sideSymlinkedVisits = 0;
+  const walkLink = async (linkPath: string): Promise<{ target: string | null; read: LinkTrace }> => {
+    let walk = linkWalks.get(linkPath);
+    if (walk === undefined) {
+      const read: LinkTrace = [];
+      const target = await walkPhysicalPath(source, parentDir(linkPath), baseName(linkPath), read);
+      walk = { target, read };
+      linkWalks.set(linkPath, walk);
+    }
+    return walk;
+  };
+  // Whether a real path is a directory with something listed under it.
+  // A link to a listed file, or to a path with nothing listed under it, is
+  // not a member directory: nothing is installed through it.
+  let listedDirs: Set<string> | null = null;
+  const listedDirectory = (real: string): boolean => {
+    if (listedDirs === null) {
+      const dirs = new Set<string>();
+      for (const relPath of listedFiles) {
+        for (let dir = parentDir(relPath); dir !== '' && !dirs.has(dir); dir = parentDir(dir)) {
+          dirs.add(dir);
+        }
+      }
+      listedDirs = dirs;
+    }
+    return real === '' || listedDirs.has(real);
+  };
+  // One input's patterns at a time, each with only its own negations: a
+  // negation in pnpm-workspace.yaml does not cancel a member the
+  // "workspaces" field names, since a package manager that reads one of
+  // the two never reads the other's exclusions.
+  const markMembers = async (
+    rootDir: string,
+    input: string,
+    patterns: string[],
+    position: ProtectedPosition & ProjectRule,
+    promote: boolean
+  ): Promise<void> => {
     if (patterns.length === 0) {
       return;
     }
     for (const relPath of packageJsons) {
       const relDir = dirRelativeTo(rootDir, parentDir(relPath));
-      // A pattern this module cannot match exactly covers: it can only make
-      // more files fatal.
-      if (relDir !== null && relDir !== '' && workspacePatternsCover(patterns, relDir, 'covers')) {
-        mark(relPath, position, promote);
+      if (relDir === null || relDir === '') {
+        continue;
       }
+      // A pattern this module cannot match exactly covers: it can only make
+      // more files fatal. Its text is part of the reason, so the same
+      // inexact pattern on two sides is the same reason on both.
+      const coverage = workspaceCoverage(patterns, relDir);
+      if (coverage.exact) {
+        mark(relPath, position, promote, { rule: position, root: rootDir, input });
+      } else {
+        for (const pattern of coverage.inexact) {
+          mark(relPath, position, promote, { rule: position, root: rootDir, input, pattern });
+        }
+      }
+    }
+    // npm and pnpm install a member that is a symlinked directory, and the
+    // listing never walks into one, so its manifest is not among the
+    // package.json paths above.
+    await markSymlinkedMembers(
+      rootDir,
+      (relDir) => {
+        const coverage = workspaceCoverage(patterns, relDir);
+        return coverage.exact ? [undefined] : coverage.inexact;
+      },
+      (relDir) => workspacePatternsReachBelow(patterns, relDir, true),
+      packageJsons,
+      canonicalPatterns(patterns),
+      position,
+      promote,
+      { rule: position, root: rootDir, input }
+    );
+  };
+  // npm, pnpm and uv expand a pattern through a symlinked directory, which
+  // the listing never walks into. A listed symlink outside node_modules
+  // under rootDir whose path a pattern covers or passes through is
+  // followed with walkPhysicalPath, and mapped:
+  //   - when it reaches a listed file, or a path with nothing listed under
+  //     it, it is not a member directory and says nothing;
+  //   - when it reaches a directory R, each listed manifest R/<sub>/<name>
+  //     is a member exactly when the patterns cover <link>/<sub>, the path
+  //     a package manager sees, and is marked as a listed member would be.
+  //     The reason's pattern holds that path, the covering pattern (null
+  //     when exact, the text when inexact) and every link text read on the
+  //     way (traceKey): a widened pattern, a retargeted link or the same
+  //     path reached through another link is a different reason;
+  //   - every listed symlink under R is a further candidate at its path
+  //     through the link, followed the same way, sharing one hop budget.
+  // A link that cannot be placed (it leaves the repository, is absolute,
+  // cannot be read, runs out of hops, or comes back to a directory already
+  // on its own chain) fails closed: the reason goes on every manifest of
+  // that kind on this side, keyed on the link's path through the links, the
+  // input's patterns and every link text read, so only the same links and
+  // the same patterns on the reference side excuse it, and a link that
+  // could not be read carries this side's serial and excuses nothing.
+  // Once one input's walk has made MAX_SYMLINKED_VISITS visits, a walk that
+  // still has a link to visit stops and fails closed once for that input,
+  // keyed on the patterns and this side's serial alone: no reference side
+  // can excuse it, since the links past the limit were never read and a
+  // retarget among them would otherwise pass unseen. The budget is per
+  // input, so one input's fan-out never cuts another input's walk short;
+  // only the link walks themselves are shared, memoized per side. Above it
+  // sits one side-wide limit, MAX_SIDE_SYMLINKED_VISITS over every input's
+  // visits together: once it is reached, the next visit of any input fails
+  // closed the same way, with the same key, so a tree with very many
+  // fanning install roots cannot make the classifier run without bound.
+  // Every fail-closed reason of an input that promotes also stands in for
+  // its promotion (standIn) on every manifest it lands on.
+  const markSymlinkedMembers = async (
+    rootDir: string,
+    covering: (relDir: string) => Array<string | undefined>,
+    reachesBelow: (relDir: string) => boolean,
+    candidates: readonly string[],
+    patternsKey: string,
+    position: ProtectedPosition & ProjectRule,
+    promote: boolean,
+    reason: ProjectReason
+  ): Promise<void> => {
+    const links = await allListedSymlinks();
+    const linkPaths = (trace: LinkTrace): string[] => [...new Set(trace.map(([linkPath]) => linkPath))];
+    const failClosed = (virtualPath: string, trace: LinkTrace, cause?: 'cycle'): void => {
+      const pattern = JSON.stringify(['unfollowed-symlink', virtualPath, patternsKey, ...traceKey(trace, side)]);
+      for (const candidate of candidates) {
+        addReason(candidate, {
+          ...reason,
+          pattern,
+          link: { paths: [virtualPath], followed: false, ...(cause === undefined ? {} : { cause }) },
+        });
+        if (promote) {
+          standIn(candidate);
+        }
+      }
+    };
+    // The visits this input's walk has made, and the top-level link under
+    // which it ran past MAX_SYMLINKED_VISITS.
+    let symlinkedVisits = 0;
+    let fanOutAt: string | null = null;
+    let stopped = false;
+    // virtualPath: the link's path as a package manager sees it (through
+    // every link above it); linkPath: where it is listed; chain: the links
+    // read to reach linkPath's directory; reals: the real directories
+    // already entered on the way; top: the top-level link this visit is
+    // under.
+    const visit = async (
+      virtualPath: string,
+      linkPath: string,
+      chain: LinkTrace,
+      reals: readonly string[],
+      top: string
+    ): Promise<void> => {
+      if (stopped) {
+        return;
+      }
+      const relDir = dirRelativeTo(rootDir, virtualPath);
+      if (relDir === null || relDir === '' || underNodeModules(virtualPath)) {
+        return;
+      }
+      if (!reachesBelow(relDir) && covering(relDir).length === 0) {
+        return;
+      }
+      if (symlinkedVisits >= MAX_SYMLINKED_VISITS || sideSymlinkedVisits >= MAX_SIDE_SYMLINKED_VISITS) {
+        fanOutAt = top;
+        stopped = true;
+        const cause = symlinkedVisits >= MAX_SYMLINKED_VISITS ? 'fan-out' : 'side-fan-out';
+        const pattern = JSON.stringify(['symlink-fan-out', patternsKey, side]);
+        for (const candidate of candidates) {
+          addReason(candidate, { ...reason, pattern, link: { paths: [fanOutAt], followed: false, cause } });
+          if (promote) {
+            standIn(candidate);
+          }
+        }
+        return;
+      }
+      symlinkedVisits += 1;
+      sideSymlinkedVisits += 1;
+      const walk = await walkLink(linkPath);
+      const trace: LinkTrace = [...chain, ...walk.read];
+      const target = walk.target;
+      if (target === null || trace.length > MAX_SYMLINK_HOPS) {
+        failClosed(virtualPath, trace);
+        return;
+      }
+      if (reals.some((real) => underPrefix(real, target))) {
+        failClosed(virtualPath, trace, 'cycle');
+        return;
+      }
+      if (listed.has(target) || !listedDirectory(target)) {
+        return;
+      }
+      const key = traceKey(trace, side);
+      const through = linkPaths(trace);
+      for (const candidate of candidates) {
+        const sub = dirRelativeTo(target, parentDir(candidate));
+        if (sub === null) {
+          continue;
+        }
+        const memberPath = sub === '' ? virtualPath : `${virtualPath}/${sub}`;
+        const memberDir = dirRelativeTo(rootDir, memberPath);
+        if (memberDir === null) {
+          continue;
+        }
+        for (const covered of covering(memberDir)) {
+          mark(candidate, position, promote, {
+            ...reason,
+            pattern: JSON.stringify(['symlinked-member', memberPath, covered ?? null, ...key]),
+            link: { paths: through, followed: true },
+          });
+        }
+      }
+      for (const nested of links) {
+        const sub = nested === target ? null : dirRelativeTo(target, nested);
+        if (sub !== null && sub !== '') {
+          await visit(`${virtualPath}/${sub}`, nested, trace, [...reals, target], top);
+        }
+      }
+    };
+    for (const linkPath of links) {
+      await visit(linkPath, linkPath, [], [], linkPath);
     }
   };
 
@@ -2244,21 +2825,29 @@ async function classifySide(
   }
 
   // Rule 1.
-  mark(ROOT_MANIFEST, 'root', true);
+  mark(ROOT_MANIFEST, 'root', true, { rule: 'root', root: '', input: ROOT_MANIFEST });
   // Rule 2. The workspaces field is read as JSON, as the workspace walk
   // reads it, so a manifest that is JSON and fails only on shape still
   // names its members.
-  markMembers(
-    '',
-    [...workspaceGlobsFromManifest(text(ROOT_MANIFEST)), ...yamlPatterns(WORKSPACE_YAML)],
-    'root-member',
-    true
-  );
+  await markMembers('', ROOT_MANIFEST, workspaceGlobsFromManifest(text(ROOT_MANIFEST)), 'root-member', true);
+  await markMembers('', WORKSPACE_YAML, yamlPatterns(WORKSPACE_YAML), 'root-member', true);
   // Rule 3.
+  const lockfilesByDir = new Map<string, string[]>();
+  for (const lockPath of lockfilePaths) {
+    const list = lockfilesByDir.get(parentDir(lockPath)) ?? [];
+    list.push(lockPath);
+    lockfilesByDir.set(parentDir(lockPath), list);
+  }
   for (const relPath of listedFiles) {
     const dir = parentDir(relPath);
     if (isProjectManifestPath(relPath) && lockDirSet.has(dir)) {
-      mark(relPath, 'beside-lockfile', npmFamilyLockDirs.has(dir));
+      for (const lockPath of lockfilesByDir.get(dir) ?? []) {
+        mark(relPath, 'beside-lockfile', npmFamilyLockDirs.has(dir), {
+          rule: 'beside-lockfile',
+          root: dir,
+          input: lockPath,
+        });
+      }
     }
   }
   // Rule 4.
@@ -2266,13 +2855,13 @@ async function classifySide(
     if (dir === '') {
       continue; // the root's members are rule 2
     }
-    markMembers(
-      dir,
-      [...workspaceGlobsFromManifest(text(manifestPathIn(dir))), ...yamlPatterns(joinRepoPath(dir, WORKSPACE_YAML))],
-      'install-root-member',
-      npmFamilyLockDirs.has(dir)
-    );
+    const promote = npmFamilyLockDirs.has(dir);
+    const fieldInput = manifestPathIn(dir);
+    const yamlInput = joinRepoPath(dir, WORKSPACE_YAML);
+    await markMembers(dir, fieldInput, workspaceGlobsFromManifest(text(fieldInput)), 'install-root-member', promote);
+    await markMembers(dir, yamlInput, yamlPatterns(yamlInput), 'install-root-member', promote);
   }
+  const pyprojects = listedFiles.filter((relPath) => baseName(relPath) === PYPROJECT_TOML && !underNodeModules(relPath));
   for (const rootPath of uvRootPaths) {
     const workspace = manifestOf(rootPath)?.python?.uvWorkspace;
     if (workspace === undefined) {
@@ -2285,21 +2874,71 @@ async function classifySide(
       }
       const relDir = dirRelativeTo(rootDir, parentDir(relPath));
       if (relDir !== null && relDir !== '' && uvWorkspaceCovers(workspace.members, workspace.exclude, relDir)) {
-        mark(relPath, 'uv-member', false);
+        mark(relPath, 'uv-member', false, { rule: 'uv-member', root: rootDir, input: rootPath });
       }
     }
+    // uv's members glob matches a symlinked directory too, which the
+    // listing never walks into. The same coverage as above: a members
+    // pattern this module cannot match exactly covers nothing here either.
+    await markSymlinkedMembers(
+      rootDir,
+      (relDir) => (uvWorkspaceCovers(workspace.members, workspace.exclude, relDir) ? [undefined] : []),
+      (relDir) => workspacePatternsReachBelow(workspace.members, relDir, false),
+      pyprojects,
+      JSON.stringify([canonicalPatternList(workspace.members), canonicalPatternList(workspace.exclude)]),
+      'uv-member',
+      false,
+      { rule: 'uv-member', root: rootDir, input: rootPath }
+    );
   }
-  // Rule 5.
+  // Rule 5. A target is followed through every symlinked directory on its
+  // path inside this side's listing, and the reason lands on the manifest
+  // the scan reads. One this tool cannot place inside the repository (an
+  // absolute or home path, a relative path that leaves the root and can
+  // come back in through the checkout directory's own name, a link that
+  // does either or cannot be followed) fails closed like an inexact
+  // workspace pattern: the reason, with the target text as its pattern, is
+  // on every package.json on this side, so only the same specifier in the
+  // same file, through the same link texts (tracedPattern), on the
+  // reference side excuses it. It also stands in for the promotion the
+  // target would have had (standIn), on every package.json: one under
+  // build/ is read for names, since the target may be it. Neither gives a
+  // position, so neither makes a parse failure fatal whatever ignorePaths
+  // says.
+  const markTarget = async (
+    fromDir: string,
+    targetText: string,
+    position: ProtectedPosition & ProjectRule,
+    reason: ProjectReason
+  ): Promise<void> => {
+    const written = localTargetDir(fromDir, targetText);
+    const trace: LinkTrace = [];
+    const target = written === null ? null : await resolveLinkedDir(source, written, trace);
+    if (target !== null) {
+      mark(manifestPathIn(target), position, true, reason);
+      return;
+    }
+    const pattern = tracedPattern(targetText, trace, side);
+    for (const candidate of packageJsons) {
+      addReason(candidate, { ...reason, pattern });
+      standIn(candidate);
+    }
+  };
   for (const [relPath, manifest] of parsedPackageJsons) {
     for (const dep of manifest.deps) {
+      // npm reads a bare "./x", "../x", "/x" or "~/x" as a local directory
+      // too (npm-package-arg's isFilespec); the whole specifier is the path.
       const used = LOCAL_SPECIFIER_PREFIXES.find((specPrefix) => dep.specifier.startsWith(specPrefix));
-      if (used === undefined) {
+      const targetText =
+        used !== undefined ? dep.specifier.slice(used.length) : isLocalPathSpecifier(dep.specifier) ? dep.specifier : null;
+      if (targetText === null) {
         continue;
       }
-      const target = localTargetDir(parentDir(relPath), dep.specifier.slice(used.length));
-      if (target !== null) {
-        mark(manifestPathIn(target), 'reference-target', true);
-      }
+      await markTarget(parentDir(relPath), targetText, 'reference-target', {
+        rule: 'reference-target',
+        root: parentDir(relPath),
+        input: relPath,
+      });
     }
   }
   for (const lockPath of npmLockInputs) {
@@ -2325,18 +2964,121 @@ async function classifySide(
       if (link.resolved === undefined) {
         continue;
       }
-      const target = localTargetDir(parentDir(lockPath), link.resolved);
-      if (target !== null) {
-        mark(manifestPathIn(target), 'link-target', true);
-      }
+      await markTarget(parentDir(lockPath), link.resolved, 'link-target', {
+        rule: 'link-target',
+        root: parentDir(lockPath),
+        input: lockPath,
+      });
     }
+  }
+  // A requirements file another one includes with -r or -c is installed by
+  // pip. Followed over the whole listing, from every requirements file this
+  // side lists, with the loader's rules (relative to the including file, at
+  // most MAX_INCLUDE_DEPTH levels, each file read once), so a scan of a
+  // subdirectory still sees an include written outside it. A reason only:
+  // whether such a file stops the scan is unchanged.
+  // An include this tool cannot place inside the repository fails closed
+  // as rule 5 does, over every requirements file on this side, and stands
+  // in for the read the include follower would have given it (standIn): a
+  // requirements file under build/ is read for names, since the include may
+  // be it.
+  const requirementsFiles = listedFiles.filter((relPath) => isRequirementsPath(relPath) && !underNodeModules(relPath));
+  for (const [target, reason] of await requirementIncludeReasons(source, listedFiles, diagnostics, side)) {
+    if (target === null) {
+      for (const candidate of requirementsFiles) {
+        addReason(candidate, reason);
+        standIn(candidate);
+      }
+      continue;
+    }
+    addReason(target, reason);
+  }
+
+  const workspaceFields = new Map<string, string[]>();
+  for (const [relPath, manifest] of parsedPackageJsons) {
+    workspaceFields.set(relPath, manifest.workspaces ?? []);
   }
 
   return {
     positions,
     promoted,
     inputFailures: [...failures].map(([relPath, kind]) => ({ path: relPath, kind })),
+    reasons,
+    workspaceFields,
   };
+}
+
+async function requirementIncludeReasons(
+  source: FileSource,
+  listedFiles: readonly string[],
+  diagnostics: Diagnostic[],
+  side: number
+): Promise<Array<[string | null, ProjectReason]>> {
+  // A null target is an include this tool cannot place inside the
+  // repository, with its text and the link texts the walk read as the
+  // reason's pattern (tracedPattern).
+  const found: Array<[string | null, ProjectReason]> = [];
+  const start = listedFiles.filter((relPath) => isRequirementsPath(relPath) && !underNodeModules(relPath)).sort();
+  const known = new Set(start);
+  const firstRead = await readClassificationInputs(source, start, diagnostics, true);
+  let frontier: Array<{ path: string; content: string; constraint: boolean }> = start.flatMap((relPath) => {
+    const content = firstRead.contents.get(relPath) ?? null;
+    return content === null ? [] : [{ path: relPath, content, constraint: false }];
+  });
+  for (let depth = 1; frontier.length > 0; depth += 1) {
+    const next: typeof frontier = [];
+    for (const file of frontier) {
+      let includes: Array<{ target: string; constraint: boolean }>;
+      try {
+        includes = parseRequirements(file.path, file.content, file.constraint ? { constraint: true } : {}).python?.includes ?? [];
+      } catch {
+        continue;
+      }
+      const dir = parentDir(file.path);
+      for (const include of includes) {
+        const reason: ProjectReason = { rule: 'requirements-include', root: dir, input: file.path };
+        // pip opens dirname(file)/target through the operating system, so a
+        // ".." after a symlinked segment climbs out of the link's target:
+        // walked physically from the including file's directory, which is
+        // real (a listed path, or one this walk already resolved).
+        const trace: LinkTrace = [];
+        const joined = await walkPhysicalPath(source, dir, include.target, trace);
+        if (joined === '') {
+          continue; // the root directory itself, which pip cannot read as a file
+        }
+        if (joined === null) {
+          found.push([null, { ...reason, pattern: tracedPattern(include.target, trace, side) }]);
+          continue;
+        }
+        if (known.has(joined)) {
+          found.push([joined, reason]);
+          continue;
+        }
+        if (depth > MAX_INCLUDE_DEPTH) {
+          continue;
+        }
+        let content: string | null;
+        try {
+          if (await source.isSymlink(joined)) {
+            continue;
+          }
+          const mark = diagnostics.length;
+          content = await source.read(joined);
+          diagnostics.splice(mark);
+        } catch {
+          continue;
+        }
+        if (content === null) {
+          continue;
+        }
+        known.add(joined);
+        found.push([joined, reason]);
+        next.push({ path: joined, content, constraint: include.constraint });
+      }
+    }
+    frontier = next;
+  }
+  return found;
 }
 
 function parseFailureReason(relPath: string, err: DepGuardError): string {
@@ -2354,6 +3096,40 @@ function classClause(failure: ParseFailure): string | null {
 }
 
 /**
+ * The classification inputs outside the scan prefix on one side that could
+ * not be read and that a scan of the repository root would have stopped on:
+ * an input that is not a manifest; a symlinked input the side looked at, on
+ * the judged side only (a comparison side treats it as absent); a manifest
+ * the side looked at that the side, or for the judged side a comparison
+ * side, counts as a project, or that ignorePaths does not cover. Each one
+ * raises classification-input-unread, and while there is one, every
+ * manifest under the prefix outside node_modules is a project on this side:
+ * read past the skipped-directory-name filter (loadState) and fatal when it
+ * does not parse (settleParseFailures, protectionOn).
+ */
+function stoppingUnreadInputs(
+  classification: SideClassification,
+  role: SideRole,
+  isIgnoredPath: (relPath: string) => boolean,
+  comparisons: readonly SideClassification[]
+): string[] {
+  const stopsRootScan = (relPath: string): boolean =>
+    classification.positions.has(relPath) ||
+    (role.kind === 'judged' && comparisons.some((other) => other.positions.has(relPath))) ||
+    !isIgnoredPath(relPath);
+  return classification.inputFailures
+    .filter((failure) => {
+      const lookedAt = !pathSkipped(failure.path) || classification.positions.has(failure.path);
+      return (
+        failure.kind === 'other' ||
+        (failure.kind === 'symlink' && role.kind === 'judged' && lookedAt) ||
+        (failure.kind === 'manifest' && lookedAt && stopsRootScan(failure.path))
+      );
+    })
+    .map((failure) => failure.path);
+}
+
+/**
  * Decides every parse failure of every side the run loaded, after all of
  * them are loaded, and throws one manifest-parse error listing the fatal
  * ones. A judged-side failure is fatal when the judged side or a comparison
@@ -2367,32 +3143,28 @@ function settleParseFailures(sides: readonly LoadedSide[], prefix: string, diagn
   const comparisons = sides.filter((side) => side.role.kind === 'comparison');
   const ordered = [...sides.filter((side) => side.role.kind === 'judged'), ...comparisons];
 
-  // Would a scan of the repository root stop on this parse failure?
-  const stopsRootScan = (side: LoadedSide, relPath: string): boolean =>
-    side.classification.positions.has(relPath) ||
-    (side.role.kind === 'judged' && comparisons.some((other) => other.classification.positions.has(relPath))) ||
-    !side.isIgnoredPath(relPath);
-
-  const unreadBySide = new Map<LoadedSide, string[]>();
+  // The unread inputs of each side were decided when it was loaded, since
+  // its read gate depends on them (loadState, standsInForPrefix), against
+  // the comparison sides already loaded. The same sides must be the ones
+  // judged here, or the diagnostic and the read gate could disagree.
   for (const side of ordered) {
-    const unread: string[] = [];
-    for (const failure of side.classification.inputFailures) {
-      const lookedAt = !pathSkipped(failure.path) || side.classification.positions.has(failure.path);
-      const stops =
-        failure.kind === 'other' ||
-        (failure.kind === 'symlink' && side.role.kind === 'judged' && lookedAt) ||
-        (failure.kind === 'manifest' && lookedAt && stopsRootScan(side, failure.path));
-      if (stops) {
-        unread.push(failure.path);
-        diagnostics.push({
-          code: CLASSIFICATION_INPUT_UNREAD,
-          message:
-            `${failure.path}: outside the scanned directory ${prefix} and could not be read to decide which ` +
-            `manifests are projects, so every manifest under ${prefix} was treated as a project for this scan`,
-        });
-      }
+    const against = side.role.kind === 'judged' ? comparisons : [];
+    if (side.loadedAgainst.length !== against.length || side.loadedAgainst.some((other, i) => other !== against[i])) {
+      throw new Error('internal error: a side was loaded against different comparison sides than it is settled with');
     }
-    unreadBySide.set(side, unread);
+  }
+  const unreadBySide = new Map<LoadedSide, readonly string[]>();
+  for (const side of ordered) {
+    for (const relPath of side.unreadInputs) {
+      diagnostics.push({
+        code: CLASSIFICATION_INPUT_UNREAD,
+        message:
+          `${relPath}: outside the scanned directory ${prefix} and could not be read to decide which ` +
+          `manifests are projects, so every manifest under ${prefix} was treated as a project for this scan`,
+      });
+    }
+    unreadBySide.set(side, side.unreadInputs);
+    side.state.projects = { ...(side.state.projects ?? EMPTY_PROJECTS), unreadInputs: [...side.unreadInputs] };
   }
 
   const protectionOn = (side: LoadedSide, relPath: string): { text: string; rank: number } | null => {
@@ -2471,8 +3243,14 @@ async function loadState(
   diagnostics: Diagnostic[],
   role: SideRole,
   prefix: string,
-  isIgnoredPath: (relPath: string) => boolean = () => false
+  isIgnoredPath: (relPath: string) => boolean,
+  // Every comparison side the run loads, already loaded, for the judged
+  // side; none for a comparison side. settleParseFailures checks it.
+  comparisons: readonly LoadedSide[]
 ): Promise<LoadedSide> {
+  if (role.kind === 'comparison' && comparisons.length > 0) {
+    throw new Error('internal error: a comparison side was loaded against other sides');
+  }
   const source = cachingSource(rawSource);
   const listedFiles = await source.listFiles();
   const filesInPrefix = listedFiles.filter((relPath) => underPrefix(relPath, prefix));
@@ -2515,7 +3293,25 @@ async function loadState(
     });
     return null;
   };
-  const readDespiteSkippedName = (relPath: string): boolean => classification.promoted.has(relPath);
+  // An unread classification input outside the prefix that a root scan
+  // would have stopped on (stoppingUnreadInputs) means this side cannot
+  // tell which manifests under the prefix are projects, and the diagnostic
+  // says every one was treated as a project. The read gate makes that true:
+  // every manifest under the prefix outside node_modules is read past the
+  // skipped-directory-name filter, a stand-in with no position, as standIn
+  // in classifySide gives. Without it a manifest under build/ that a root
+  // scan would never have reached cleanly (the root scan stops on the
+  // input) was dropped and the scan exited 0.
+  const unreadInputs = stoppingUnreadInputs(
+    classification,
+    role,
+    isIgnoredPath,
+    comparisons.map((other) => other.classification)
+  );
+  const standsInForPrefix = prefix !== '' && unreadInputs.length > 0;
+  const readDespiteSkippedName = (relPath: string): boolean =>
+    classification.promoted.has(relPath) ||
+    (standsInForPrefix && isProjectManifestPath(relPath) && underPrefix(relPath, prefix) && !underNodeModules(relPath));
   const files = filesInPrefix.filter(
     (relPath) => isLockfileName(relPath) || !pathSkipped(relPath) || readDespiteSkippedName(relPath)
   );
@@ -2794,8 +3590,15 @@ async function loadState(
     pythonLockfiles,
     pythonArchiveFiles,
     goFiles: files.filter(isGoModuleFile).sort(),
+    projects: {
+      reasons: classification.reasons,
+      workspaceFields: classification.workspaceFields,
+      // Filled in by settleParseFailures from unreadInputs below, the
+      // unread inputs that would have stopped a root scan.
+      unreadInputs: [],
+    },
   };
-  return { state, role, isIgnoredPath, classification, failures };
+  return { state, role, isIgnoredPath, classification, failures, loadedAgainst: comparisons, unreadInputs };
 }
 
 // Both sides of a scan usually read the same workspace configuration, so
@@ -3014,7 +3817,8 @@ export async function loadRefState(
       label: `the trust base "${ref}"`,
     },
     prefix,
-    isIgnoredPath
+    isIgnoredPath,
+    []
   );
   // The trust base's own parse failures are decided by its own projects
   // only. It contributes control input (ignorePaths) to the other sides,
@@ -3024,6 +3828,93 @@ export async function loadRefState(
     ...diagnostics.filter((d) => COMPARISON_SIDE_CODES.has(d.code) || d.code === CLASSIFICATION_INPUT_UNREAD)
   );
   return side.state;
+}
+
+/**
+ * Which manifests are projects on a git ref, and why, without loading the
+ * side for the scan: the trust base of a --staged --trust-base run, which
+ * the ignorePaths rule reads as its reference side while the lockfile rules
+ * keep HEAD. Never throws. A manifest there that does not parse contributes
+ * no reasons, and a ref that cannot be classified at all contributes none,
+ * so either way it excuses nothing and the commit hook gains no exit 2.
+ */
+export async function loadRefProjects(
+  repoRoot: string,
+  ref: string,
+  prefix = '',
+  isIgnoredPath: (relPath: string) => boolean = () => false
+): Promise<ProjectClassification> {
+  try {
+    if (!isUsableRef(ref)) {
+      return EMPTY_PROJECTS;
+    }
+    const root = await resolveRepoRoot(repoRoot);
+    const source = cachingSource(refSource(root, ref));
+    const listedFiles = await source.listFiles();
+    const classification = await classifySide(
+      source,
+      listedFiles,
+      prefix,
+      { kind: 'comparison', label: `the trust base "${ref}"` },
+      [],
+      manifestParser(),
+      new Map()
+    );
+    // The same decision loadState makes for a comparison side loaded on
+    // its own.
+    const unreadInputs = stoppingUnreadInputs(
+      classification,
+      { kind: 'comparison', label: `the trust base "${ref}"` },
+      isIgnoredPath,
+      []
+    );
+    return { reasons: classification.reasons, workspaceFields: classification.workspaceFields, unreadInputs };
+  } catch {
+    return EMPTY_PROJECTS;
+  }
+}
+
+// How a project rule reads in a message.
+export function projectRuleText(rule: ProjectRule): string {
+  return rule === 'requirements-include'
+    ? 'a requirements file another requirements file includes with -r or -c'
+    : POSITION_TEXT[rule];
+}
+
+// How one project reason reads in a message: its rule, and for a
+// symlinked member the links it was reached through, or the link that
+// could not be followed.
+export function projectReasonText(reason: ProjectReason): string {
+  const text = projectRuleText(reason.rule);
+  if (reason.link === undefined) {
+    return text;
+  }
+  const paths = reason.link.paths.join(', ');
+  if (reason.link.followed) {
+    return `${text} reached through the ${reason.link.paths.length === 1 ? 'symlink' : 'symlinks'} ${paths}`;
+  }
+  const why =
+    reason.link.cause === 'cycle'
+      ? `following the symlink ${paths} loops back into a directory already on its path`
+      : reason.link.cause === 'fan-out'
+        ? `the symlinks under ${paths} fan out past the limit of ${MAX_SYMLINKED_VISITS}`
+        : reason.link.cause === 'side-fan-out'
+          ? `the symlink walks on this side ran past the limit of ${MAX_SIDE_SYMLINKED_VISITS} visits in all before the symlink ${paths}`
+          : `the symlink ${paths} could not be followed`;
+  return `possibly ${text}: ${why}, so every manifest of this kind on this side counts`;
+}
+
+// The project manifest a lockfile at this path installs, in its own
+// directory, or null when the path is not a lockfile this tool recognises.
+export function projectManifestForLockfile(relPath: string): string | null {
+  const dir = parentDir(relPath);
+  if (isLockfileName(relPath)) {
+    return manifestPathIn(dir);
+  }
+  if (isPythonLockfilePath(relPath)) {
+    return joinRepoPath(dir, baseName(relPath) === 'Pipfile.lock' ? 'Pipfile' : PYPROJECT_TOML);
+  }
+  return null;
 }
 
 /**
@@ -3061,7 +3952,8 @@ export async function loadStates(
       diagnostics,
       JUDGED,
       prefix,
-      isIgnoredPath
+      isIgnoredPath,
+      []
     );
     settleParseFailures([after], prefix, diagnostics);
     return { before: null, after: after.state, mode, diagnostics: dedupeDiagnostics(diagnostics) };
@@ -3080,10 +3972,18 @@ export async function loadStates(
           diagnostics,
           { kind: 'comparison', label: 'HEAD' },
           prefix,
-          isIgnoredPath
+          isIgnoredPath,
+          []
         )
       : null;
-    const after = await loadState(indexSource(root), diagnostics, JUDGED, prefix, isIgnoredPath);
+    const after = await loadState(
+      indexSource(root),
+      diagnostics,
+      JUDGED,
+      prefix,
+      isIgnoredPath,
+      before === null ? [] : [before]
+    );
     settleParseFailures(before === null ? [after] : [after, before], prefix, diagnostics);
     return { before: before?.state ?? null, after: after.state, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
@@ -3099,14 +3999,16 @@ export async function loadStates(
       label: `the --base ref "${mode.ref}"`,
     },
     prefix,
-    isIgnoredPath
+    isIgnoredPath,
+    []
   );
   const after = await loadState(
     await createWorkingTreeSource(root, diagnostics),
     diagnostics,
     JUDGED,
     prefix,
-    isIgnoredPath
+    isIgnoredPath,
+    [before]
   );
   settleParseFailures([after, before], prefix, diagnostics);
   return { before: before.state, after: after.state, mode, diagnostics: dedupeDiagnostics(diagnostics) };

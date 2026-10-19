@@ -1095,6 +1095,10 @@ function unreadSiblingNote(after: RepoState): Diagnostic[] {
 export interface DeltaOptions {
   // True when a repository path is covered by an ignorePaths entry.
   isIgnoredPath?: (repoPath: string) => boolean;
+  // For a path isIgnoredPath answered false although an ignorePaths entry
+  // covers it, because the change wires its directory into the install:
+  // how, in words, for the hint. Null otherwise.
+  ignoredPathWiring?: (repoPath: string) => string | null;
   // Overrides NESTED_LOCKFILE_CHANGE_REFUSES. For the test that keeps the
   // refusing branch of that switch working; scan() never sets it.
   nestedLockfileChangeRefuses?: boolean;
@@ -1164,8 +1168,12 @@ function checkNestedLockfiles(
     })
     .map((entry) => entry.path);
   const isIgnored = options.isIgnoredPath ?? (() => false);
-  const ignored = changed.filter((entryPath) => isIgnored(entryPath));
-  const blocking = changed.filter((entryPath) => !isIgnored(entryPath));
+  const ignored: string[] = [];
+  const blocking: string[] = [];
+  for (const entryPath of changed) {
+    (isIgnored(entryPath) ? ignored : blocking).push(entryPath);
+  }
+  const wiring = options.ignoredPathWiring ?? (() => null);
 
   const diagnostics: Diagnostic[] = [];
   // A lockfile below the root that the comparison side had and this side
@@ -1200,11 +1208,27 @@ function checkNestedLockfiles(
   }
   const one = blocking.length === 1;
   const refuses = options.nestedLockfileChangeRefuses ?? NESTED_LOCKFILE_CHANGE_REFUSES;
-  const ignoreHint =
-    `If nothing this repository ships installs from ${one ? 'it' : 'them'} (a test fixture or an ` +
+  // A path an ignorePaths entry already covers, judged because this change
+  // wires its directory into the install, is told that instead of being
+  // told to add the entry it already has.
+  const wired = blocking.flatMap((entryPath) => {
+    const reason = wiring(entryPath);
+    return reason === null ? [] : [{ entryPath, reason }];
+  });
+  const wiredHint = wired
+    .map(
+      ({ entryPath, reason }) =>
+        `${entryPath} is covered by ignorePaths, but this change wires its directory into the install ` +
+        `(${reason}), so the entry no longer covers it; remove that wiring or review the lockfile.`
+    )
+    .join(' ');
+  const unwired = blocking.length - wired.length;
+  const genericHint =
+    `If nothing this repository ships installs from ${unwired === 1 ? 'it' : 'them'} (a test fixture or an ` +
     'example), add the path or its directory to ignorePaths in .dep-guard.json on the base branch; ' +
     'on a --trust-base run that entry is read from the trust base, so a pull request cannot add it ' +
     'for itself.';
+  const ignoreHint = [wiredHint, unwired > 0 ? genericHint : ''].filter((part) => part !== '').join(' ');
   const message = refuses
     ? `${listPaths(blocking)}: ${one ? 'a lockfile' : 'lockfiles'} below the repository root changed. ` +
       `This tool did not read ${one ? 'it' : 'them'} (it reads npm and pnpm lockfiles, and ` +

@@ -88,6 +88,7 @@ import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
 import { isNonPublicName } from './registry-scope.js';
+import { unreachable, type UncheckedSink } from './unchecked.js';
 
 // The facts this check needs about a 200 from the registry. Deliberately
 // NOT `{ createdAt }`: a creation date cannot distinguish a real package
@@ -205,7 +206,8 @@ export async function resolveUnknownPackages(
   ctx: CheckContext,
   deps: UnknownPackageDeps,
   diagnostics: Diagnostic[],
-  deadline: OnlineDeadline
+  deadline: OnlineDeadline,
+  unchecked: UncheckedSink = () => {}
 ): Promise<Omit<Finding, 'fingerprint'>[]> {
   const candidates: Omit<Finding, 'fingerprint'>[] = [];
   for (const finding of findings) {
@@ -268,6 +270,7 @@ export async function resolveUnknownPackages(
     // is the same outcome a network failure produces.
     if (deadline.expired()) {
       skippedByDeadline += group.length;
+      unchecked({ name, ecosystem: 'npm', step: 'unknown-package', reason: 'budget' });
       for (const finding of group) {
         recordResolution(
           finding,
@@ -283,6 +286,7 @@ export async function resolveUnknownPackages(
       packument = await deps.fetchPackument(name);
     } catch (err) {
       const reason = (err as Error).message;
+      unchecked(unreachable(name, 'npm', 'unknown-package', err));
       for (const finding of group) {
         recordResolution(finding, 'unreachable', reason);
       }

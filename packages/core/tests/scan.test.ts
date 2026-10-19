@@ -1381,7 +1381,10 @@ describe('ignorePaths cannot be an off switch', () => {
     expect(result.exitCode).toBe(1);
   });
 
-  test('ignoring the lockfile itself does silence it, which is the explicit choice', async () => {
+  // Until 0.16.0 this silenced the tamper finding. The root is a project on
+  // every side, and ignorePaths never drops lockfile-tamper on a project
+  // the reference side installs, as allow never covers that rule.
+  test('ignoring the root lockfile no longer silences a lockfile-tamper finding on it (0.16.0)', async () => {
     await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['package-lock.json'] }));
     await write('package.json', manifestJson({ lodash: '^4.17.21' }));
     await write(
@@ -1407,12 +1410,17 @@ describe('ignorePaths cannot be an off switch', () => {
 
     const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
 
-    expect(result.findings.filter((f) => f.ruleId === 'lockfile-tamper')).toHaveLength(0);
-    expect(result.ignored).toBeGreaterThan(0);
+    const tamper = result.findings.filter((f) => f.ruleId === 'lockfile-tamper');
+    expect(tamper).toHaveLength(1);
+    expect(tamper[0].ignoreOverride?.entries).toEqual(['package-lock.json']);
+    expect(result.ignoreKept).toBe(1);
+    expect(result.exitCode).toBe(1);
   });
 
+  // A requirements file nothing includes and no lockfile sits beside is not
+  // a project, so ignorePaths still drops a critical there.
   test('a surviving pattern that drops findings reports the highest severity it dropped', async () => {
-    await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['package.json'] }));
+    await write('.dep-guard.json', JSON.stringify({ ignorePaths: ['backend'] }));
     await write('package.json', manifestJson({ lodash: '^4.17.21' }));
     await write(
       'package-lock.json',
@@ -1420,19 +1428,7 @@ describe('ignorePaths cannot be an off switch', () => {
     );
     await commitAll('first');
 
-    await write(
-      'package-lock.json',
-      npmLockJson(
-        {
-          'node_modules/lodash': {
-            version: '4.17.21',
-            resolved: 'https://evil.example.test/lodash/-/lodash-4.17.21.tgz',
-            integrity: 'sha512-cleanlodash',
-          },
-        },
-        { lodash: '^4.17.21' }
-      )
-    );
+    await write('backend/requirements.txt', 'requests @ git+https://github.com/example/requests.git\n');
     await git('add', '-A');
 
     const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });

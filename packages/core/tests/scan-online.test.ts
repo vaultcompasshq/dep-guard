@@ -364,7 +364,10 @@ describe('scan(): online enrichment', () => {
     expect(typosquat?.severity).toBe('high');
   });
 
-  test('a fetch failure degrades cleanly: offline findings survive, a diagnostic is added, exit code is unaffected', async () => {
+  // Until 0.16.0 the exit code was unaffected on every run. On a --base or
+  // --trust-base run a name the downloads API never answered for is now a
+  // could-not-run (audit B2); the findings themselves are unchanged.
+  test('a fetch failure degrades cleanly: offline findings survive, a diagnostic is added, and a --base run exits 2', async () => {
     const dir = initRepo();
     commitManifest(dir, {});
     commitManifest(dir, { raect: '^1.0.0' });
@@ -400,7 +403,10 @@ describe('scan(): online enrichment', () => {
     const typosquat = onlineResult.findings.find((f) => f.ruleId === 'typosquat');
     expect(typosquat?.severity).toBe('low');
     expect(onlineResult.run.diagnostics.some((d) => d.code === 'online-check-unreachable')).toBe(true);
-    expect(onlineResult.exitCode).toBe(offlineResult.exitCode);
+    expect(onlineResult.findings.length).toBe(offlineResult.findings.length);
+    expect(offlineResult.exitCode).toBe(1);
+    expect(onlineResult.exitCode).toBe(2);
+    expect(onlineResult.run.couldNotRun?.code).toBe('online-names-unchecked');
   });
 
   test('a 404 packument lookup does not permanently cache a package as unregistered', async () => {
@@ -476,7 +482,14 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
     fetchWeeklyDownloadsMock.mockReset();
     fetchPackumentMock.mockReset();
     fetchPackumentMock.mockResolvedValue(null);
-    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map(), noRecord: new Set() });
+    // Every name asked about gets a popular weekly count, so registered-squat
+    // has an answer for each and stays out of these tests. A response that
+    // omits a name leaves it unchecked, which on a --base run is exit 2
+    // (audit B2, 0.16.0).
+    fetchWeeklyDownloadsMock.mockImplementation(async (names) => ({
+      counts: new Map(names.map((name) => [name, 1_000_000])),
+      noRecord: new Set(),
+    }));
     process.env.XDG_CACHE_HOME = mkdtempSync(path.join(tmpdir(), 'depguard-online-cache-'));
     jest.resetModules();
     ({ scan, checkSingle } = await import('../src/scan.js'));
@@ -666,7 +679,16 @@ describe('scan(): --online resolves unknown-package against the registry', () =>
     const onlineFinding = online.findings.find((f) => f.ruleId === 'unknown-package');
     expect(onlineFinding?.severity).toBe(offlineFinding?.severity);
     expect(onlineFinding?.message).toBe(offlineFinding?.message);
-    expect(online.exitCode).toBe(offline.exitCode);
+    // The finding is untouched. On this --base run the name is also
+    // unchecked, which is exit 2 since 0.16.0 (audit B2).
+    expect(offline.exitCode).toBe(1);
+    expect(online.exitCode).toBe(2);
+    expect(online.run.online.unchecked?.names).toContainEqual({
+      name: 'some-unknown-thing',
+      ecosystem: 'npm',
+      step: 'unknown-package',
+      reason: 'unreachable',
+    });
     expect(online.run.diagnostics.some((d) => d.code === 'online-check-unreachable')).toBe(true);
     expect(onlineFinding?.details).toMatchObject({ onlineResolution: 'unreachable' });
   });

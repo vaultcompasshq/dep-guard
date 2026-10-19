@@ -30,6 +30,7 @@ import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
 import type { PypiAnswer } from './pypi-client.js';
+import { unreachable as unreachableName, type UncheckedSink } from './unchecked.js';
 
 export const PYPI_CHECK_LABEL = 'pypi existence';
 export const PYPI_PRIVATE_INDEX_SKIPPED = 'pypi-private-index-skipped';
@@ -108,7 +109,8 @@ export async function checkPypiExistence(
   rule: PythonIndexRule | null,
   deps: PypiExistenceDeps,
   diagnostics: Diagnostic[],
-  deadline: OnlineDeadline
+  deadline: OnlineDeadline,
+  unchecked: UncheckedSink = () => {}
 ): Promise<{ findings: Omit<Finding, 'fingerprint'>[]; stats: PypiExistenceStats }> {
   const stats: PypiExistenceStats = { existenceChecked: 0, budget: 0, unreachable: 0, privateIndex: 0, internal: 0 };
   const findings: Omit<Finding, 'fingerprint'>[] = [];
@@ -159,6 +161,7 @@ export async function checkPypiExistence(
     if (deadline.expired()) {
       stats.budget += 1;
       deadlineSkipped.push(name);
+      unchecked({ name, ecosystem: 'pypi', step: 'pypi-existence', reason: 'budget' });
       continue;
     }
     let answer: PypiAnswer;
@@ -167,6 +170,7 @@ export async function checkPypiExistence(
     } catch (err) {
       stats.unreachable += 1;
       unreachable.push({ name, reason: (err as Error).message });
+      unchecked(unreachableName(name, 'pypi', 'pypi-existence', err));
       continue;
     }
     stats.existenceChecked += 1;

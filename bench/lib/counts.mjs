@@ -50,6 +50,7 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   'delta-ambiguous-lock-entry',
   'delta-new-lock-entries',
   'ignore-path-dropped',
+  'ignore-path-project-kept',
   'ignore-path-unmatched',
   'lockfile-binary-skipped',
   'lockfile-downgrade-acknowledged',
@@ -72,6 +73,10 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   'npmrc-pin-unparseable',
   'online-check-unreachable',
   'online-deadline-exceeded',
+  // Not a diagnostic: the run.couldNotRun code of a pull-request run that
+  // left a candidate name unchecked online (0.16.0). Named because the
+  // source scan above cannot tell the two apart, and a stale entry is free.
+  'online-names-unchecked',
   'path-outside-root',
   'pnpm-lockfile-invalid-entry',
   'pnpm-multi-document-lockfile',

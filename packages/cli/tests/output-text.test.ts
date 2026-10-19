@@ -25,6 +25,7 @@ function scanResult(online: ScanResult['run']['online'], names: EcosystemsSummar
     findings: [],
     suppressed: 0,
     ignored: 0,
+    ignoreKept: 0,
     allowed: 0,
     allowedNames: [],
     run: {
@@ -66,6 +67,21 @@ function sample(existenceChecked: number, notChecked: Partial<EcosystemsSummary[
   base.pypi.excluded.vcs = 1;
   return base;
 }
+
+describe('renderText: kept over ignorePaths', () => {
+  test('H34 printed, at zero, only when the run applied the ignorePaths project rule', () => {
+    const applied = { ...scanResult(OFFLINE), ignoreRuleApplied: true };
+    const notApplied: ScanResult = {
+      ...scanResult(OFFLINE),
+      ignoreRuleApplied: false,
+      run: { ...scanResult(OFFLINE).run, mode: 'staged' },
+    };
+
+    expect(renderText(applied)).toContain('0 ignored, 0 kept over ignorePaths, 0 allowed');
+    expect(renderText(notApplied)).toContain('0 ignored, 0 allowed');
+    expect(renderText(notApplied)).not.toContain('kept over ignorePaths');
+  });
+});
 
 describe('renderText: the names line', () => {
   test('plain run, no --online, byte for byte', () => {

@@ -25,6 +25,7 @@ function scanResult(findings: Finding[], overrides: Partial<ScanResult['run']> =
     findings,
     suppressed: 0,
     ignored: 0,
+    ignoreKept: 0,
     allowed: 0,
     allowedNames: [],
     run: {
@@ -127,6 +128,7 @@ describe('renderSarif: the envelope', () => {
     expect(withCounts.runs[0].properties).toEqual({
       suppressed: 2,
       ignored: 3,
+      ignoreKept: 0,
       allowed: 1,
       allowedNames: ['@acme/thing'],
     });
@@ -134,6 +136,7 @@ describe('renderSarif: the envelope', () => {
     expect(parse(scanResult([])).runs[0].properties).toEqual({
       suppressed: 0,
       ignored: 0,
+      ignoreKept: 0,
       allowed: 0,
       allowedNames: [],
     });

@@ -80,6 +80,9 @@ export const SARIF_FINGERPRINT_KEY = 'dep-guard/v1';
 // never change the exit code"); a proposal is the same kind of statement
 // and gets the same treatment.
 export const SARIF_TRUST_BASE_NOTIFICATION_ID = 'dep-guard/trust-base-proposal';
+// The error notification of a run that scanned and still could not stand
+// behind its verdict (run.couldNotRun, exit 2).
+export const SARIF_COULD_NOT_RUN_NOTIFICATION_ID = 'dep-guard/could-not-run';
 
 const SARIF_SCHEMA =
   'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json';
@@ -173,6 +176,8 @@ function toResult(
       // reading a dep-guard SARIF report is entitled to the same bag a
       // consumer reading the JSON report gets.
       details: finding.details ?? {},
+      // A finding ignorePaths matched and did not drop (0.16.0).
+      ...(finding.ignoreOverride === undefined ? {} : { ignoreOverride: finding.ignoreOverride }),
     },
     partialFingerprints: { [SARIF_FINGERPRINT_KEY]: finding.fingerprint },
     locations: [location],
@@ -203,6 +208,23 @@ export function renderSarif(result: ScanResult, version: string): string {
   // Read once so the notification text below cannot narrow differently
   // from the guard that decides whether to emit the block at all.
   const trustBaseRef = result.trustBase?.ref ?? '';
+  const couldNotRun = result.run.couldNotRun;
+  const invocationNotifications = [
+    ...(result.trustBase?.proposals ?? []).map((proposal) => ({
+      descriptor: { id: SARIF_TRUST_BASE_NOTIFICATION_ID },
+      level: 'note',
+      message: { text: `${proposal} (control inputs read from ${trustBaseRef})` },
+    })),
+    ...(couldNotRun === undefined
+      ? []
+      : [
+          {
+            descriptor: { id: SARIF_COULD_NOT_RUN_NOTIFICATION_ID },
+            level: 'error',
+            message: { text: `${couldNotRun.message} (${couldNotRun.code})` },
+          },
+        ]),
+  ];
 
   const rules = (Object.keys(RULE_DESCRIPTIONS) as RuleId[]).map((ruleId) => ({
     id: `${SARIF_RULE_NAMESPACE}/${ruleId}`,
@@ -228,6 +250,8 @@ export function renderSarif(result: ScanResult, version: string): string {
         properties: {
           suppressed: result.suppressed,
           ignored: result.ignored,
+          ignoreKept: result.ignoreKept ?? 0,
+          ...(result.run.online.unchecked === undefined ? {} : { onlineUnchecked: result.run.online.unchecked.count }),
           allowed: result.allowed,
           allowedNames: result.allowedNames,
         },
@@ -235,24 +259,22 @@ export function renderSarif(result: ScanResult, version: string): string {
         // is absent entirely outside pull-request mode so a scan without
         // --trust-base renders the same bytes it always did.
         //
-        // executionSuccessful is true because it describes whether the
-        // TOOL ran, not whether it found anything: a run that reports
-        // blocking findings still executed successfully. The two exit-2
-        // cases where dep-guard genuinely could not run never reach this
-        // renderer at all -- they throw before a ScanResult exists.
-        ...(result.trustBase === undefined || result.trustBase.proposals.length === 0
+        // executionSuccessful describes whether the TOOL ran, not whether
+        // it found anything: a run that reports blocking findings still
+        // executed successfully. Most exit-2 cases never reach this
+        // renderer at all -- they throw before a ScanResult exists. One
+        // does: a pull-request run that scanned and left a candidate name
+        // unchecked online (run.couldNotRun). It sets executionSuccessful
+        // false and adds one error notification to the same single
+        // invocation, beside any proposal notes, creating the invocation
+        // when there are none.
+        ...(invocationNotifications.length === 0
           ? {}
           : {
               invocations: [
                 {
-                  executionSuccessful: true,
-                  toolExecutionNotifications: result.trustBase.proposals.map((proposal) => ({
-                    descriptor: { id: SARIF_TRUST_BASE_NOTIFICATION_ID },
-                    level: 'note',
-                    message: {
-                      text: `${proposal} (control inputs read from ${trustBaseRef})`,
-                    },
-                  })),
+                  executionSuccessful: couldNotRun === undefined,
+                  toolExecutionNotifications: invocationNotifications,
                 },
               ],
             }),

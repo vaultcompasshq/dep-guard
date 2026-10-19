@@ -46,6 +46,8 @@
   ],
   "suppressed": 0,
   "ignored": 0,
+  "ignoreKept": 0,
+  "ignoreRuleApplied": true,
   "allowed": 0,
   "allowedNames": [],
   "run": {

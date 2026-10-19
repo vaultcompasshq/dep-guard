@@ -629,6 +629,10 @@ function describeConfigChange(base: ResolvedConfig, head: ResolvedConfig | null)
     parts.push(`onlineBudgetMs set to ${value}`);
   }
 
+  if ((base.onlineUnchecked ?? 'fail') !== (head.onlineUnchecked ?? 'fail')) {
+    parts.push(`onlineUnchecked set to ${head.onlineUnchecked ?? 'fail'}`);
+  }
+
   if (JSON.stringify(base.extraAliases) !== JSON.stringify(head.extraAliases)) {
     parts.push('extraAliases changed');
   }

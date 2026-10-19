@@ -241,6 +241,14 @@ export function renderText(result: ScanResult): string {
     }
   }
 
+  // A run that scanned and still could not stand behind its verdict (exit
+  // 2 with a report): the one line right after the findings. The names in
+  // it are repository content, so it is sanitized like a finding.
+  if (result.run.couldNotRun !== undefined) {
+    lines.push('');
+    lines.push(sanitizeText(result.run.couldNotRun.message));
+  }
+
   if (result.run.diagnostics.length > 0) {
     lines.push('');
     lines.push(...renderDiagnosticLines(result));
@@ -301,10 +309,17 @@ export function renderText(result: ScanResult): string {
     }
   }
 
+  // "kept over ignorePaths" is printed, at zero too, on every run that had
+  // a side to judge the change against, which is where an ignorePaths
+  // entry can be refused for a path the change wires into the install. The
+  // scan records that itself: an audit has no such side, and neither has a
+  // staged run with no committed HEAD and no trust base.
+  const ignoreRuleApplies = result.ignoreRuleApplied === true;
   lines.push('');
   lines.push(
     `dep-guard ${result.run.mode}: ${result.findings.length} finding(s), ` +
       `${result.suppressed} suppressed, ${result.ignored} ignored, ` +
+      (ignoreRuleApplies ? `${result.ignoreKept ?? 0} kept over ignorePaths, ` : '') +
       `${result.allowed} allowed, ` +
       `fail-on=${result.run.failOn}, blocking=${result.run.blockingMatches}, ` +
       `exit=${result.exitCode}`

@@ -1906,15 +1906,20 @@ describe('N8: a lockfile below the repository root', () => {
     expect(error?.code).toBe('lockfile-downgrade');
   });
 
-  test('ignorePaths on the base clears a changed nested lockfile, with a note', async () => {
+  // Until 0.16.0 ignorePaths dropped the tamper finding here too. apps/web
+  // is a project on the base (a manifest beside a lockfile), and
+  // ignorePaths never drops lockfile-tamper on a project the reference side
+  // installs.
+  test('ignorePaths on the base no longer clears a tamper finding in a nested project the base installs (0.16.0)', async () => {
     await baseWithNestedLock({ '.dep-guard.json': JSON.stringify({ ignorePaths: ['apps/web'] }) });
     await write(NESTED, npmLock({ 'node_modules/lodash': TAMPERED_LODASH }, { lodash: '^4.17.21' }));
     await commitAll('head');
 
     const result = await scanBase('base', 'base');
-    expect(result.findings.filter((f) => f.manifestPath.startsWith('apps/web/'))).toEqual([]);
+    const tamper = result.findings.filter((f) => f.manifestPath.startsWith('apps/web/'));
+    expect(tamper.map((f) => f.ruleId)).toEqual(['lockfile-tamper']);
     expect(nestedChanged(result)).toBeUndefined();
-    expect(result.exitCode).toBe(0);
+    expect(result.exitCode).toBe(1);
   });
 
   test('an ignorePaths entry that covers only a nested lockfile is not reported as unmatched', async () => {

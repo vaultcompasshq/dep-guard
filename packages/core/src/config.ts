@@ -29,8 +29,17 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'minAgeDays',
   'minAgeAllow',
   'onlineBudgetMs',
+  'onlineUnchecked',
   'acknowledgedLockfiles',
 ]);
+
+// What a --base or --trust-base run does with a candidate name no online
+// step could check (online/unchecked.ts): "fail", the default, is a
+// could-not-run (exit 2); "note" keeps it a diagnostic. A string, like
+// failOn, so a later third value needs no second key. No CLI flag: the
+// workflow file is head-controlled on a same-repository pull request, and
+// an opt-out is a control, read from the trust base like every other.
+export const ONLINE_UNCHECKED_VALUES: ReadonlySet<string> = new Set(['fail', 'note']);
 
 // The lockfile names an acknowledgement may name: the root lockfiles this
 // tool inventories, written out here rather than imported so the config
@@ -337,6 +346,16 @@ function validateSection(raw: Record<string, unknown>, label: string): Partial<R
       throw new DepGuardError(`${label}: "onlineBudgetMs" must be a non-negative integer`, 'config-invalid');
     }
     result.onlineBudgetMs = raw.onlineBudgetMs;
+  }
+
+  if (raw.onlineUnchecked !== undefined) {
+    if (typeof raw.onlineUnchecked !== 'string' || !ONLINE_UNCHECKED_VALUES.has(raw.onlineUnchecked)) {
+      throw new DepGuardError(
+        `${label}: "onlineUnchecked" must be one of ${[...ONLINE_UNCHECKED_VALUES].join(', ')}`,
+        'config-invalid'
+      );
+    }
+    result.onlineUnchecked = raw.onlineUnchecked as 'fail' | 'note';
   }
 
   if (raw.minAgeAllow !== undefined) {

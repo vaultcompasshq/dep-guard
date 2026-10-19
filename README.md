@@ -181,7 +181,9 @@ needs no reminder that it was excluded.
   the name is safe. Anything else -- a timeout, a server error, a spent
   budget -- leaves the finding exactly as the offline scan made it, still
   blocking, with the reason recorded in its `details`. A network failure
-  never means fewer or quieter findings.
+  never means fewer or quieter findings. On a `--base` or `--trust-base`
+  run such a name is also unchecked, which exits 2 (see "A spent budget"
+  below), since a `high` finding alone passes `failOn: "critical"`.
 - **PyPI existence.** Every new Python name, from requirements files,
   `pyproject.toml`, `Pipfile` and the poetry, uv, pdm and pipenv lockfiles,
   is looked up once per run in its PEP 503 normalised form
@@ -194,8 +196,10 @@ needs no reminder that it was excluded.
   answer -- a 3xx (never followed), a 5xx after one retry, a timeout, a
   2xx describing another project or none, any other 4xx -- and a spent
   budget leave the name unchecked, with a diagnostic and a count, and never
-  a finding. The lookup runs second, after npm unknown-package resolution
-  and before the three npm steps that add or escalate; on a tight budget an
+  a finding; on a `--base` or `--trust-base` run an unchecked name exits 2
+  instead, unless `onlineUnchecked` is `"note"`. The lookup runs second,
+  after npm unknown-package resolution and before the three npm steps that
+  add or escalate; on a tight budget an
   npm registered-squat or publish-age signal can be lost to PyPI lookups,
   and that step's `online-deadline-exceeded` diagnostic says so. PyPI
   existence is asked live and never cached. Which Python names are never
@@ -280,16 +284,30 @@ needs no reminder that it was excluded.
 A registry error in any of the five checks degrades to a diagnostic
 rather than a block, the design every check above already follows for its
 own network failure: it never turns an otherwise-clean scan's exit 0 into
-an exit 1 by itself, so a registry outage does not turn a required CI
-check red on its own.
+an exit 1 by itself. On a `--base` or `--trust-base` run the name it left
+unchecked is an exit 2 instead, as the next paragraph says.
 
 All four share one wall-clock budget per run, not per request. Once it is
 spent the remaining lookups are skipped, the affected findings keep exactly
 the result the offline checks gave them, and an `online-deadline-exceeded`
-diagnostic says how many were skipped. A spent budget never fails the run
-by itself: it stays a diagnostic, the same as a registry error above,
-because a skipped lookup is exactly as much "nothing this check could say"
-as a network failure is.
+diagnostic says how many were skipped. On a plain run (no `--base`, no
+`--trust-base`) a spent budget or an unreachable registry stays a
+diagnostic. On a run with `--base` or `--trust-base`, a candidate name left
+unchecked for either reason exits 2, listing the names with their step and
+reason in the report, on stderr and in `run.online.unchecked`, unless
+`onlineUnchecked` is `"note"` on the governing config (the trust base's on
+a `--trust-base` run). Only "it exists" or a 404 is a checked name. A name
+the `allow` list clears, a confirmed workspace sibling, an internal name,
+and a name sent to a private registry or index are never counted. The run
+still scans and the full report is printed; the exit is 2 because a
+pull-request run does not pass a name it could not check. Remedies: raise
+`onlineBudgetMs` on the base branch, set `"onlineUnchecked": "note"` there,
+or split the change. The umbrella (conductor) reads any gate's exit 2 as
+could-not-run, so its run is red too. Known open: publish-age skips a name
+whose resolved URL is not the public registry, and that URL is
+head-written; a foreign-host entry is a `high` lockfile-tamper finding, so
+it is not silent, but under `failOn: "critical"` that name passes with
+publish-age unchecked.
 
 The budget defaults to **20000ms (twenty seconds)** for a plain run: no
 `--base` and no `--trust-base` on the command line, whatever else is
@@ -322,6 +340,17 @@ itself" below for what closes that gap (branch protection, not
 `--trust-base`), and why a fork pull request does not have the same
 exposure.
 
+`--no-online` overrides `"online": true` in the config, and the Action
+passes `--no-online` unless its `online` input is true. So on a `--base` or
+`--trust-base` run whose governing config (the trust base's, under
+`--trust-base`) says `"online": true` while the command line turns online
+off, every candidate name counts as unchecked with the reason
+`online-disabled`, and the run exits 2 under the same `onlineUnchecked`
+key. A base config with `online` false or absent is unchanged. An Action
+adopter whose base config says `"online": true` must set the Action's
+`online` input to true, or set `"onlineUnchecked": "note"` on the base
+branch.
+
 The run's JSON output always carries an `online` object under `run`,
 whether or not online checks ran, so a CI consumer (the conductor umbrella
 in particular) can read it unconditionally: `enabled`, the `budgetMs`
@@ -331,7 +360,10 @@ actually used, `lookupsAttempted` and `cacheHits`, `lookupsSkippedByDeadline`
 counted here more than once if two different online checks both had it
 queued when the budget ran out), and `deadlineExceeded`. Disabled online
 checks report `enabled: false` and every number at zero, never an absent
-field.
+field. Since 0.16.0 it also carries `unchecked`, `{ count, names: [{ name,
+ecosystem, step, reason, status? }] }` (sorted, uncapped), whenever online
+checks ran or the online-disabled rule above applied, at count zero too;
+`reason` is `budget`, `unreachable` or `online-disabled`.
 
 `lookupsAttempted` and `cacheHits` count the name lookups the online steps
 made: `lookupsAttempted` counts those sent to the registry, `cacheHits`
@@ -630,7 +662,11 @@ lockfile covers. That `workspaces` field is read from the trust base
 wherever the base has it, so a pull request cannot widen it to cover a
 package it plants. A decoy lockfile, a link to nothing, or a link to a
 directory outside the workspaces exempts nothing
-(`workspace-link-unconfirmed` names each claim that failed and why).
+(`workspace-link-unconfirmed` names each claim that failed and why). The
+same holds for which manifests the head installs: that cannot widen what
+the base's `ignorePaths` drops, so a pull request that wires an ignored
+directory into the install keeps its findings there (see "Configuration"
+below).
 
 Without that rule a pull request can turn the gate off in the same commit
 that carries what the gate exists to catch. `.dep-guard.json`,
@@ -775,13 +811,19 @@ input straight back out of the tree under judgment. Pass the base *branch*.
 
 `--format json` gains a `trustBase` block (`ref`, `proposals`,
 `configChanged`, `baselineChanged`, `npmrcChanged`, `configShapeChange`,
-`baselineShapeChange`, `npmrcShapeChange`), and SARIF carries each proposal as a
+`baselineShapeChange`, `npmrcShapeChange`, `projectPathsChanged`,
+`ignoredPathsMadeProjects`), and SARIF carries each proposal as a
 `toolExecutionNotification` rather than as a result, because a proposal is
 a fact about the run and not a finding about the code.
 
 Outside pull-request mode nothing changes. A pre-commit hook and a direct
 CLI run on your own checkout are already inside the trust boundary, so they
-never pass the flag and their output is byte for byte what it was.
+never pass the flag and their output is byte for byte what it was. Two
+0.16.0 rules are the exception, applied to every `--base` and `--staged`
+run too so that a local run predicts the pull-request verdict: the
+`ignorePaths` rule in "Configuration" (which adds `N kept over
+ignorePaths` to the text summary of those runs), and, on a `--base` run
+only, the exit 2 for names left unchecked online.
 
 ### In the Action
 
@@ -877,6 +919,7 @@ The mapping, which is stable and shared across this family's gates:
 | `properties.severity` | dep-guard's own severity word, unflattened |
 | `properties.blocking` | whether this finding blocks at the run's threshold |
 | `properties.details` | the finding's `details` bag, verbatim |
+| `properties.ignoreOverride` | on a finding an `ignorePaths` entry matched and did not drop (see "Configuration"), the entries and how the change installs the path |
 | `partialFingerprints["dep-guard/v1"]` | the finding's existing fingerprint, unchanged |
 | `locations[].logicalLocations[]` | `kind: package`, `fullyQualifiedName` the package name |
 | `locations[].physicalLocation` | the manifest path, relative, under `%SRCROOT%`; omitted for `dep-guard check`, which has no file behind it |
@@ -918,7 +961,12 @@ human-readable report.
 
 Exit codes are the contract: 0 clean, 1 findings at or above the threshold,
 2 something went wrong. A gate that cannot read its own
-inputs fails closed rather than reporting clean.
+inputs fails closed rather than reporting clean. Almost every exit 2 stops
+before a report exists. One does not: a `--base` or `--trust-base` run that
+left a candidate name unchecked online (see "Online checks") prints its
+full report and still exits 2, with `run.couldNotRun` in the JSON and, in
+SARIF, `executionSuccessful: false` and one error notification in the
+single invocation.
 
 Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
 `medium`.
@@ -940,6 +988,7 @@ Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
   "minAgeDays": 7,
   "minAgeAllow": ["some-package@1.2.3"],
   "onlineBudgetMs": 20000,
+  "onlineUnchecked": "fail",
   "acknowledgedLockfiles": ["yarn.lock:3b18e512dba79e4c8300dd08aeb37f8e728b8dad"]
 }
 ```
@@ -950,6 +999,33 @@ which is a fact about where bytes come from rather than about the package.
 And `ignorePaths` drops findings before the gate sees them, so a pattern
 broad enough to match everything would switch the tool off; patterns made
 only of wildcards are rejected for that reason.
+
+`ignorePaths` drops findings only for paths nothing installs, or that the
+base branch already installs the same way. A change that wires an ignored
+path into the install -- a `file:`, `link:` or `portal:` dependency on it,
+a `workspaces` glob widened over it, a lockfile added beside it, a
+requirements file that includes it with `-r` or `-c` -- keeps its findings
+there, says so in an `ignore-path-project-kept` note, and under
+`--trust-base` is reported as a proposal, since the entry no longer covers
+an installed path. The comparison is the base's own: the trust base on a
+`--trust-base` run, otherwise the `--base` ref, or `HEAD` for `--staged`;
+an audit has none and drops as before. `lockfile-tamper` is never dropped
+on a path the base installs, including an entry that names a lockfile
+itself. The residual: a directory the base branch already installs under
+an ignored path keeps every other finding dropped, so any pull request can
+add a malicious dependency there and pass, with only the
+`ignore-path-dropped` note saying how many dropped findings were on
+installed projects. Which manifests count as projects is the list under
+"Lockfile support" below. Known open: `overrides` and `resolutions`
+`file:` targets, and Python path sources (`[tool.uv.sources]` path
+entries, poetry path dependencies, pip local paths and `-e`), are not
+project reasons, so a change that wires one in is not kept by this rule.
+
+`onlineUnchecked` decides what a `--base` or `--trust-base` run does with
+a candidate name no online step could check: `"fail"`, the default, exits
+2 listing the names; `"note"` keeps a diagnostic. It has no command-line
+flag, because an opt-out is a control, and under `--trust-base` it is read
+from the trust base like every other key.
 
 Python names take a `pypi:` prefix in `allow` and in `internalPrefixes`:
 `"pypi:reqeusts"` clears a Python finding for that project and
@@ -1082,8 +1158,11 @@ Which Python files are read: `requirements.txt` and any `.txt` whose name
 starts with `requirements` or ends in `requirements.txt`
 (`requirements-dev.txt`, `dev-requirements.txt`), any `.txt` directly in a
 directory named `requirements`, `requirements.in`, every file a `-r` or
-`--requirement` line names (relative to the including file, inside the
-repository, never through a symlink, at most eight includes deep, each file
+`--requirement` line names (relative to the including file and resolved as
+the operating system opens it: each symlinked directory on the path is
+followed, and a `..` after one climbs out of the link's target; the result
+must stay inside the repository; a file that is itself a symlink is noted and
+not read, although pip would read it; at most eight includes deep, each file
 once), `pyproject.toml` (`project.dependencies` and optional dependencies,
 `build-system.requires`, `[dependency-groups]`, the poetry tables, the uv
 and pdm dev tables, `[tool.uv.sources]`), `Pipfile`, a repository `uv.toml`

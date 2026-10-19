@@ -242,6 +242,16 @@ function emit(result: ScanResult, format: OutputFormat): void {
 // missing: <path into this package's own internals>" -- true, and
 // fail-closed, but not actionable: nothing about it tells a user that
 // --corpus-dir is the fix.
+// A run that scanned and is still a could-not-run (exit 2 with a full
+// report, run.couldNotRun): stderr carries the same line with its code,
+// the way every other exit 2 message reads.
+function reportCouldNotRun(result: ScanResult): void {
+  const couldNotRun = result.run.couldNotRun;
+  if (couldNotRun !== undefined) {
+    process.stderr.write(`dep-guard: ${sanitizeText(couldNotRun.message)} (${couldNotRun.code})\n`);
+  }
+}
+
 function reportError(err: unknown, corpusDirWasDefaulted = false): void {
   if (err instanceof DepGuardError) {
     if (err.code === 'corpus-missing' && corpusDirWasDefaulted) {
@@ -317,6 +327,7 @@ function buildProgram(): Command {
           trustBase: options.trustBase,
         });
         emit(result, format);
+        reportCouldNotRun(result);
         process.exitCode = result.exitCode;
       } catch (err) {
         reportError(err, options.corpusDir === undefined);
@@ -353,6 +364,7 @@ function buildProgram(): Command {
           trustBase: options.trustBase,
         });
         emit(result, format);
+        reportCouldNotRun(result);
         process.exitCode = result.exitCode;
       } catch (err) {
         reportError(err, options.corpusDir === undefined);

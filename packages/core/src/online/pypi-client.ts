@@ -46,7 +46,7 @@ export async function fetchPypiProject(name: string, options: FetchOptions = {})
       return 'absent';
     }
     if (status !== undefined && status >= 300 && status < 400) {
-      throw new Error(`PyPI answered ${status}, a redirect, which is not followed`);
+      throw Object.assign(new Error(`PyPI answered ${status}, a redirect, which is not followed`), { status });
     }
     // By name, not instanceof: the body parser can raise a SyntaxError
     // from another realm than this module's.

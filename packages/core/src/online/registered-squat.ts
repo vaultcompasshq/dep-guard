@@ -24,6 +24,7 @@ import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
 import { isNonPublicName } from './registry-scope.js';
+import { unreachable, type UncheckedSink } from './unchecked.js';
 
 export const REGISTERED_SQUAT_DOWNLOAD_FLOOR = 50;
 export const REGISTERED_SQUAT_MAX_AGE_DAYS = 30;
@@ -46,8 +47,15 @@ export async function findRegisteredSquats(
   deps: RegisteredSquatDeps,
   diagnostics: Diagnostic[],
   deadline: OnlineDeadline,
-  now: () => number = Date.now
+  now: () => number = Date.now,
+  unchecked: UncheckedSink = () => {}
 ): Promise<Omit<Finding, 'fingerprint'>[]> {
+  const notChecked = (name: string, reason: 'budget' | 'unreachable', err?: unknown): void =>
+    unchecked(
+      reason === 'budget'
+        ? { name, ecosystem: 'npm', step: 'registered-squat', reason }
+        : unreachable(name, 'npm', 'registered-squat', err)
+    );
   // Internal names are filtered before anything is fetched, and the
   // filtering is what matters rather than the finding it would have
   // produced. An internal package is absent from the public registry by
@@ -97,6 +105,9 @@ export async function findRegisteredSquats(
   }
 
   if (deadline.expired()) {
+    for (const { registryName } of candidates) {
+      notChecked(registryName, 'budget');
+    }
     diagnostics.push({
       code: ONLINE_DEADLINE_CODE,
       message: deadlineDiagnosticMessage('registered-squat', candidates.length, deadline),
@@ -108,6 +119,9 @@ export async function findRegisteredSquats(
   try {
     downloadsResult = await deps.fetchWeeklyDownloads(candidates.map((c) => c.registryName));
   } catch (err) {
+    for (const { registryName } of candidates) {
+      notChecked(registryName, 'unreachable', err);
+    }
     diagnostics.push({
       code: 'online-check-unreachable',
       message:
@@ -153,6 +167,7 @@ export async function findRegisteredSquats(
     } else if (downloadsResult.noRecord.has(registryName)) {
       downloads = 0;
     } else {
+      notChecked(registryName, 'unreachable');
       continue;
     }
     if (downloads >= REGISTERED_SQUAT_DOWNLOAD_FLOOR) {
@@ -168,6 +183,7 @@ export async function findRegisteredSquats(
     // away.
     if (deadline.expired()) {
       skippedByDeadline += 1;
+      notChecked(registryName, 'budget');
       continue;
     }
 
@@ -175,6 +191,7 @@ export async function findRegisteredSquats(
     try {
       packument = await deps.fetchPackument(registryName);
     } catch (err) {
+      notChecked(registryName, 'unreachable', err);
       diagnostics.push({
         code: 'online-check-unreachable',
         message: `registered-squat: could not reach the npm registry for "${registryName}" (${(err as Error).message})`,

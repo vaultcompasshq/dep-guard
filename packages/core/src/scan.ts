@@ -19,11 +19,14 @@ import { collapseInstallScriptFindings } from './install-script-collapse.js';
 import { evaluateGate, severityAtLeast } from './gate.js';
 import {
   assertScannablePath,
+  loadRefProjects,
   loadRefState,
   loadStates,
   refsNameSameTree,
   matchGlobPath,
   probeManifestOnDisk,
+  projectManifestForLockfile,
+  projectReasonText,
   reconfirmWorkspaceLocalNames,
   relativeScanPrefix,
   resolveScanRoot,
@@ -31,10 +34,25 @@ import {
 import type { ScanMode } from './git-source.js';
 import { assertBaseNotHeadUnderTrustBase, loadConfigAtRef, loadTrustedControls } from './trust-base.js';
 import type { ControlShapeChange, TrustedControls } from './trust-base.js';
-import { isReadLockfile, type RepoState } from './state.js';
+import {
+  EMPTY_PROJECTS,
+  isReadLockfile,
+  projectReasonKey,
+  type ProjectClassification,
+  type ProjectReason,
+  type RepoState,
+} from './state.js';
 import { DepGuardError } from './types.js';
 import type { Diagnostic, FailOn, Finding, Severity } from './types.js';
-import { applyTyposquatAsymmetry } from './online/asymmetry.js';
+import { applyTyposquatAsymmetry, asymmetryCandidateNames } from './online/asymmetry.js';
+import { isAllowed, isInternalName, isPypiAllowed, isPypiInternalName } from './checks/allow.js';
+import {
+  ONLINE_NAMES_UNCHECKED,
+  settleUnchecked,
+  uncheckedMessage,
+  type UncheckedName,
+  type UncheckedSink,
+} from './online/unchecked.js';
 import { findPublishAgeFindings } from './online/publish-age.js';
 import { findRegisteredSquats } from './online/registered-squat.js';
 import { resolveUnknownPackages } from './online/unknown-package.js';
@@ -118,12 +136,28 @@ export interface TrustBaseReport {
   configShapeChange: ControlShapeChange | null;
   baselineShapeChange: ControlShapeChange | null;
   npmrcShapeChange: ControlShapeChange | null;
+  // True when this change makes a path under an ignorePaths entry a
+  // project the trust base does not install that way (0.16.0); those paths,
+  // sorted and uncapped. The proposals carry at most ten of them.
+  projectPathsChanged: boolean;
+  ignoredPathsMadeProjects: string[];
 }
 
 export interface ScanResult {
   findings: Finding[]; // baseline-suppressed and ignorePaths-dropped findings excluded
   suppressed: number; // count removed by the baseline, specifically (not ignorePaths)
   ignored: number; // count removed by config.ignorePaths, specifically (not the baseline)
+  // Findings an ignorePaths entry matched and did not drop, because the
+  // change makes their path a project the reference side does not install
+  // that way, or because they are lockfile-tamper findings on a project the
+  // reference side installs (0.16.0). Present at zero on every run.
+  ignoreKept: number;
+  // True when the run had a reference side, so that rule applied: --base,
+  // --trust-base, or --staged with a committed HEAD. False on an audit, a
+  // staged run with no HEAD and no trust base, and check. Optional in the
+  // type only so a result built by hand need not carry it; scan() and
+  // check always set it.
+  ignoreRuleApplied?: boolean;
   // Distinct package names an `allow` entry cleared from the checks this
   // scan, and their count. A separate field rather than folded into
   // `suppressed` on purpose: `suppressed` means the baseline specifically,
@@ -162,8 +196,15 @@ export interface ScanResult {
     // were read but not checked and why (ecosystems.ts). Always present;
     // additive under the stability policy.
     ecosystems: EcosystemsSummary;
+    // Set when this run scanned and still could not stand behind a clean
+    // verdict: today only online-names-unchecked, a --base or --trust-base
+    // run that left a candidate name unchecked online. The report is built
+    // in full and the exit is 2. Absent otherwise.
+    couldNotRun?: { code: string; message: string };
   };
-  exitCode: 0 | 1;
+  // 0 or 1 from the gate; 2 only for run.couldNotRun. Every other
+  // could-not-run throws before a result exists.
+  exitCode: 0 | 1 | 2;
 }
 
 // Diagnostics reach this point from several independent origins that can
@@ -640,6 +681,12 @@ export interface OnlineRunSummary {
   // for.
   lookupsSkippedByDeadline: number;
   deadlineExceeded: boolean;
+  // Candidate names an online step left unchecked, with the step and the
+  // reason (online/unchecked.ts), uncapped and sorted. Present, at count
+  // zero too, whenever online lookups are on, and on a pull-request run
+  // whose governing config requires them while the command line turned
+  // them off (every candidate then has the reason online-disabled).
+  unchecked?: { count: number; names: UncheckedName[] };
 }
 
 const ONLINE_DISABLED_SUMMARY: OnlineRunSummary = {
@@ -659,19 +706,27 @@ async function enrichOnline(
   findings: Omit<Finding, 'fingerprint'>[];
   summary: OnlineRunSummary;
   pypiStats: PypiExistenceStats;
+  unchecked: UncheckedName[];
 }> {
   const deadline = createOnlineDeadline(budgetMs);
   // Threaded through every real fetch below rather than kept at module
   // scope: see LookupCounter's own comment for why a fresh one per call is
   // what keeps two scans in one process from mixing counts.
   const lookups: LookupCounter = { attempted: 0, cacheHits: 0 };
+  // Every step returns the names it could not check, with the reason,
+  // instead of only a count read back from its diagnostics.
+  const unchecked: UncheckedName[] = [];
+  const sink: UncheckedSink = (entry) => {
+    unchecked.push(entry);
+  };
 
   const resolvedNpm = await resolveUnknownPackages(
     rawFindings,
     ctx,
     { fetchPackument: (name) => liveFetchPackument(name, lookups) },
     ctx.diagnostics,
-    deadline
+    deadline,
+    sink
   );
 
   // 2. PyPI existence. Appends findings only; never removes or lowers one.
@@ -681,7 +736,8 @@ async function enrichOnline(
     ctx.pythonIndex ?? null,
     { fetchPypiProject: (name) => liveFetchPypiProject(name, lookups) },
     ctx.diagnostics,
-    deadline
+    deadline,
+    sink
   );
   const resolved = [...resolvedNpm, ...pypi.findings];
 
@@ -706,12 +762,18 @@ async function enrichOnline(
         ),
       });
     }
+    // The names, filtered the way the step filters them, so a spent budget
+    // here is named like any other step's.
+    for (const name of asymmetryCandidateNames(resolved, ctx)) {
+      sink({ name, ecosystem: 'npm', step: 'asymmetry', reason: 'budget' });
+    }
   } else {
     await applyTyposquatAsymmetry(
       resolved,
       ctx,
       { fetchWeeklyDownloads: (names) => cachedFetchWeeklyDownloads(names, lookups) },
-      ctx.diagnostics
+      ctx.diagnostics,
+      sink
     );
   }
 
@@ -722,7 +784,9 @@ async function enrichOnline(
       fetchPackument: (name) => cachedFetchPackument(name, lookups),
     },
     ctx.diagnostics,
-    deadline
+    deadline,
+    undefined,
+    sink
   );
 
   // 5. publish-age, added last among the npm steps: it only ever ADDS a new
@@ -731,7 +795,9 @@ async function enrichOnline(
     ctx,
     { fetchPackument: (name, versions) => cachedFetchPackumentVersionTimes(name, versions, lookups) },
     ctx.diagnostics,
-    deadline
+    deadline,
+    undefined,
+    sink
   );
   return {
     findings: [...resolved, ...registeredSquats, ...publishAgeFindings],
@@ -748,7 +814,42 @@ async function enrichOnline(
       deadlineExceeded: deadline.expired(),
     },
     pypiStats: pypi.stats,
+    unchecked,
   };
+}
+
+// Every candidate the online steps would look up, each with the reason
+// online-disabled: the run's governing config requires online lookups and
+// the command line turned them off. Enumerated by the steps themselves,
+// over copies, against a budget that is already spent, so no request is
+// made and the list is exactly the set a run with online on would have
+// queued. Nothing the steps write to the copies reaches the result.
+async function onlineDisabledCandidates(
+  rawFindings: readonly Omit<Finding, 'fingerprint'>[],
+  ctx: CheckContext
+): Promise<UncheckedName[]> {
+  const copy: CheckContext = { ...ctx, diagnostics: [], allowed: [] };
+  const enriched = await enrichOnline(structuredClone([...rawFindings]), copy, 0);
+  return enriched.unchecked.map(({ name, ecosystem, step }) => ({ name, ecosystem, step, reason: 'online-disabled' }));
+}
+
+// Not candidates, never counted: a name an allow entry clears, a name
+// exempted as workspace-local, and a name internalPrefixes or an internal
+// scope keeps off the wire. The steps already skip workspace-local names
+// (per lockfile directory, which a run-wide filter here would widen),
+// internal names, and names from a private registry or index. PyPI looks a
+// name up before asking allow, so allowed names are filtered here,
+// afterwards, without recording a clearance; internal names again, since
+// "the step already skipped it" is a second-hand claim.
+function countableUnchecked(entries: readonly UncheckedName[], ctx: CheckContext): UncheckedName[] {
+  return settleUnchecked(
+    entries.filter((entry) =>
+      entry.ecosystem === 'pypi'
+        ? !isPypiAllowed(entry.name, ctx.config.allow) && !isPypiInternalName(entry.name, ctx.config.internalPrefixes)
+        : !isAllowed(entry.name, ctx.config.allow) &&
+          !isInternalName(entry.name, ctx.config.internalScopes, ctx.config.internalPrefixes)
+    )
+  );
 }
 
 interface RunInfo {
@@ -759,6 +860,40 @@ interface RunInfo {
   startedAt: number;
   online: OnlineRunSummary;
   ecosystems: EcosystemsSummary;
+  couldNotRun?: { code: string; message: string } | null;
+}
+
+// Audit B2 (design note section 8): on a --base or --trust-base run, a
+// candidate name an online step left unchecked is a could-not-run, exit 2,
+// with the full report, unless the governing config (the trust base's on
+// a --trust-base run) sets "onlineUnchecked": "note". Only a definitive
+// "exists" or a 404 is a checked name. When that config says "online":
+// true and the command line turned online off, every candidate counts as
+// unchecked with the reason online-disabled. Plain and audit runs keep the
+// diagnostics only, and report the names.
+async function settleOnlineUnchecked(args: {
+  enriched: UncheckedName[] | null;
+  rawFindings: readonly Omit<Finding, 'fingerprint'>[];
+  ctx: CheckContext;
+  config: ResolvedConfig;
+  cliOnline: boolean | undefined;
+  isPullRequestRun: boolean;
+  online: OnlineRunSummary;
+}): Promise<{ online: OnlineRunSummary; couldNotRun: { code: string; message: string } | null }> {
+  let entries: UncheckedName[] | null = args.enriched;
+  if (entries === null && args.isPullRequestRun && args.config.online && args.cliOnline === false) {
+    entries = await onlineDisabledCandidates(args.rawFindings, args.ctx);
+  }
+  if (entries === null) {
+    return { online: args.online, couldNotRun: null };
+  }
+  const names = countableUnchecked(entries, args.ctx);
+  const online = { ...args.online, unchecked: { count: names.length, names } };
+  const fails = args.isPullRequestRun && names.length > 0 && (args.config.onlineUnchecked ?? 'fail') !== 'note';
+  return {
+    online,
+    couldNotRun: fails ? { code: ONLINE_NAMES_UNCHECKED, message: uncheckedMessage(names) } : null,
+  };
 }
 
 // checkSingle's manifestPath is fabricated (SYNTHETIC_MANIFEST_PATH
@@ -769,37 +904,344 @@ interface RunInfo {
 // launder "is this name safe" into "clean". scan()'s real findings, with
 // real manifestPath values, get both filters; checkSingle's synthetic ones
 // get neither.
-function applyPathFilters(
+// ignorePaths cannot cover a path the change wires into the install
+// (0.16.0, docs/design/2026-10-18-head-defined-projects-and-ignore-paths.md).
+// On a run with a reference side, an entry drops a finding only when its
+// anchor is not a project on the judged side, or when every reason the
+// judged side records for the anchor is also recorded on the reference
+// side. Otherwise the finding is kept and the path reported. The reference
+// side is the trust base on a --trust-base run, with or without --base, and
+// only the trust base; without --trust-base it is the --base ref, or HEAD
+// for --staged. An audit, and a staged run with no committed HEAD and no
+// trust base, have none, and drop exactly as before.
+export interface PathFilterSides {
+  judged: ProjectClassification | undefined;
+  reference: ProjectClassification | null;
+  referenceLabel: string;
+  prefix: string;
+  audit: boolean;
+  // Whether the judged side's lockfile at this path records an entry under
+  // this name. Absent: every lockfilePath counts.
+  lockfileRecords?: (lockfilePath: string, packageName: string) => boolean;
+}
+
+export interface IgnoredPathMadeProject {
+  path: string;
+  entries: string[];
+  position: string;
+  kept: number;
+  // Every reason missing from the reference side is a symlink that could
+  // not be followed (the message then says the path counts as a project).
+  unfollowed: boolean;
+}
+
+export interface PathFilterResult {
+  findings: Finding[];
+  suppressed: number;
+  ignored: number;
+  ignoreKept: number;
+  madeProjects: IgnoredPathMadeProject[];
+  // Whether the run had a reference side, so the rule above applied.
+  applied: boolean;
+}
+
+const NO_REFERENCE: PathFilterSides = {
+  judged: undefined,
+  reference: null,
+  referenceLabel: '',
+  prefix: '',
+  audit: true,
+};
+
+const MAX_LISTED_IGNORE_PATHS = 10;
+
+function underScanPrefix(relPath: string, prefix: string): boolean {
+  return prefix === '' || relPath === prefix || relPath.startsWith(`${prefix}/`);
+}
+
+// The project manifest a finding is about: its manifestPath, or, when that
+// names a lockfile, the manifest in the lockfile's directory.
+function anchorOf(manifestPath: string): string {
+  return projectManifestForLockfile(manifestPath) ?? manifestPath;
+}
+
+function judgedReasonsOf(projects: ProjectClassification, relPath: string): readonly ProjectReason[] {
+  return projects.reasons.get(relPath) ?? [];
+}
+
+// The judged reasons for a path that the reference side does not record,
+// read one path at a time. A reference side with an input outside the
+// prefix it could not read excuses nothing under the prefix: that
+// expansion is never a reason.
+function reasonsAbsentFromReference(
+  sides: PathFilterSides,
+  reference: ProjectClassification,
+  reasons: readonly ProjectReason[],
+  relPath: string
+): ProjectReason[] {
+  const excusesNothing =
+    reference.unreadInputs.length > 0 && sides.prefix !== '' && underScanPrefix(relPath, sides.prefix);
+  const known = excusesNothing
+    ? new Set<string>()
+    : new Set((reference.reasons.get(relPath) ?? []).map(projectReasonKey));
+  return reasons.filter((reason) => !known.has(projectReasonKey(reason)));
+}
+
+// The manifest a reason depends on: the file that names the path for a
+// reference, an include or a uv member; the package.json of the install
+// root for a workspace member or a link entry. Null for the root and for a
+// manifest beside a lockfile, which depend on nothing but themselves.
+function reasonSource(reason: ProjectReason): string | null {
+  switch (reason.rule) {
+    case 'root':
+    case 'beside-lockfile':
+      return null;
+    case 'reference-target':
+    case 'requirements-include':
+    case 'uv-member':
+      return reason.input;
+    case 'root-member':
+    case 'install-root-member':
+    case 'link-target':
+      return reason.root === '' ? 'package.json' : `${reason.root}/package.json`;
+  }
+}
+
+// Reasons are transitive: a judged reason counts as present on the
+// reference side only when the manifest it comes from is itself excused,
+// or is not a project on the judged side at all (it installs nothing).
+// Otherwise a base stray "fixtures/a" referencing "fixtures/b" records b's
+// reason on the base too, and a change that wires only "fixtures/a" into
+// the install would excuse b. Excused is the greatest fixed point: every
+// judged project whose reasons all appear on the reference side, less any
+// whose reason's source is not excused, repeated until nothing changes.
+// Each pass removes a path or stops, so one pass per path bounds it; a run
+// that did not settle within that excuses nothing.
+const excusedCache = new WeakMap<PathFilterSides, ReadonlySet<string>>();
+
+function excusedProjects(sides: PathFilterSides, judged: ProjectClassification): ReadonlySet<string> {
+  const cached = excusedCache.get(sides);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const reference = sides.reference;
+  const excused = new Set<string>();
+  if (reference !== null) {
+    for (const [relPath, reasons] of judged.reasons) {
+      if (reasons.length > 0 && reasonsAbsentFromReference(sides, reference, reasons, relPath).length === 0) {
+        excused.add(relPath);
+      }
+    }
+  }
+  let settled = false;
+  for (let pass = 0; pass <= judged.reasons.size && !settled; pass += 1) {
+    settled = true;
+    for (const relPath of [...excused]) {
+      if (judgedReasonsOf(judged, relPath).some((reason) => !sourceExcused(judged, excused, reason, relPath))) {
+        excused.delete(relPath);
+        settled = false;
+      }
+    }
+  }
+  const result: ReadonlySet<string> = settled ? excused : new Set<string>();
+  excusedCache.set(sides, result);
+  return result;
+}
+
+function sourceExcused(
+  judged: ProjectClassification,
+  excused: ReadonlySet<string>,
+  reason: ProjectReason,
+  relPath: string
+): boolean {
+  const source = reasonSource(reason);
+  return source === null || source === relPath || judgedReasonsOf(judged, source).length === 0 || excused.has(source);
+}
+
+// The reasons the judged side records for a path that the reference side
+// does not, counting a reason whose source manifest is not excused as not
+// recorded there (transitive, see excusedProjects).
+function reasonsMissingFromReference(
+  sides: PathFilterSides,
+  judged: ProjectClassification,
+  relPath: string,
+  exclude: (reason: ProjectReason) => boolean = () => false
+): ProjectReason[] {
+  const reference = sides.reference;
+  const own = judgedReasonsOf(judged, relPath).filter((reason) => !exclude(reason));
+  if (reference === null) {
+    return [];
+  }
+  const absent = new Set(reasonsAbsentFromReference(sides, reference, own, relPath));
+  const excused = excusedProjects(sides, judged);
+  return own.filter((reason) => absent.has(reason) || !sourceExcused(judged, excused, reason, relPath));
+}
+
+function positionTextOf(reasons: readonly ProjectReason[]): string {
+  return [...new Set(reasons.map(projectReasonText))].join('; ');
+}
+
+// Whether every one of these reasons is a symlink that could not be
+// followed: the change did not then make the path a project in any way
+// this tool can show, so the message says the path counts as one.
+function onlyUnfollowedLinks(reasons: readonly ProjectReason[]): boolean {
+  return reasons.length > 0 && reasons.every((reason) => reason.link?.followed === false);
+}
+
+function listIgnorePaths(paths: readonly string[]): string {
+  const shown = paths.slice(0, MAX_LISTED_IGNORE_PATHS);
+  const rest = paths.length - shown.length;
+  return rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ');
+}
+
+// The trust-base proposals for ignored paths a change makes projects: one
+// line per path, at most ten, then one count line, so the umbrella's
+// summed proposal count stays bounded. The JSON list is uncapped.
+function ignoredPathProposals(madeProjects: readonly IgnoredPathMadeProject[]): string[] {
+  const lines = madeProjects
+    .slice(0, MAX_LISTED_IGNORE_PATHS)
+    .map((made) =>
+      made.unfollowed
+        ? `ignorePaths: ignored path ${made.path} counts as a project (${made.position}); its findings are kept`
+        : `ignorePaths: this change makes ignored path ${made.path} a project (${made.position}); its findings are kept`
+    );
+  const rest = madeProjects.length - lines.length;
+  if (rest > 0) {
+    lines.push(`ignorePaths: and ${rest} more ignored paths this change makes projects; their findings are kept`);
+  }
+  return lines;
+}
+
+export function applyPathFilters(
   rawFindings: Omit<Finding, 'fingerprint'>[],
-  config: ResolvedConfig,
+  config: Pick<ResolvedConfig, 'ignorePaths'>,
   baseline: Set<string>,
   diagnostics: Diagnostic[],
-  alreadyMatched: ReadonlySet<string> = new Set()
-): { findings: Finding[]; suppressed: number; ignored: number } {
+  alreadyMatched: ReadonlySet<string> = new Set(),
+  sides: PathFilterSides = NO_REFERENCE
+): PathFilterResult {
   const findings: Finding[] = [];
   let suppressed = 0;
   let ignored = 0;
+  let ignoreKept = 0;
   const matchedEntries = new Set<string>(alreadyMatched);
   let droppedSeverity: Severity | null = null;
+  const droppedOnProjects = new Set<string>();
+  let droppedOnProjectsCount = 0;
+  const keptByAnchor = new Map<string, number>();
+
+  const judged = sides.judged;
+  if (sides.reference !== null && judged === undefined) {
+    // Never read as "nothing is kept": a judged side with no classification
+    // would silently restore the drop this rule exists to stop.
+    throw new DepGuardError(
+      'internal error: the judged side reached the ignorePaths filter without its project classification',
+      'internal-error'
+    );
+  }
+  const isJudgedProject = (relPath: string): boolean =>
+    judged !== undefined && judgedReasonsOf(judged, relPath).length > 0;
 
   for (const raw of rawFindings) {
-    const matches = matchingIgnoreEntries(raw.manifestPath, config.ignorePaths);
+    let matchPath = raw.manifestPath;
+    let anchor = anchorOf(matchPath);
+    // A stray that declares a root-lockfile name cannot pull that lockfile's
+    // finding into an ignored directory: when the manifest is not a project,
+    // ignorePaths is matched against the lockfile the finding is about.
+    // Only a finding about an entry that lockfile records: tamper.ts
+    // stamps the delta's primary lockfile on every finding it raises,
+    // including one about a stray's own specifier or a requirements line,
+    // and those are facts about the manifest, dropped as before.
+    if (
+      sides.reference !== null &&
+      !isJudgedProject(anchor) &&
+      raw.lockfilePath !== undefined &&
+      (sides.lockfileRecords?.(raw.lockfilePath, raw.packageName) ?? true)
+    ) {
+      matchPath = raw.lockfilePath;
+      anchor = anchorOf(matchPath);
+    }
+    const matches = matchingIgnoreEntries(matchPath, config.ignorePaths);
+    let keep: { position: string } | null = null;
     if (matches.length > 0) {
       for (const matched of matches) {
         matchedEntries.add(matched);
       }
-      ignored += 1;
-      if (droppedSeverity === null || severityAtLeast(raw.severity, droppedSeverity)) {
-        droppedSeverity = raw.severity;
+      if (sides.reference !== null && judged !== undefined && isJudgedProject(anchor)) {
+        const missing = reasonsMissingFromReference(sides, judged, anchor);
+        if (missing.length > 0) {
+          keep = { position: positionTextOf(missing) };
+          keptByAnchor.set(anchor, (keptByAnchor.get(anchor) ?? 0) + 1);
+        } else if (raw.ruleId === 'lockfile-tamper') {
+          // allow never covers lockfile-tamper either (checks/allow.ts).
+          keep = { position: positionTextOf(judgedReasonsOf(judged, anchor)) };
+        }
       }
-      continue;
+      if (keep === null) {
+        ignored += 1;
+        if (droppedSeverity === null || severityAtLeast(raw.severity, droppedSeverity)) {
+          droppedSeverity = raw.severity;
+        }
+        const installedOn = sides.reference ?? judged ?? null;
+        if (installedOn !== null && (installedOn.reasons.get(anchor) ?? []).length > 0) {
+          droppedOnProjects.add(anchor);
+          droppedOnProjectsCount += 1;
+        }
+        continue;
+      }
+      ignoreKept += 1;
     }
     const fingerprint = fingerprintFinding(raw);
     if (baseline.has(fingerprint)) {
       suppressed += 1;
       continue;
     }
-    findings.push({ ...raw, fingerprint });
+    findings.push(
+      keep === null ? { ...raw, fingerprint } : { ...raw, fingerprint, ignoreOverride: { entries: matches, position: keep.position } }
+    );
+  }
+
+  // R2: every path under an ignorePaths entry that this change makes a
+  // project the reference side does not install that way, whether or not a
+  // finding was kept there, since the change to the control is the point.
+  const madeProjects: IgnoredPathMadeProject[] = [];
+  if (sides.reference !== null && judged !== undefined) {
+    for (const relPath of [...judged.reasons.keys()].sort()) {
+      if (!underScanPrefix(relPath, sides.prefix)) {
+        continue;
+      }
+      const entries = matchingIgnoreEntries(relPath, config.ignorePaths);
+      if (entries.length === 0) {
+        continue;
+      }
+      const missing = reasonsMissingFromReference(sides, judged, relPath);
+      if (missing.length === 0) {
+        continue;
+      }
+      for (const matched of entries) {
+        matchedEntries.add(matched);
+      }
+      madeProjects.push({
+        path: relPath,
+        entries,
+        position: positionTextOf(missing),
+        kept: keptByAnchor.get(relPath) ?? 0,
+        unfollowed: onlyUnfollowedLinks(missing),
+      });
+    }
+    for (const made of madeProjects) {
+      const covered =
+        `${made.path}: covered by ignorePaths ${made.entries.length === 1 ? 'entry' : 'entries'} ` +
+        `${made.entries.map((entry) => `"${entry}"`).join(', ')}, `;
+      diagnostics.push({
+        code: 'ignore-path-project-kept',
+        message: made.unfollowed
+          ? `${covered}but it counts as a project here (${made.position}) and ${sides.referenceLabel} does not ` +
+            `record that reason for it; ${made.kept} finding(s) kept`
+          : `${covered}but this change makes it a project (${made.position}) and ${sides.referenceLabel} does not ` +
+            `install it that way; ${made.kept} finding(s) kept`,
+      });
+    }
   }
 
   // Name any configured entry that never matched a single finding's
@@ -832,14 +1274,22 @@ function applyPathFilters(
   // exit code by design -- so it is said out loud instead, with the worst
   // severity that went, since "1 ignored" reads the same whether it hid a
   // wildcard-version nit or a repointed tarball.
+  //
+  // A finding dropped on a path that is a project anyway (on the reference
+  // side, or on an audit on the judged side) is the adopter's standing
+  // choice, made on the base: said, never an exit change.
   if (droppedSeverity !== null) {
+    const installed =
+      droppedOnProjectsCount > 0
+        ? `; ${droppedOnProjectsCount} of them on installed projects (${listIgnorePaths([...droppedOnProjects].sort())})`
+        : '';
     diagnostics.push({
       code: 'ignore-path-dropped',
-      message: `ignorePaths dropped ${ignored} finding(s) before the gate, the most severe of them ${droppedSeverity}`,
+      message: `ignorePaths dropped ${ignored} finding(s) before the gate, the most severe of them ${droppedSeverity}${installed}`,
     });
   }
 
-  return { findings, suppressed, ignored };
+  return { findings, suppressed, ignored, ignoreKept, madeProjects, applied: sides.reference !== null };
 }
 
 // checkSingle's counterpart to applyPathFilters: fingerprints every raw
@@ -861,7 +1311,12 @@ function buildResult(
   allowedNames: string[],
   config: ResolvedConfig,
   info: RunInfo,
-  controls: TrustedControls | null
+  controls: TrustedControls | null,
+  ignoreRule: { ignoreKept: number; madeProjects: readonly IgnoredPathMadeProject[]; applied: boolean } = {
+    ignoreKept: 0,
+    madeProjects: [],
+    applied: false,
+  }
 ): ScanResult {
   const { blockingMatches, exitCode } = evaluateGate(findings, config.failOn);
   const distinctAllowed = [...new Set(allowedNames)].sort();
@@ -870,6 +1325,8 @@ function buildResult(
     findings,
     suppressed,
     ignored,
+    ignoreKept: ignoreRule.ignoreKept,
+    ignoreRuleApplied: ignoreRule.applied,
     allowed: distinctAllowed.length,
     allowedNames: distinctAllowed,
     // Spread rather than assigned, so the key is genuinely ABSENT outside
@@ -889,6 +1346,8 @@ function buildResult(
             configShapeChange: controls.configShapeChange,
             baselineShapeChange: controls.baselineShapeChange,
             npmrcShapeChange: controls.npmrcShapeChange,
+            projectPathsChanged: ignoreRule.madeProjects.length > 0,
+            ignoredPathsMadeProjects: ignoreRule.madeProjects.map((made) => made.path),
           },
         }),
     run: {
@@ -901,8 +1360,11 @@ function buildResult(
       diagnostics: dedupeDiagnostics(info.diagnostics),
       online: info.online,
       ecosystems: info.ecosystems,
+      ...(info.couldNotRun === undefined || info.couldNotRun === null ? {} : { couldNotRun: info.couldNotRun }),
     },
-    exitCode,
+    // evaluateGate stays 0 or 1; the one could-not-run that reaches a
+    // built result widens the exit here.
+    exitCode: info.couldNotRun === undefined || info.couldNotRun === null ? exitCode : 2,
   };
 }
 
@@ -1115,19 +1577,78 @@ export async function scan(opts: {
     }
   }
   const pythonIndex = new PythonIndexRule(statePair.after.manifests, pythonControls);
+  // The reference side of the ignorePaths rule (applyPathFilters): the
+  // trust base on a --trust-base run, and only the trust base, even with
+  // --staged, where trustState is null for the lockfile rules and the trust
+  // base is classified on its own, by a load that never throws. Without
+  // --trust-base it is the comparison side the run already has. A side
+  // loaded without a classification excuses nothing.
+  const referenceProjects: ProjectClassification | null =
+    controls !== null
+      ? trustState !== null
+        ? trustState.projects ?? EMPTY_PROJECTS
+        : await loadRefProjects(root, controls.ref, prefix, isIgnoredPath)
+      : opts.mode.kind === 'audit' || statePair.before === null
+        ? null
+        : statePair.before.projects ?? EMPTY_PROJECTS;
+  const pathFilterSides: PathFilterSides = {
+    judged: statePair.after.projects,
+    reference: referenceProjects,
+    referenceLabel:
+      controls !== null
+        ? `the trust base "${controls.ref}"`
+        : opts.mode.kind === 'base'
+          ? `the --base ref "${opts.mode.ref}"`
+          : 'HEAD',
+    prefix,
+    audit: opts.mode.kind === 'audit',
+    lockfileRecords: (lockfilePath, packageName) =>
+      [...(statePair.after.lockfile === null ? [] : [statePair.after.lockfile]), ...(statePair.after.extraLockfiles ?? [])]
+        .filter((lockfile) => lockfile.path === lockfilePath)
+        .some((lockfile) => lockfile.entries.has(packageName)),
+  };
+  // A changed nested lockfile this tool does not read is excused by
+  // ignorePaths only when the rule above would drop a finding anchored to
+  // the manifest in its directory, without the reason that lockfile itself
+  // gives (a manifest beside a lockfile): otherwise every new fixture
+  // lockfile would make its own directory a project and be judged.
+  const nestedWiring = new Map<string, string>();
+  const nestedLockfileIgnored = (repoPath: string): boolean => {
+    const matches = matchingIgnoreEntries(repoPath, config.ignorePaths);
+    for (const matched of matches) {
+      lockfileIgnoreMatches.add(matched);
+    }
+    if (matches.length === 0) {
+      return false;
+    }
+    const judged = pathFilterSides.judged;
+    if (pathFilterSides.reference === null || judged === undefined) {
+      return true;
+    }
+    const anchor = projectManifestForLockfile(repoPath);
+    if (anchor === null) {
+      return true;
+    }
+    const missing = reasonsMissingFromReference(
+      pathFilterSides,
+      judged,
+      anchor,
+      (reason) => reason.rule === 'beside-lockfile' && reason.input === repoPath
+    );
+    if (missing.length === 0) {
+      return true;
+    }
+    nestedWiring.set(repoPath, positionTextOf(missing));
+    return false;
+  };
   const deltaWith = (acknowledgedLockfiles: readonly string[]): DependencyDelta =>
     computeDelta(statePair.before, statePair.after, {
       extraComparisonSides: trustState === null ? [] : [trustState],
       acknowledgedLockfiles,
       acknowledgementSource:
         controls !== null ? 'trust-base' : opts.mode.kind === 'staged' ? 'head-commit' : 'base-ref',
-      isIgnoredPath: (repoPath) => {
-        const matches = matchingIgnoreEntries(repoPath, config.ignorePaths);
-        for (const matched of matches) {
-          lockfileIgnoreMatches.add(matched);
-        }
-        return matches.length > 0;
-      },
+      isIgnoredPath: nestedLockfileIgnored,
+      ignoredPathWiring: (repoPath) => nestedWiring.get(repoPath) ?? null,
     });
   // Lockfile acknowledgements come from the comparison side's config, never
   // from the tree being judged: the trust base's when there is one;
@@ -1196,12 +1717,14 @@ export async function scan(opts: {
   let rawFindings: Omit<Finding, 'fingerprint'>[];
   let online: OnlineRunSummary;
   let pypiStats: PypiExistenceStats | null = null;
+  let enrichedUnchecked: UncheckedName[] | null = null;
   if (resolveOnline(config, opts.online)) {
     const budgetMs = resolveOnlineBudgetMs(config, opts.onlineBudgetMs, isPullRequestRun);
     const enriched = await enrichOnline(checkedFindings, ctx, budgetMs);
     rawFindings = enriched.findings;
     online = enriched.summary;
     pypiStats = enriched.pypiStats;
+    enrichedUnchecked = enriched.unchecked;
   } else {
     rawFindings = checkedFindings;
     online = ONLINE_DISABLED_SUMMARY;
@@ -1210,10 +1733,26 @@ export async function scan(opts: {
       ctx.diagnostics.push(notChecked);
     }
   }
+  const settledOnline = await settleOnlineUnchecked({
+    enriched: enrichedUnchecked,
+    rawFindings: checkedFindings,
+    ctx,
+    config,
+    cliOnline: opts.online,
+    isPullRequestRun,
+    online,
+  });
+  online = settledOnline.online;
   const ecosystems = summarizeEcosystems(ctx, statePair.after.manifests, pypiStats, statePair.after.notParsed ?? []);
 
   const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
-  const filtered = applyPathFilters(rawFindings, config, baseline, diagnostics, lockfileIgnoreMatches);
+  const filtered = applyPathFilters(rawFindings, config, baseline, diagnostics, lockfileIgnoreMatches, pathFilterSides);
+  // On a pull-request run, a path the change makes a project under an
+  // ignorePaths entry is a change to that control, so it is a proposal,
+  // pushed the way the Python index proposal is.
+  if (controls !== null) {
+    controls.proposals.push(...ignoredPathProposals(filtered.madeProjects));
+  }
   // After the filters, over what survived them: see install-script-collapse.ts.
   const collapse = collapseInstallScriptFindings(filtered.findings, {
     hasComparisonBase: delta.hasComparisonBase,
@@ -1239,8 +1778,10 @@ export async function scan(opts: {
       startedAt,
       online,
       ecosystems,
+      couldNotRun: settledOnline.couldNotRun,
     },
-    controls
+    controls,
+    filtered
   );
 }
 
@@ -1378,16 +1919,29 @@ export async function checkSingle(opts: {
   let rawFindings: Omit<Finding, 'fingerprint'>[];
   let online: OnlineRunSummary;
   let pypiStats: PypiExistenceStats | null = null;
+  let enrichedUnchecked: UncheckedName[] | null = null;
   if (resolveOnline(config, opts.online)) {
     const budgetMs = resolveOnlineBudgetMs(config, opts.onlineBudgetMs, isPullRequestRun);
     const enriched = await enrichOnline(checkedFindings, ctx, budgetMs);
     rawFindings = enriched.findings;
     online = enriched.summary;
     pypiStats = enriched.pypiStats;
+    enrichedUnchecked = enriched.unchecked;
   } else {
     rawFindings = checkedFindings;
     online = ONLINE_DISABLED_SUMMARY;
   }
+  // `check --trust-base` is a pull-request run too (audit B2).
+  const settledOnline = await settleOnlineUnchecked({
+    enriched: enrichedUnchecked,
+    rawFindings: checkedFindings,
+    ctx,
+    config,
+    cliOnline: opts.online,
+    isPullRequestRun,
+    online,
+  });
+  online = settledOnline.online;
   // checkSingle stays npm-only (design open point 9): its one synthetic
   // name is an npm name, and no Python file is read.
   const ecosystems = summarizeEcosystems(ctx, null, pypiStats);
@@ -1408,6 +1962,7 @@ export async function checkSingle(opts: {
       startedAt,
       online,
       ecosystems,
+      couldNotRun: settledOnline.couldNotRun,
     },
     controls
   );
