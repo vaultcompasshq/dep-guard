@@ -303,10 +303,11 @@ export async function assertTrustBaseUsable(root: string, ref: string): Promise<
     throw new DepGuardError(
       `refusing "${ref}" as the trust base: it is a different commit from HEAD but carries ` +
         `an identical tree (${headTree}), so every control input would come from the tree ` +
-        'being judged and there would be nothing for pull-request mode to compare. A pull ' +
-        "request's merge ref looks exactly like this when the base has not moved. Pass the " +
-        'base branch (for example origin/main), not the head or merge commit. Nothing was ' +
-        'checked.',
+        'being judged and there would be nothing for pull-request mode to compare. This is ' +
+        "what a pull request's head commit looks like against its merge commit when the base " +
+        'has not moved since the fork, because the merge then carries the head tree, and what ' +
+        'the base branch looks like against a pull request with no net change. Pass the base ' +
+        'branch (for example origin/main), not the head or merge commit. Nothing was checked.',
       'trust-base-same-tree'
     );
   }

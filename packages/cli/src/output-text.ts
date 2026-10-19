@@ -80,7 +80,12 @@ export function renderNamesLine(result: ScanResult): string | null {
   }
   const resemblance = "resemblance checked against this repository's own Python names";
   let python: string;
-  if (!online) {
+  if (pypi.candidates === 0) {
+    // Nothing to look up (every requirement is a git, url or path one, or
+    // there are none): said the way npm's count is, without a zero-count
+    // "not checked" or "0 of 0" that reads as though something was skipped.
+    python = 'pypi 0 checked (no PyPI names to check)';
+  } else if (!online) {
     python = `pypi ${pypi.candidates} not checked for existence (no PyPI corpus ships; pass --online), ${resemblance}`;
   } else {
     const reasons = NOT_CHECKED_REASONS.filter(([key]) => pypi.notChecked[key] > 0).map(

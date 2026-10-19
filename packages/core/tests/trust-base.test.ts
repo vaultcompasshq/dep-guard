@@ -731,6 +731,29 @@ describe('pull-request mode: the ref itself', () => {
     });
   });
 
+  // The message names both ways a different commit shares HEAD's tree: the
+  // head commit against its own merge when the base has not moved, and the
+  // base branch against a pull request with no net change. It once said only
+  // that "a pull request's merge ref looks exactly like this", which reads as
+  // though every pull request does.
+  test('the identical-tree refusal names the head-commit and the no-net-change cases', async () => {
+    await makeBase();
+    await addUnknownDependency();
+    await commitAll('add the dependency');
+    const twin = (await git('commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'twin')).trim();
+
+    const error: unknown = await scanPullRequest({ trustBase: twin }).then(
+      () => null,
+      (err: unknown) => err
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("a pull request's head commit looks like against its merge commit");
+    expect(message).toContain('a pull request with no net change');
+    expect(message).not.toContain('looks exactly like this');
+  });
+
   test('a ref that is not a usable git ref is refused before it reaches git', async () => {
     await makeBase();
     await addUnknownDependency();

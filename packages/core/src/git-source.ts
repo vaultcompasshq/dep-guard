@@ -1669,7 +1669,10 @@ async function loadLockfiles(
   directory = '',
   // npm lockfiles this side already parsed for classification, reused
   // rather than parsed twice.
-  parsedNpm: ReadonlyMap<string, ParsedLockfile> = new Map()
+  parsedNpm: ReadonlyMap<string, ParsedLockfile> = new Map(),
+  // Where a lockfile-parse failure is collected instead of thrown, so the
+  // caller can name every one at once. Without it the first one throws.
+  parseFailures?: DepGuardError[]
 ): Promise<{ lockfile: ParsedLockfile | null; extraLockfiles: ParsedLockfile[] }> {
   const loaded: ParsedLockfile[] = [];
   for (const [base, load] of LOCKFILE_CANDIDATES) {
@@ -1693,6 +1696,10 @@ async function loadLockfiles(
       // as new, and the pull request that regenerates it is not refused
       // for the file it replaces.
       if (role.kind === 'judged' || !(err instanceof MissingPackagesMapError)) {
+        if (parseFailures !== undefined && err instanceof DepGuardError && err.code === 'lockfile-parse') {
+          parseFailures.push(err);
+          continue;
+        }
         throw err;
       }
       const message =
@@ -3238,6 +3245,27 @@ function settleParseFailures(sides: readonly LoadedSide[], prefix: string, diagn
   throw new DepGuardError(`${lead}${[...shown, ...(rest > 0 ? [`and ${rest} more`] : [])].join(' | ')}`, 'manifest-parse');
 }
 
+// Every lockfile on one side that does not parse, in one lockfile-parse
+// error, so fixing one does not just reveal the next. One failure keeps its
+// own message unchanged; several are listed the way the manifest-parse
+// error lists manifests, up to the same cap, in the order the lockfiles were
+// read (the root directory first, then the rest by path).
+function throwLockfileParseFailures(failures: readonly DepGuardError[]): void {
+  if (failures.length === 0) {
+    return;
+  }
+  if (failures.length === 1) {
+    throw failures[0];
+  }
+  const shown = failures.slice(0, MAX_LISTED_PARSE_FAILURES).map((failure) => failure.message);
+  const rest = failures.length - shown.length;
+  throw new DepGuardError(
+    `${failures.length} lockfiles do not parse and stop the scan: ` +
+      [...shown, ...(rest > 0 ? [`and ${rest} more`] : [])].join(' | '),
+    'lockfile-parse'
+  );
+}
+
 async function loadState(
   rawSource: FileSource,
   diagnostics: Diagnostic[],
@@ -3506,13 +3534,15 @@ async function loadState(
     return left < right ? -1 : 1;
   });
   const merged: ParsedLockfile[] = [];
+  const lockfileParseFailures: DepGuardError[] = [];
   for (const directory of lockfileDirs) {
-    const loaded = await loadLockfiles(source, diagnostics, unread, role, directory, npmLockfiles);
+    const loaded = await loadLockfiles(source, diagnostics, unread, role, directory, npmLockfiles, lockfileParseFailures);
     if (loaded.lockfile !== null) {
       merged.push(loaded.lockfile);
     }
     merged.push(...loaded.extraLockfiles);
   }
+  throwLockfileParseFailures(lockfileParseFailures);
   const lockfile = merged.find(isReadLockfile) ?? merged[0] ?? null;
   const extraLockfiles = merged.filter(
     (parsed) => parsed !== lockfile && (parsed.format === 'npm' || parsed.format === 'pnpm')

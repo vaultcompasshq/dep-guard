@@ -81,8 +81,12 @@ export interface UvSource {
   // The git or url location, the path, or the index name. Empty for a
   // workspace source.
   value: string;
-  // A git source's pinned ref, when it names one.
+  // A git source's ref (its rev, tag or branch key), when it names one.
   ref?: string;
+  // A git source's own `rev` key alone, when it has one and its git value
+  // carries no ref text of its own: the only value that can make it a
+  // commit pin (ManifestDep.gitTable).
+  rev?: string;
 }
 
 export interface PythonIncludeRef {
@@ -115,6 +119,14 @@ export interface PythonManifestInfo {
 
 export function emptyIndexDeclarations(): PythonIndexDeclarations {
   return { wide: [], named: [], perName: [] };
+}
+
+// A full git commit object id (sha1 or sha256), the same test the tamper
+// check applies to a git table's rev (IMMUTABLE_GIT_REF in
+// checks/tamper.ts). Used where several git items of one dependency are
+// reconciled into one pin verdict before the tamper check sees them.
+export function isFullCommitId(rev: string | null | undefined): boolean {
+  return typeof rev === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(rev);
 }
 
 export type PythonLockfileFormat = 'poetry' | 'uv' | 'pdm' | 'pipenv';

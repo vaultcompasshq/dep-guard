@@ -508,6 +508,46 @@ function isLockfileShaped(document: Record<string, unknown>): boolean {
   );
 }
 
+const DEPENDENCY_SECTIONS = ['dependencies', 'devDependencies', 'optionalDependencies'] as const;
+
+// True when every dependency the document records, in every importer and at
+// the top level (a single-project lockfile keeps its dependencies there),
+// resolves to a link: (a workspace directory, which has no packages entry).
+// Anything this cannot read as that -- a section or importer that is not a
+// mapping, a version that is not a string, any other version at all -- is
+// false, so the null-packages refusal stands for it.
+function recordsOnlyLinks(document: Record<string, unknown>): boolean {
+  const projects: unknown[] = [document];
+  if (document.importers !== undefined) {
+    if (!isPlainObject(document.importers)) {
+      return false;
+    }
+    projects.push(...Object.values(document.importers));
+  }
+  for (const project of projects) {
+    if (!isPlainObject(project)) {
+      return false;
+    }
+    for (const section of DEPENDENCY_SECTIONS) {
+      const deps = project[section];
+      if (deps === undefined) {
+        continue;
+      }
+      if (!isPlainObject(deps)) {
+        return false;
+      }
+      for (const value of Object.values(deps)) {
+        // v5 records a version string; v6 and later {specifier, version}.
+        const version = isPlainObject(value) ? value.version : value;
+        if (typeof version !== 'string' || !version.startsWith('link:')) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 // The entries of one document's "packages" map, or null when "packages"
 // is present but not a mapping. A missing "packages" is valid-empty:
 // unlike npm's flat map, pnpm omits the key when there are no external
@@ -520,6 +560,15 @@ function readPackages(
   const entries = new Map<string, LockEntry[]>();
   const packages = document.packages;
   if (packages === undefined) {
+    return entries;
+  }
+  if (packages === null && recordsOnlyLinks(document)) {
+    // A bare "packages:" (null) in a lockfile whose every recorded
+    // dependency is a link: is found in real repositories (a lockfileVersion
+    // 5.4 workspace of links only). Such a lockfile has no packages to
+    // record, so empty is the truth about it rather than a fail-open
+    // reading. With any other dependency recorded, a null map is still the
+    // truncated shape refused below.
     return entries;
   }
   if (!isPlainObject(packages)) {

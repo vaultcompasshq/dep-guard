@@ -28,7 +28,7 @@ import type { ManifestDep, ParsedManifest } from './manifest.js';
 import { isPypiOrigin } from './python-index.js';
 import { invalidNameFragment, normalizePypiName } from './python-names.js';
 import { archiveDistributionName, isArchiveFile } from './python-requirement.js';
-import { emptyIndexDeclarations, type PythonIndexDeclarations, type UvSource } from './python-types.js';
+import { emptyIndexDeclarations, isFullCommitId, type PythonIndexDeclarations, type UvSource } from './python-types.js';
 import type { Diagnostic } from './types.js';
 
 export interface UvWorkspaceSpec {
@@ -188,9 +188,26 @@ function workspaceConfirms(
   return { confirmed, widened };
 }
 
+function withoutRev(source: UvSource): UvSource {
+  const unpinned: UvSource = { kind: source.kind, value: source.value };
+  if (source.ref !== undefined) {
+    unpinned.ref = source.ref;
+  }
+  return unpinned;
+}
+
 function rewriteTo(dep: ManifestDep, source: UvSource): void {
   dep.protocol = source.kind === 'git' ? 'git' : 'url';
   dep.specifier = source.ref === undefined ? source.value : `${source.value}#${source.ref}`;
+  // dep-guard built this specifier from the source table's own rev key, so
+  // its "#" is the ref and it is not in pip's grammar (ManifestDep.pipGrammar).
+  delete dep.pipGrammar;
+  // A git source pins by its own rev key alone (ManifestDep.gitTable).
+  if (source.kind === 'git') {
+    dep.gitTable = { rev: source.rev ?? null };
+  } else {
+    delete dep.gitTable;
+  }
   // git and url Python names keep their written form (open point 6).
   dep.registryName = dep.name;
 }
@@ -260,8 +277,16 @@ export function applyUvSources(
       const declaringPath = declaring.path;
       {
         const info = manifest.python;
-        const rewrite = entry.sources.find((source) => source.kind === 'git' || source.kind === 'url');
-        if (rewrite !== undefined) {
+        const remote = entry.sources.filter((source) => source.kind === 'git' || source.kind === 'url');
+        const first = remote[0];
+        if (first !== undefined) {
+          // Several sources, one per marker: the dependency installs
+          // whichever one the platform selects, so it is a commit pin only
+          // when every git or url source is a pinned git source. Otherwise
+          // the rewrite carries no rev, so the worst one is what is
+          // reported, whichever source came first.
+          const allPinned = remote.every((source) => source.kind === 'git' && isFullCommitId(source.rev));
+          const rewrite: UvSource = allPinned ? first : withoutRev(first);
           rewriteTo(dep, rewrite);
           info?.exclusions.push({ cls: rewrite.kind === 'git' ? 'vcs' : 'url', name: dep.name });
           continue;

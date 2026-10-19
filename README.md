@@ -719,10 +719,14 @@ Python package-index declarations (every index option in a requirements
 file, the poetry, uv and pdm sources, `Pipfile` sources, a repository
 `uv.toml`, and per-name mappings onto a named index) and a uv workspace
 root's `members` and `exclude` are control inputs too: each is read from the
-trust base copy of the same path, a head-side change is reported as `python
-index changed in this pull request (requirements.txt)`, and a base copy that
-is a gitlink or does not parse stops the run (exit 2,
-`python-index-invalid`). A base copy that is a symlink does not stop a pull
+trust base copy of the same path, and a base copy that is a gitlink or does
+not parse stops the run (exit 2, `python-index-invalid`). A head-side change
+to the index declarations is reported as `python index changed in this pull
+request (requirements.txt)`. A head-side change to `members` or `exclude`
+has no proposal line of its own: the base copy's members decide the scope of
+every `[tool.uv.sources]` entry, and a name that only the head's wider
+`members` would bring into that scope is checked like any other, with a
+`python-workspace-unconfirmed` diagnostic saying so. A base copy that is a symlink does not stop a pull
 request that replaces the link with a regular file: the base then
 contributes no declarations for that file, so every name in it is looked up,
 and `python-index-unread-comparison-side` says so.

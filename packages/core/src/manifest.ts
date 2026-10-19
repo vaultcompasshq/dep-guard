@@ -26,6 +26,22 @@ export interface ManifestDep {
   specifier: string;
   depType: DepType;
   protocol: Protocol;
+  // Python only: the specifier is a URL exactly as the user wrote it (a
+  // requirements line, a PEP 508 direct reference, an editable URL, a
+  // Pipfile file/path URL), so it is in pip's grammar: a VCS ref is what
+  // follows the last "@" of the path, and the "#" fragment is never a ref.
+  // Absent on a "<url>#<rev>" specifier dep-guard builds itself from a
+  // poetry, [tool.uv.sources] or Pipfile table's own rev key.
+  pipGrammar?: true;
+  // Python only: the dependency is a poetry, [tool.uv.sources] or Pipfile
+  // git table, and `rev` is that table's own commit key (poetry and uv
+  // `rev`, Pipfile `ref`), or null when it has none or when the table's
+  // `git` value carries ref text of its own (a "#" anywhere, or an "@" in
+  // its path): the installer appends the ref to that value, so pip would
+  // read fragment text or a different ref. Only this value can pin a
+  // table: its specifier is display text. A `tag` or `branch` key names a
+  // ref that moves.
+  gitTable?: { rev: string | null };
 }
 
 export interface ParsedManifest {

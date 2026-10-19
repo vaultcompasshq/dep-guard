@@ -183,6 +183,58 @@ function isCommitPinnedGitSpecifier(specifier: string): boolean {
   return IMMUTABLE_GIT_REF.test(specifier.slice(hashIndex + 1));
 }
 
+// pip's and uv's VCS grammar, for a URL a Python manifest's user wrote:
+// "git+<scheme>://<netloc><path>@<ref>[?query][#fragment]". The ref is what
+// follows the LAST "@" of the path, the way pip splits it (urlsplit, then
+// path.rsplit("@", 1)); the fragment carries egg= and subdirectory=, never a
+// ref. The netloc ends at the first "/", "?" or "#", so an "@" in userinfo
+// ("git+ssh://git@host/...", "git+https://user:token@host/...") is never
+// read as one. git+ schemes only: an hg, svn or bzr revision is not judged
+// here, and the scp-like "git+git@host:path" form, which pip does not
+// accept, has no "://" and reads as unpinned. The ref must pass the same
+// full-object-id test as the "#" form above.
+function isCommitPinnedPythonGitUrl(specifier: string): boolean {
+  if (!/^git\+[a-z][a-z0-9+.-]*:\/\//i.test(specifier)) {
+    return false;
+  }
+  const rest = specifier.slice(specifier.indexOf('://') + 3);
+  const netlocEnd = rest.search(/[/?#]/);
+  if (netlocEnd === -1 || rest[netlocEnd] !== '/') {
+    return false;
+  }
+  const afterNetloc = rest.slice(netlocEnd);
+  const pathEnd = afterNetloc.search(/[?#]/);
+  const urlPath = pathEnd === -1 ? afterNetloc : afterNetloc.slice(0, pathEnd);
+  const at = urlPath.lastIndexOf('@');
+  if (at === -1) {
+    return false;
+  }
+  return IMMUTABLE_GIT_REF.test(urlPath.slice(at + 1));
+}
+
+// Which grammar applies is decided by where the specifier came from, never
+// by its shape. A Python URL the user wrote (DepChange.pipGrammar) is read
+// in pip's grammar alone: pip ignores a fragment that is not egg= or
+// subdirectory= and installs the default branch, so "#<sha>" there pins
+// nothing. A poetry, [tool.uv.sources] or Pipfile git table
+// (DepChange.gitTable) pins by its own rev key alone: its specifier is
+// display text, and a "#" or "@" inside the table's git value is URL text the
+// installer hands to pip, while a tag or branch key names a ref that moves.
+// A Python git dependency with neither provenance is not credited at all.
+// An npm specifier is read by its "#" ref.
+function isCommitPinnedChange(change: DepChange): boolean {
+  if (change.protocol !== 'git') {
+    return false;
+  }
+  if (change.python !== true) {
+    return isCommitPinnedGitSpecifier(change.specifier);
+  }
+  if (change.gitTable !== undefined) {
+    return change.gitTable.rev !== null && IMMUTABLE_GIT_REF.test(change.gitTable.rev);
+  }
+  return change.pipGrammar === true && isCommitPinnedPythonGitUrl(change.specifier);
+}
+
 // The `kind` a source-swap finding reports. `DepChange['kind']` is
 // 'added' | 'changed' everywhere else in the engine, and the
 // comparison-derived signals keep exactly those two because they describe
@@ -193,6 +245,26 @@ function isCommitPinnedGitSpecifier(specifier: string): boolean {
 // Record<string, unknown>, so the third value is part of the contract
 // instead of an accident of one expression.
 type ReportedKind = DepChange['kind'] | 'present';
+
+const SEVERITY_RANK: Readonly<Record<Finding['severity'], number>> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+// Which of two findings under one dedupe key is the one to keep: the higher
+// severity, and at equal severity the one that does not credit a commit pin.
+// A finding with no commitPinned detail (every non-git signal) counts as not
+// crediting one. A full tie keeps the finding already held, so the order of
+// the input decides nothing either of these two facts could see.
+function worseThan(candidate: Omit<Finding, 'fingerprint'>, held: Omit<Finding, 'fingerprint'>): boolean {
+  const bySeverity = SEVERITY_RANK[candidate.severity] - SEVERITY_RANK[held.severity];
+  if (bySeverity !== 0) {
+    return bySeverity > 0;
+  }
+  return held.details?.commitPinned === true && candidate.details?.commitPinned !== true;
+}
 
 // Severity and wording for the git-source and url-source signals.
 //
@@ -708,7 +780,14 @@ export const tamperCheck: Check = (ctx) => {
   // one fact: a tampered entry that a manifest DOES declare is reached by
   // both, produces the same signal string for the same package at the same
   // manifest path, and is reported once.
-  const seen = new Set<string>();
+  //
+  // On a collision the WORSE finding is kept, wherever it sits in the input:
+  // one manifest can declare a dependency twice (two marker lines, a main
+  // dependency and a dev group), and keeping the first meant a pinned line
+  // above a branch line reported the dependency pinned while the same file
+  // with the lines swapped reported it critical. The kept finding stays at
+  // the slot the first one took, so the output order does not move either.
+  const seen = new Map<string, number>();
   // The sources the specifier walk already reported, per (manifestPath,
   // package), as canonical source identities. The lockfile walk skips an
   // added entry only when its own source IS one of these -- the same repo or
@@ -718,22 +797,28 @@ export const tamperCheck: Check = (ctx) => {
   // reported on its own.
   const sourceReported = new Map<string, Set<string>>();
   const registryHosts = registryHostsOf(ctx.npmrcRegistryPins, ctx.npmrcDefaultRegistry);
-  const report = (
-    finding: Omit<Finding, 'fingerprint'>,
-    lockfilePath: string | undefined = delta.lockfilePath
-  ): void => {
+  // A null lockfilePath says the finding has no lockfile to name at all (a
+  // Python dependency, which no npm or pnpm lockfile records); undefined
+  // falls back to the delta's primary lockfile.
+  const report = (finding: Omit<Finding, 'fingerprint'>, lockfilePathArg?: string | null): void => {
+    const lockfilePath = lockfilePathArg === null ? undefined : (lockfilePathArg ?? delta.lockfilePath);
     const signal = typeof finding.details?.signal === 'string' ? finding.details.signal : '';
     // The lockfile is part of the key: the same signal for the same package
     // in two lockfiles is two facts, and each file has to be named.
     const key = JSON.stringify([finding.manifestPath, finding.packageName, signal, lockfilePath ?? '']);
-    if (seen.has(key)) {
-      return;
-    }
-    seen.add(key);
     // Every finding this check raises is a fact about a lockfile, and
     // for a transitive entry the manifest path is only an anchor -- the
     // lockfile is the file a reader has to open.
-    findings.push(lockfilePath === undefined ? finding : { ...finding, lockfilePath });
+    const placed = lockfilePath === undefined ? finding : { ...finding, lockfilePath };
+    const at = seen.get(key);
+    if (at === undefined) {
+      seen.set(key, findings.length);
+      findings.push(placed);
+      return;
+    }
+    if (worseThan(placed, findings[at])) {
+      findings[at] = placed;
+    }
   };
 
   // Diagnostics are deduplicated on the way in rather than on the way out:
@@ -1229,7 +1314,7 @@ export const tamperCheck: Check = (ctx) => {
       // comment there before touching either input, because dropping the
       // comparison-base half turns the check's headline attack shape into
       // a non-blocking note.
-      const pinned = change.protocol === 'git' && isCommitPinnedGitSpecifier(change.specifier);
+      const pinned = isCommitPinnedChange(change);
       const shape = sourceSwapReport(
         change.protocol,
         named,
@@ -1276,7 +1361,10 @@ export const tamperCheck: Check = (ctx) => {
           // git only -- a url source has no pin to record.
           ...(change.protocol === 'git' ? { commitPinned: pinned } : {}),
         },
-      });
+      },
+      // A Python dependency is in no npm or pnpm lockfile, so it names
+      // none rather than the delta's primary one, which is unrelated to it.
+      change.python === true ? null : undefined);
       const declared = declaredSourceIdentity(change.protocol, change.specifier);
       if (declared !== null) {
         const declKey = JSON.stringify([change.manifestPath, change.registryName]);

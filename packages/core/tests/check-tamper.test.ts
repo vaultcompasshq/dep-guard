@@ -1797,6 +1797,175 @@ describe('tamperCheck: git source severities read off a parsed manifest', () => 
   });
 });
 
+// pip and uv write a VCS requirement's ref after the last "@" of the URL's
+// path ("git+https://host/o/r.git@<ref>#egg=name"), never after "#", where
+// the fragment carries egg= and subdirectory= instead. The pin is read from
+// that position for a Python dependency only, and under exactly the rule the
+// "#" form uses: a full 40 or 64 hex object id, any case, and nothing else.
+describe('tamperCheck: a Python VCS requirement pinned with "@<ref>"', () => {
+  const SHA1 = '6c644106e03138abae01d8d60105d4a7ad4916a1';
+  const SHA256 = '8b1a9953c4611296a827abf8c47804d7c470c39cf17b2a4d1e2f7e5a2c0d3b6e';
+
+  // A URL the user wrote (a requirements line, a PEP 508 direct reference)
+  // is in pip's grammar, which is what pipGrammar records.
+  function pythonGitFinding(specifier: string, pipGrammar = true) {
+    const change: DepChange = {
+      ...makeChange({ name: 'strict-no-cover', kind: 'added', protocol: 'git', specifier, manifestPath: 'pyproject.toml' }),
+      python: true,
+      ...(pipGrammar ? { pipGrammar: true as const } : {}),
+    };
+    const findings = tamperCheck(makeContext([change], { hasComparisonBase: false }));
+    expect(findings).toHaveLength(1);
+    return findings[0];
+  }
+
+  test.each([
+    ['a 40-hex commit after "@"', `git+https://github.com/pydantic/strict-no-cover.git@${SHA1}`],
+    ['an uppercase 40-hex commit after "@"', `git+https://github.com/o/r.git@${SHA1.toUpperCase()}`],
+    ['a 64-hex commit after "@"', `git+https://github.com/o/r.git@${SHA256}`],
+    ['a 40-hex commit after "@" with an #egg= fragment', `git+https://github.com/o/r.git@${SHA1}#egg=r`],
+    [
+      'a 40-hex commit after "@" with a #subdirectory= fragment',
+      `git+https://github.com/o/r.git@${SHA1}#subdirectory=pkg&egg=r`,
+    ],
+    ['a 40-hex commit after "@" over ssh with userinfo', `git+ssh://git@github.com/o/r.git@${SHA1}`],
+    ['a 40-hex commit after "@" with a credential in userinfo', `git+https://user:tok@github.com/o/r.git@${SHA1}`],
+  ])('%s is a commit pin', (_label, specifier) => {
+    const finding = pythonGitFinding(specifier);
+    expect(finding.details?.commitPinned).toBe(true);
+    expect(finding.severity).toBe('low');
+  });
+
+  test.each([
+    ['no ref at all', 'git+https://github.com/o/r.git'],
+    ['a branch', 'git+https://github.com/o/r.git@main'],
+    ['a tag', 'git+https://github.com/o/r.git@v1.2.3'],
+    ['a short SHA', 'git+https://github.com/o/r.git@6c64410'],
+    ['39 hex characters', `git+https://github.com/o/r.git@${SHA1.slice(0, 39)}`],
+    ['41 hex characters', `git+https://github.com/o/r.git@${SHA1}a`],
+    ['63 hex characters', `git+https://github.com/o/r.git@${SHA256.slice(0, 63)}`],
+    ['a hex-looking branch name with a slash', `git+https://github.com/o/r.git@refs/heads/${SHA1}`],
+    ['a 40-hex ref followed by more path', `git+https://github.com/o/r.git@${SHA1}/extra`],
+    ['a 40-hex username in userinfo and no ref', `git+https://${SHA1}@github.com/o/r.git`],
+    ['git@ userinfo over ssh and no ref', 'git+ssh://git@github.com/o/r.git'],
+    ['a 40-hex password in userinfo and no ref', `git+https://user:${SHA1}@github.com/o/r.git`],
+    ['an "@" in the netloc only, with a 40-hex host label', `git+https://user@${SHA1}/o/r.git`],
+    ['a 40-hex "@" ref in the query only', `git+https://github.com/o/r.git?x=@${SHA1}`],
+    ['a 40-hex "@" ref in the fragment only', `git+https://github.com/o/r.git#egg=r@${SHA1}`],
+    ['the scp-like form, which pip does not accept', `git+git@github.com:o/r.git@${SHA1}`],
+    ['an hg+ URL with a 40-hex "@" ref (git only)', `hg+https://hg.example.test/r@${SHA1}`],
+    ['a percent-encoded "@"', `git+https://github.com/o/r.git%40${SHA1}`],
+    // pip ignores a fragment that is not egg= or subdirectory=, and installs
+    // the default branch: a user-written "#<sha>" pins nothing.
+    ['a user-written "#<40hex>" fragment', `git+https://github.com/o/r.git#${SHA1}`],
+    ['a user-written "#<64hex>" fragment', `git+https://github.com/o/r.git#${SHA256}`],
+    ['a branch "@" ref with a "#<40hex>" fragment', `git+https://github.com/o/r.git@main#${SHA1}`],
+  ])('%s is not a commit pin', (_label, specifier) => {
+    const finding = pythonGitFinding(specifier);
+    expect(finding.details?.commitPinned).toBe(false);
+    expect(finding.severity).toBe('critical');
+  });
+
+  // A poetry, [tool.uv.sources] or Pipfile git table pins by its own rev key
+  // alone (DepChange.gitTable), never by the specifier text built from it.
+  function tableGitFinding(specifier: string, rev: string | null) {
+    const change: DepChange = {
+      ...makeChange({ name: 'strict-no-cover', kind: 'added', protocol: 'git', specifier, manifestPath: 'pyproject.toml' }),
+      python: true,
+      gitTable: { rev },
+    };
+    return tamperCheck(makeContext([change], { hasComparisonBase: false }))[0];
+  }
+
+  test('a git table whose own rev is a full commit id is a commit pin', () => {
+    const finding = tableGitFinding(`https://github.com/o/r.git#${SHA1}`, SHA1);
+    expect(finding.details?.commitPinned).toBe(true);
+    expect(finding.severity).toBe('low');
+  });
+
+  test.each([
+    ['a "#<sha>" in the specifier and no rev', `https://github.com/o/r.git#${SHA1}`, null],
+    ['an "@<sha>" in the specifier and no rev', `git+https://github.com/o/r.git@${SHA1}`, null],
+    ['a short rev', 'https://github.com/o/r.git#6c64410', '6c64410'],
+    ['a rev that is a branch name', 'https://github.com/o/r.git#main', 'main'],
+  ])('a git table with %s is not a commit pin', (_label, specifier, rev) => {
+    const finding = tableGitFinding(specifier, rev);
+    expect(finding.details?.commitPinned).toBe(false);
+    expect(finding.severity).toBe('critical');
+  });
+
+  // Every Python git dependency carries one provenance or the other; one
+  // that carries neither is not credited with a pin by either grammar.
+  test.each([`https://github.com/o/r.git#${SHA1}`, `git+https://github.com/o/r.git@${SHA1}`])(
+    'a Python git dependency with no provenance is not a commit pin (%s)',
+    (specifier) => {
+      const finding = pythonGitFinding(specifier, false);
+      expect(finding.details?.commitPinned).toBe(false);
+      expect(finding.severity).toBe('critical');
+    }
+  );
+
+  // The "@" form is pip's and uv's grammar, not npm's. An npm specifier
+  // written that way names a repository path ending in "@<sha>", and npm
+  // reads no ref from it, so it must not be credited as a pin.
+  test('an npm git specifier with "@<sha>" in its path is not a commit pin', () => {
+    const changes = [
+      makeChange({ name: 'dep', kind: 'added', protocol: 'git', specifier: `git+https://github.com/o/r.git@${SHA1}` }),
+    ];
+    const findings = tamperCheck(makeContext(changes, { hasComparisonBase: false }));
+    expect(findings[0].details?.commitPinned).toBe(false);
+    expect(findings[0].severity).toBe('critical');
+  });
+
+  // A pin only demotes when there is no comparison base, for Python exactly
+  // as for npm (see sourceSwapReport).
+  test('a Python "@<sha>" pin still blocks when the scan has a comparison base', () => {
+    const change: DepChange = {
+      ...makeChange({
+        name: 'strict-no-cover',
+        kind: 'added',
+        protocol: 'git',
+        specifier: `git+https://github.com/o/r.git@${SHA1}`,
+        manifestPath: 'pyproject.toml',
+      }),
+      python: true,
+      pipGrammar: true,
+    };
+    const findings = tamperCheck(makeContext([change], { hasComparisonBase: true }));
+    expect(findings[0].details?.commitPinned).toBe(true);
+    expect(findings[0].severity).toBe('critical');
+  });
+});
+
+// A Python dependency is not recorded in any npm or pnpm lockfile, so the
+// finding about it must not name one: falling back to the delta's primary
+// lockfile named an unrelated package-lock.json for a pyproject requirement.
+describe('tamperCheck: a Python source finding names no npm lockfile', () => {
+  test('a Python git-source finding carries no lockfilePath', () => {
+    const change: DepChange = {
+      ...makeChange({
+        name: 'strict-no-cover',
+        kind: 'added',
+        protocol: 'git',
+        specifier: 'git+https://github.com/o/r.git@main',
+        manifestPath: 'pyproject.toml',
+      }),
+      python: true,
+    };
+    const findings = tamperCheck(
+      makeContext([change], { hasComparisonBase: false, lockfilePath: 'web-ui/package-lock.json' })
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].lockfilePath).toBeUndefined();
+  });
+
+  test('an npm git-source finding still names the lockfile', () => {
+    const changes = [makeChange({ name: 'dep', kind: 'added', protocol: 'git', specifier: 'github:o/r' })];
+    const findings = tamperCheck(makeContext(changes, { hasComparisonBase: false }));
+    expect(findings[0].lockfilePath).toBe('package-lock.json');
+  });
+});
+
 describe('tamperCheck: multi-signal', () => {
   // Three independent tamper signals can fire on one dependency at once
   // (a git-source swap that also lost its integrity hash and moved

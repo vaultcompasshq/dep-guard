@@ -122,6 +122,26 @@ describe('renderText: the names line', () => {
     expect(lines[summary + 1]).toMatch(/^names: /);
   });
 
+  // A Python manifest whose every requirement is a git, url or path one has
+  // no names to look up. "pypi 0 not checked for existence" read as though
+  // something had been skipped; the count is phrased the way npm's is.
+  test('no Python names to check, offline: phrased like npm, no zero-count clauses', () => {
+    const names = ecosystems();
+    names.pypi.manifests = 1;
+    names.pypi.excluded.vcs = 1;
+    expect(renderNamesLine(scanResult(OFFLINE, names))).toBe(
+      'names: npm 0 checked (corpus); pypi 0 checked (no PyPI names to check); 1 url, path or vcs requirement excluded'
+    );
+  });
+
+  test('no Python names to check, --online: no "0 of 0"', () => {
+    const names = ecosystems();
+    names.pypi.manifests = 1;
+    expect(renderNamesLine(scanResult(ONLINE, names))).toBe(
+      'names: npm 0 checked (corpus, registry); pypi 0 checked (no PyPI names to check)'
+    );
+  });
+
   test('no names line when no Python file was read', () => {
     expect(renderNamesLine(scanResult(OFFLINE))).toBeNull();
     expect(renderText(scanResult(OFFLINE))).not.toContain('names:');

@@ -116,7 +116,12 @@ any entry a decoy can hide behind, which is exactly how a repointed
 transitive tarball and a same-version decoy both used to scan clean. A fact
 reached by both walks is deduplicated on (manifest path, package name,
 signal) for tamper and confusion, so a tampered direct dependency is
-still one finding. install-script.ts dedupes on (manifest path, package
+still one finding. In tamper (and lockfile path, part of its key) a
+collision keeps the WORSE finding, never the first: higher severity, then
+the one not credited as a commit pin, so a pinned declaration above a
+branch declaration of the same dependency cannot hide it (`worseThan` in
+`checks/tamper.ts`; tests under `two declarations of one git dependency
+report the worse of the two`, dogfood-2026-10-18.test.ts). install-script.ts dedupes on (manifest path, package
 name) alone, without the signal -- deliberately, not an inconsistency.
 The rule can raise four signals in total across its branches: 'added',
 'flag-acquired', 'present' (raised instead of 'added'/'flag-acquired'
@@ -3919,6 +3924,24 @@ Residuals, recorded rather than closed:
 - A head-written lockfile entry that claims a private source the base
   already declares is skipped; only a Python lockfile tamper rule could
   judge whether it should have moved there.
+
+Python git pins, residuals recorded rather than closed (0.16.1):
+
+- Delta mode: a poetry or uv git table with a `rev` beside a `branch`
+  (already unpinned) that changes only the branch reports nothing, because
+  the specifier is built from the `rev` first and its text does not move.
+- Delta mode: in a uv multi-source list where every source is commit-pinned,
+  changing a later source's host reports nothing, because the rewrite uses
+  the first source's specifier.
+- An unchanged poetry git array with several marker items can report a
+  critical on every pull request: the delta indexes dependencies last-wins
+  under one key, so the two sides can compare different items.
+- The specifier shown for a dependency unpinned by the rev-beside-branch or
+  the several-items rule still reads `#<sha>`, which looks pinned; only the
+  severity and `commitPinned` say otherwise.
+- Needs a ruling: pip resolves a 40-hex `@` ref against same-named branches
+  and tags before treating it as a commit, so a branch or tag named like a
+  commit id is credited as a pin.
 
 ## Coverage is stated per ecosystem, and wording never moves an exit (0.14.0)
 
