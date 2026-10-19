@@ -51,7 +51,7 @@ const actionYml = action.text;
 const { extractRunScript, evaluateStepEnv, cwdForStep } = action;
 
 const DEFAULT_INPUTS = {
-  version: '0.15.0',
+  version: '0.16.0',
   path: '.',
   online: 'false',
   'fail-on': '',
@@ -354,7 +354,7 @@ describe('action.yml "Install dep-guard outside the workspace"', () => {
   test('installs the pinned version globally, and nothing else', () => {
     const run = runInstall();
     expect(run.status).toBe(0);
-    expect(run.record).toContain('argv=install -g --ignore-scripts @vaultcompass/dep-guard@0.15.0');
+    expect(run.record).toContain('argv=install -g --ignore-scripts @vaultcompass/dep-guard@0.16.0');
   });
 
   test('installs the version the input asked for, not a hardcoded one', () => {
@@ -823,12 +823,12 @@ function tagScannerPart(part) {
 }
 
 // The same step, with the tag's scanner constant advanced by one minor
-// version: the action as it will be the day a 0.16.0 scanner ships and this tag
+// version: the action as it will be the day a 0.17.0 scanner ships and this tag
 // starts shipping it.
 //
 // This is NOT here because the rule is invisible on the shipped file. It is
-// visible: nineteen scanners are published below the tag scanner (0.1.0 through
-// 0.14.0), and the first case in the block below drives the unmodified step with
+// visible: twenty scanners are published below the tag scanner (0.1.0 through
+// 0.15.0), and the first case in the block below drives the unmodified step with
 // `version: 0.5.9` and watches it refuse. The future constant exists to exercise the comparison
 // at a boundary the published set cannot reach today, one where the refused
 // version is itself in the 0.10.x family and so the minor leg of the
@@ -851,7 +851,7 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
   test('refuses a below-tag pin on a pull request, on the SHIPPED file', () => {
     // The rule is observable on the unmodified action, so this case proves it
     // there rather than on a future-constant copy. Scanners are published,
-    // 0.1.0 through 0.14.0, and this tag ships 0.15.0, so all of them sit below the tag scanner and every
+    // 0.1.0 through 0.15.0, and this tag ships 0.16.0, so all of them sit below the tag scanner and every
     // one clears the shape check. `0.5.9` stands in for that whole family: a
     // well-formed version, below the constant, refused.
     //
@@ -864,7 +864,7 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
     expect(refused.status).not.toBe(0);
     // Both numbers, for the same reason the npm floor names both.
     expect(refused.stdout).toContain('0.5.9');
-    expect(refused.stdout).toContain('0.15.0');
+    expect(refused.stdout).toContain('0.16.0');
     expect(refused.stdout).toContain('pull request');
     expect(refused.stdout).toContain('REMOVE the `version` input');
 
@@ -890,7 +890,7 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
     // that does not say which two values disagree sends the reader away to work
     // it out.
     expect(run.stdout).toContain('0.10.1');
-    expect(run.stdout).toContain('0.16.0');
+    expect(run.stdout).toContain('0.17.0');
     expect(run.stdout).toContain('pull request');
     // And the remedy, which is to stop pinning at all.
     expect(run.stdout).toContain('REMOVE the `version` input');
@@ -910,16 +910,16 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
   test('allows pinning forward on a pull request, and orders numerically', () => {
     // Pinning FORWARD stays allowed, on the rule's unenforced assumption that a
     // newer scanner is at least as strict; forward pins are not bounded.
-    // The future constant itself is `0.16.0` this cycle, and the shipped tag
-    // scanner is `0.15.0`: both are two-digit minors, which sort below a
+    // The future constant itself is `0.17.0` this cycle, and the shipped tag
+    // scanner is `0.16.0`: both are two-digit minors, which sort below a
     // single-digit minor like `0.9.0` as text despite being the larger
     // version. This forward-only test does not distinguish numeric from text
     // ordering on its own, since every value listed is above the constant either
     // way; the trap is caught by the shipped-file refusal case (0.5.9 against
-    // 0.15.0 must be refused, which a text comparison would allow, since
-    // "0.5.9" sorts above "0.15.0" as text).
+    // 0.16.0 must be refused, which a text comparison would allow, since
+    // "0.5.9" sorts above "0.16.0" as text).
     const future = scriptWithFutureTagScanner();
-    for (const ok of ['0.16.0', '0.16.1', '0.17.0', '1.0.0', '10.0.0']) {
+    for (const ok of ['0.17.0', '0.17.1', '0.18.0', '1.0.0', '10.0.0']) {
       expect([
         ok,
         runValidateScript(future, { version: ok }, { GITHUB_BASE_REF: 'main' }).status,
@@ -934,14 +934,15 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
     const shipped = `${tagScannerPart('MAJOR')}.${tagScannerPart('MINOR')}.${tagScannerPart('PATCH')}`;
     expect(runValidateWith({ version: shipped }, { GITHUB_BASE_REF: 'main' }).status).toBe(0);
     expect(runValidateWith({}, { GITHUB_BASE_REF: 'main' }).status).toBe(0);
-    // 0.11.0 is the withdrawn release, and 0.14.0 is the release this tag
+    // 0.11.0 is the withdrawn release, and 0.15.0 is the release this tag
     // replaces, so both sit below the tag scanner and are refused on a pull
     // request like any older pin.
     expect(runValidateWith({ version: '0.11.0' }, { GITHUB_BASE_REF: 'main' }).status).not.toBe(0);
     expect(runValidateWith({ version: '0.12.0' }, { GITHUB_BASE_REF: 'main' }).status).not.toBe(0);
     expect(runValidateWith({ version: '0.13.0' }, { GITHUB_BASE_REF: 'main' }).status).not.toBe(0);
     expect(runValidateWith({ version: '0.14.0' }, { GITHUB_BASE_REF: 'main' }).status).not.toBe(0);
-    for (const ok of ['0.15.0', '0.15.1', '1.0.0']) {
+    expect(runValidateWith({ version: '0.15.0' }, { GITHUB_BASE_REF: 'main' }).status).not.toBe(0);
+    for (const ok of ['0.16.0', '0.16.1', '1.0.0']) {
       expect([ok, runValidateWith({ version: ok }, { GITHUB_BASE_REF: 'main' }).status]).toEqual([
         ok,
         0,

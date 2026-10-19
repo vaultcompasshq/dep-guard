@@ -10,6 +10,8 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-19
+
 Targets 0.16.0, a minor: both changes below can turn a green run red,
 which the stability policy files under verdicts that may move in a minor.
 Design: `docs/design/2026-10-18-head-defined-projects-and-ignore-paths.md`.
