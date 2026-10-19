@@ -39,7 +39,7 @@ inputs:
       request is not the place to widen a pattern for the convenience of
       testing one.
     required: false
-    default: 0.16.0
+    default: 0.16.1
   path:
     description: |
       Path to scan, relative to the workspace root. Must be 1..256 characters
@@ -298,7 +298,7 @@ runs:
         # prose from a step.)
         DG_TAG_SCANNER_MAJOR=0
         DG_TAG_SCANNER_MINOR=16
-        DG_TAG_SCANNER_PATCH=0
+        DG_TAG_SCANNER_PATCH=1
         DG_TAG_SCANNER="${DG_TAG_SCANNER_MAJOR}.${DG_TAG_SCANNER_MINOR}.${DG_TAG_SCANNER_PATCH}"
 
         # GITHUB_BASE_REF being non-empty IS the pull-request test, and it is the

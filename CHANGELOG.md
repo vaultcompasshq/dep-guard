@@ -10,6 +10,8 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-19
+
 Fixes found by running dep-guard against public repositories. No verdict
 is loosened beyond what each entry states.
 
