@@ -80,6 +80,59 @@
       "sha": "d086db856be187255b8ec61ef409357393020f32",
       "expectLockfile": "none",
       "shape": "Python project with a pyproject.toml and a uv.lock and no npm lockfile at the root, so the Python manifest and lockfile surface has a baseline; the lockfile one-hot records JavaScript formats only and reads none here"
+    },
+    {
+      "repo": "wagtail/bakerydemo",
+      "url": "https://github.com/wagtail/bakerydemo.git",
+      "sha": "c9b38d7a7170dba8bb84254beb7e5dc5a955e024",
+      "expectLockfile": "npm",
+      "shape": "small Django project whose requirements/ directory chains files together with -r includes"
+    },
+    {
+      "repo": "openedx/credentials",
+      "url": "https://github.com/openedx/credentials.git",
+      "sha": "5988d6cba29b0cb6c65c89c226b01c4fa0838873",
+      "expectLockfile": "npm",
+      "shape": "Python requirements files with -r ../ and -c constraint chains, a real broken include, and tag-pinned git requirements"
+    },
+    {
+      "repo": "smithy-lang/smithy-python",
+      "url": "https://github.com/smithy-lang/smithy-python.git",
+      "sha": "1692e03f047504ee43859f18ddd3e5397c004d5a",
+      "expectLockfile": "none",
+      "shape": "small uv workspace whose members come from a packages/* pattern"
+    },
+    {
+      "repo": "pydantic/pydantic-ai",
+      "url": "https://github.com/pydantic/pydantic-ai.git",
+      "sha": "b86a877bcffd9aaa4b51e7f2e131eff65e23bc3a",
+      "expectLockfile": "npm",
+      "shape": "uv workspace with explicit members plus an npm subproject; pins the SHA-pinned PEP 508 git dependency fixed in 0.16.1"
+    },
+    {
+      "repo": "sveltejs/kit",
+      "url": "https://github.com/sveltejs/kit.git",
+      "sha": "dd2d9754840d013b882aa45c2019e68b84e6b1af",
+      "expectLockfile": "pnpm",
+      "shape": "pnpm workspace with real symlinks outside its workspace patterns"
+    },
+    {
+      "repo": "vercel/turborepo",
+      "url": "https://github.com/vercel/turborepo.git",
+      "sha": "d154e7e9268433823227c3c1ebbfd04748777356",
+      "expectLockfile": "npm",
+      "expectSkip": "lockfile-parse",
+      "skipNote": "Fixture lockfiles in the repository are npm v3 lockfiles with no packages map, which dep-guard reads at any depth and stops on as a lockfile parse error, so no bench config can clear it.",
+      "shape": "monorepo carrying many fixture lockfiles, one of which stops the scan"
+    },
+    {
+      "repo": "cookiecutter/cookiecutter-django",
+      "url": "https://github.com/cookiecutter/cookiecutter-django.git",
+      "sha": "33aca01e5a46c5cf8eb9e405ce133452ba387595",
+      "expectLockfile": "none",
+      "expectSkip": "manifest-parse",
+      "skipNote": "The template's pyproject.toml contains template syntax and is not valid TOML, so the scan stops with a manifest parse error (exit 2) beside the repository's lockfiles.",
+      "shape": "templated pyproject beside lockfiles; a manifest that cannot be parsed"
     }
   ]
 }
