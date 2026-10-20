@@ -26,8 +26,8 @@ dep-guard check some-package-name
 
 There is no setup step and no account. The package name corpus ships inside
 the core package, so a scan resolves it at a default path with no
-configuration; `--corpus-dir` exists only to point at a corpus you built
-yourself.
+configuration; `--corpus-dir <dir>` is an optional override for a corpus
+you built yourself, never required.
 
 The four things it does:
 
@@ -44,16 +44,22 @@ directory. `--staged` and `--base` cannot be combined. As a pre-commit hook,
 
 ## What it catches
 
-Six rules, all offline and deterministic. The engine runs the same six
+Six rules, all offline and deterministic, plus five optional checks that
+need `--online` (see "Online checks"). The engine runs the same six rules
 against a real diff and against the single name you hand `check`.
 
-- Unknown package: a new name that is absent from a corpus of real npm
-  package names. This is the hallucination signal.
+- Unknown package: a new npm name that is absent from a corpus of real npm
+  package names. This is the hallucination signal. No Python corpus ships,
+  so a new Python name is checked for existence only with `--online`,
+  against PyPI itself.
 - Typosquat: edit distance against a popularity list, plus transform rules
   that catch what distance alone misses -- separator swaps, scope
   flattening (`babel-core` standing in for `@babel/core`), repeated and
   omitted characters, keyboard adjacency, and a curated list of known
-  confusion pairs drawn from documented registry incidents.
+  confusion pairs drawn from documented registry incidents. For Python
+  names, offline typosquat compares a new name only with the other Python
+  names the repository itself declares; no list of popular PyPI projects
+  ships.
 - Install script: a dependency that gains the ability to run install
   scripts. Acquisition only, so bumping the version of a package that
   already ran them is not a finding; otherwise every `npm update` would be
@@ -156,31 +162,44 @@ its corpus is old; reading `corpusBuiltAt` is on you until it does.
 
 ## Online checks
 
-Two checks are off by default and stay that way: this tool reads manifests
+Five checks are off by default and stay that way: this tool reads manifests
 and lockfiles offline by design, and network latency does not belong in a
 pre-commit hook. Turn them on with `--online`, or with `"online": true` in
-the config file if every invocation should pay the cost. Both are backed by
-npm's public downloads and registry metadata APIs, and both degrade to the
-offline result with a diagnostic when the network fails rather than
-blocking.
+the config file if every invocation should pay the cost. Four are backed by
+npm's public downloads and registry metadata APIs and one by the PyPI JSON
+API. They share one per-run time budget (`--online-budget-ms`), and they
+degrade to the offline result with a diagnostic when the network fails
+rather than blocking.
 
-The first escalates a typosquat match from `low` to `high` once the
-candidate's own weekly downloads confirm it is a package nobody uses, not
-merely a smaller one with a similar name. The second reports a package
-published in the last thirty days with almost no downloads, which is the
-case a corpus snapshot structurally cannot catch: a name an attacker
-registers today is absorbed by a later corpus refresh and reads as known
-forever after. It has no resemblance filter to narrow its candidates, so it
-is deliberately conservative and reports below `high` -- a legitimately new
-package looks the same by age and downloads alone.
+- Unknown package resolution (npm): asks the registry whether a name the
+  offline corpus does not know exists. A name that exists is downgraded to
+  `low`; a 404 escalates the finding to `critical`.
+- PyPI existence (Python): looks up each new Python name on PyPI. A 404 is a
+  `critical` unknown-package finding. A name that cannot be checked is
+  reported as unchecked, never as a finding.
+- Typosquat popularity asymmetry (npm): escalates a typosquat match from
+  `low` to `high` once the candidate's own weekly downloads confirm it is a
+  package nobody uses, not merely a smaller one with a similar name.
+- Registered squat (npm): reports, at `medium`, a package published in the
+  last thirty days with almost no downloads. This is the case a corpus
+  snapshot structurally cannot catch: a name an attacker registers today is
+  absorbed by a later corpus refresh and reads as known forever after. It
+  has no resemblance filter, so it is deliberately conservative -- a
+  legitimately new package looks the same by age and downloads alone.
+- Minimum publish age (npm): reports, at `high`, a resolved lockfile
+  version published more recently than `minAgeDays` (default 7).
+
+Names covered by `internalScopes`, `internalPrefixes`, or a private registry
+in your `.npmrc` are never sent. The root README has the full rules.
 
 ## What it does not do
 
 dep-guard is narrow on purpose. It reads manifests and lockfiles at the
 moment they change, including `package.json`, npm and pnpm lockfiles,
-`requirements.txt` and `pyproject.toml` in subdirectories. Python package
-names are read but not checked against any registry or corpus; the name
-checks judge npm names only. It skips a stray manifest under installed,
+`requirements.txt` and `pyproject.toml` in subdirectories. Python names
+are read and, with `--online`, checked for existence on PyPI; offline they
+get only the typosquat comparison against the repository's own Python
+names, and no corpus of PyPI names exists. It skips a stray manifest under installed,
 build and vendored directories, unless a lockfile sits beside it or that
 install root's workspace patterns name it (never under node_modules), and
 paths git ignores. It does
@@ -203,7 +222,7 @@ need a real lockfile or a real specifier.
 
 ## Stability
 
-0.1.0 is the first published version. Exit codes, the fail-closed posture,
+dep-guard is pre-1.0. Exit codes, the fail-closed posture,
 and the fingerprint's shape hold across 0.x; the JSON shape, rule ids,
 signal strings, diagnostic codes, config keys, CLI flags, and the corpus
 format may each change in a 0.x minor, and any break is named in the release
