@@ -583,8 +583,8 @@ jobs:
     # here to smoke test: every command below installs
     # @vaultcompass/dep-guard at the version derived from the tag, and on
     # an action-only tag that version does not exist on the registry and
-    # never will. The job would wait out its registry polls (thirty per
-    # package, ten seconds apart) and then fail a release that did exactly
+    # never will. The job would wait out its registry polls (eighty per
+    # package, fifteen seconds apart) and then fail a release that did exactly
     # what it was supposed to.
     if: needs.release.outputs.action_only == 'false'
     runs-on: ubuntu-latest
@@ -626,17 +626,24 @@ jobs:
           # there is no checkout here to derive it from.
           for name in "@vaultcompass/dep-guard-core" "@vaultcompass/dep-guard"; do
             FOUND=0
-            for i in $(seq 1 30); do
+            # About 20 minutes (80 attempts, 15 seconds apart). The registry
+            # served the version metadata about 9 minutes after publish and
+            # the tarball about 15 minutes after on the 0.16.1 release, and
+            # "npm install" fetches the tarball, so both must be ready.
+            for i in $(seq 1 80); do
               if [[ "$(npm view "${name}@${VERSION}" version 2>/dev/null)" == "${VERSION}" ]]; then
-                echo "${name}@${VERSION} visible on registry."
-                FOUND=1
-                break
+                TARBALL="$(npm view "${name}@${VERSION}" dist.tarball 2>/dev/null || true)"
+                if [[ -n "${TARBALL}" ]] && curl -sfI -o /dev/null "${TARBALL}"; then
+                  echo "${name}@${VERSION} and its tarball visible on registry."
+                  FOUND=1
+                  break
+                fi
               fi
-              echo "Waiting for ${name}@${VERSION} on the npm registry (attempt ${i}/30)..."
-              sleep 10
+              echo "Waiting for ${name}@${VERSION} and its tarball on the npm registry (attempt ${i}/80)..."
+              sleep 15
             done
             if [[ "${FOUND}" -ne 1 ]]; then
-              echo "::error::Timed out waiting for ${name}@${VERSION} on the npm registry."
+              echo "::error::Timed out after about 20 minutes waiting for ${name}@${VERSION} and its tarball on the npm registry."
               exit 1
             fi
           done
