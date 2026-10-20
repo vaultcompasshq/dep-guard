@@ -110,7 +110,7 @@ jobs:
 
     - name: Run the guardrail gates
       id: conductor
-      uses: vaultcompasshq/conductor@bec2889c7a6a4befe5e948c8d0cdb926fc4ee912 # v0.13.1
+      uses: vaultcompasshq/conductor@f2fa77069594c4ae4e8df2561924fc4e6a94fac0 # v0.13.2
       with:
         dep-guard-version: 0.16.1
         output: conductor.sarif
