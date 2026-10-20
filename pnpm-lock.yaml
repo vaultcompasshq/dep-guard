@@ -22,8 +22,8 @@ importers:
         specifier: ^22.19.0
         version: 22.20.1
       '@vaultcompass/conductor':
-        specifier: 0.13.0
-        version: 0.13.0
+        specifier: 0.13.2
+        version: 0.13.2
       '@vaultcompass/dep-guard':
         specifier: 0.16.1
         version: 0.16.1
@@ -623,8 +623,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@vaultcompass/conductor@0.13.0':
-    resolution: {integrity: sha512-sKnLj5Yvq5izWXqsiVhu+h4/n8AuFvGQumDGVwkrRsD6dh4UEw6YlTyTkX84F7UUea/xJr/gbKcsbIK5a/Cteg==}
+  '@vaultcompass/conductor@0.13.2':
+    resolution: {integrity: sha512-1gmqrd96ZqRbZR+suxAqwq/WvH1hB4hO1uvbU/8kT9W9A0DbSqG7TJRedhnL1uAL5QYkHc/3rD9A4yWwQHxK8A==}
     engines: {node: '>=22'}
     hasBin: true
 
@@ -2251,7 +2251,7 @@ snapshots:
   '@unrs/resolver-binding-win32-x64-msvc@1.12.2':
     optional: true
 
-  '@vaultcompass/conductor@0.13.0':
+  '@vaultcompass/conductor@0.13.2':
     dependencies:
       ajv: 8.20.0
       commander: 12.1.0
