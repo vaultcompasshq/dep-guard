@@ -3,11 +3,10 @@
 This document says what a version number of dep-guard promises, what has
 to be true before a 1.0.0 exists, and how the one genuinely hard break --
 a fingerprint change after 1.0.0 -- would be handled if it ever became
-necessary. It describes intent. Nothing has been published to npm, there
-are no released versions, and there are no users yet; every promise below
-is a promise about how releases will behave once they exist, written down
-now because the cheapest time to decide a compatibility rule is before
-anyone depends on the thing it governs.
+necessary. It describes intent. dep-guard is published to npm and is still
+on a 0.x line; the promises below say how releases behave now and what has
+to be true before a 1.0.0, written down because the cheapest time to decide
+a compatibility rule is before more people depend on the thing it governs.
 
 The reason this file exists at all is that most of dep-guard's surface
 becomes a compatibility contract the moment anyone relies on it, and most

@@ -3,36 +3,27 @@
 Blocks risky dependencies at the moment they are added -- before install,
 before commit, before CI.
 
-<!-- guardrails-family: shared block, keep it identical in dep-guard, vault-guard, intent-guard and conductor -->
-The Vault & Compass guardrails are three gates over an AI-assisted coding
-session: [dep-guard](https://www.npmjs.com/package/@vaultcompass/dep-guard)
-checks what comes in (hallucinated package names, typosquats, tampered
-lockfile entries),
-[vault-guard](https://www.npmjs.com/package/@vaultcompass/vault-guard) checks
-what goes out (credentials about to be committed), and
-[intent-guard](https://www.npmjs.com/package/@vaultcompass/intent-guard)
-checks the change against what was approved (drift from a frozen intent
-contract, and change budgets). Each one installs, configures and runs on its
-own;
-[conductor](https://www.npmjs.com/package/@vaultcompass/conductor) is the
-optional umbrella that runs them from one policy file, one hook and one
-report, beside two scanners you install yourself:
-[gitleaks](https://github.com/gitleaks/gitleaks) for secrets anywhere in git
-history and [osv-scanner](https://github.com/google/osv-scanner) for known
-vulnerabilities. conductor scans nothing itself and installs nothing that
-is not its own.
-<!-- /guardrails-family -->
-
 ```bash
 npm install -g @vaultcompass/dep-guard
 ```
 
-**Status: published.** [`@vaultcompass/dep-guard`](https://www.npmjs.com/package/@vaultcompass/dep-guard)
-is on npm, covered by 1945 tests, and works out of the box: the package
-name corpus ships inside
+```bash
+dep-guard check <name>        # is this one name safe to add
+dep-guard scan --staged       # what this commit adds
+dep-guard scan --base main    # what this branch adds
+dep-guard init                # run the staged scan on every commit
+```
+
+[`@vaultcompass/dep-guard`](https://www.npmjs.com/package/@vaultcompass/dep-guard)
+is on npm and works out of the box: the package name corpus ships inside
 [`@vaultcompass/dep-guard-core`](https://www.npmjs.com/package/@vaultcompass/dep-guard-core),
 so a scan needs no `--corpus-dir` and no setup. Building your own corpus
 stays possible; see [Building a corpus](#building-a-corpus).
+
+**Stability.** dep-guard is 0.x. The exit codes and the fail-closed posture
+hold across 0.x; flags, config keys, rule ids and the JSON shape may change
+in a minor release, and the release notes name each break. See the
+[stability policy](docs/release/stability-policy.md).
 
 ## Why
 
@@ -40,17 +31,33 @@ Coding agents write dependency changes straight into `package.json` and
 lockfiles. Nobody runs `npm install` and reads the output any more, which
 removes the last human checkpoint that used to catch a bad name.
 
-Attackers noticed. Models hallucinate package names at a few percent, and
-roughly two in five hallucinated names repeat across identical prompts, so
-they are predictable enough to register in advance. In January 2026 a
-registered hallucinated name reached 237 repositories through
-agent-generated files, with automated fetches starting within days.
+Attackers noticed. A model asked for a library will sometimes name one that
+does not exist, and the same invented name can come back across prompts, so
+an attacker can register it in advance and wait for it to be installed. The
+attack is often called slopsquatting.
 
 The tools that gate installs sit after the point where this lands. dep-guard
 reads the dependency diff -- or answers a single proposed addition with
 `dep-guard check <name>` -- and scores it before anything is fetched.
 dep-guard ships no MCP server; an agent integration calls the CLI or the
 core library's `checkSingle`.
+
+Two open pull requests show it on a real repository: a dependency whose
+name does not exist on npm
+([conductor-proof#6](https://github.com/vaultcompasshq/conductor-proof/pull/6)),
+and a pull request that turns off its own checks first
+([#7](https://github.com/vaultcompasshq/conductor-proof/pull/7)).
+
+Each release is also scanned against a pinned public bench corpus: 17
+public repositories, each pinned to an exact commit
+([bench/repos.public.json](bench/repos.public.json)), with the result
+recorded in [bench/baseline.public.json](bench/baseline.public.json). Three
+of the 17 baseline entries stop with exit 2 on purpose: each of those
+repositories carries a fixture or template file the parsers cannot read (two
+unparseable lockfiles, one unparseable `pyproject.toml`), and a gate that
+cannot read its inputs is meant to fail closed rather than report clean. The
+baseline records those stops instead of dropping the rows. The bench is a
+regression check, not an accuracy score.
 
 ## What it checks
 
@@ -128,301 +135,12 @@ Lowering your own threshold to `low` or below re-enables them as blocking.
 This is exactly what `--online` now addresses: turned on, a non-alias-list
 match escalates from `low` to `high` once the candidate's own weekly
 downloads confirm it is genuinely unpopular, not merely smaller than an
-extremely popular target -- see below.
+extremely popular target -- see [Online checks](docs/online-checks.md).
 
 ## Online checks (`--online`)
 
-Off by default, permanently -- this tool reads manifests and lockfiles
-offline by design, and network calls do not belong in a hook or a
-propose-time `dep-guard check` that has to answer fast. Turn `--online` on for CI or a
-scheduled audit, where the latency cost is irrelevant. The flag turns them
-on for one run; `"online": true` in `.dep-guard.json` turns them on for
-every invocation, pre-commit hooks included, which is why a
-latency-sensitive setup is usually better off passing `--online` in CI
-alone.
-
-Five checks: four backed by npm's public downloads and registry metadata
-APIs, and one PyPI existence check against the PyPI JSON API. All of them
-degrade to the offline result with a diagnostic on any network failure
-rather than blocking, and all five share one per-run time budget. The four
-npm checks share one rule for which names may
-be put on the wire to the public registry at all: a name in your configured
-`internalScopes` or `internalPrefixes` is never sent, and neither is a name
-declared private by your own project `.npmrc` -- a scope pin, or the
-unscoped default registry when no pin applies to that scope. A pin decides
-by its **own origin**, not by merely existing, and always outranks the
-default registry: a scope pinned to the public registry is checked even
-under a private project default, and a scope pinned away from the public
-registry is skipped even under a public project default. A `.npmrc`-derived
-skip (a scope pin, or the default registry) is recorded as a diagnostic
-naming the package; an `internalScopes`/`internalPrefixes` skip is silent
-by design, not diagnosed -- a name your own committed config already lists
-needs no reminder that it was excluded.
-
-- **Unknown package resolution.** The offline unknown-package rule answers
-  from a corpus built on one dated registry walk, so every package
-  published after that walk reads as unknown to that release, forever.
-  `--online` asks the registry directly. If the name really exists, the
-  unknown-package finding is **downgraded to `low`** rather than removed:
-  `low` is below the default gate, so it stops blocking, but it stays in
-  the report so you can still see that dep-guard looked at the name and
-  what it concluded. That matters for one case in particular: a name
-  registered after the corpus walk but more than thirty days ago falls
-  outside registered-squat's age window, so this `low` finding is the only
-  thing dep-guard says about it. The downgrade asserts only that the name
-  exists; typosquat and registered-squat still judge whether it is
-  *suspicious*, which is the question that actually matters. If the
-  registry answers 404, the finding escalates from `high` to `critical`,
-  because the innocent explanation the offline message offers ("published
-  after that date") has just been ruled out. A 200 is not automatically
-  taken as existence: a name whose versions have all been unpublished, or
-  one npm has seized and replaced with a `0.0.1-security` placeholder,
-  keeps its `high` finding, since npm taking a name over is not evidence
-  the name is safe. Anything else -- a timeout, a server error, a spent
-  budget -- leaves the finding exactly as the offline scan made it, still
-  blocking, with the reason recorded in its `details`. A network failure
-  never means fewer or quieter findings. On a `--base` or `--trust-base`
-  run such a name is also unchecked, which exits 2 (see "A spent budget"
-  below), since a `high` finding alone passes `failOn: "critical"`.
-- **PyPI existence.** Every new Python name, from requirements files,
-  `pyproject.toml`, `Pipfile` and the poetry, uv, pdm and pipenv lockfiles,
-  is looked up once per run in its PEP 503 normalised form
-  (`Python_Dateutil` is the PyPI project `python-dateutil`). A 404 is a
-  `critical` unknown-package finding, the same severity an npm 404 earns:
-  the name is on no index the repository declares, so it is a hallucinated
-  or mistyped dependency, or a project PyPI has removed. A 2xx whose
-  project name matches is the only answer read as "exists", and it vouches
-  for nothing more than that a project of that name exists. Every other
-  answer -- a 3xx (never followed), a 5xx after one retry, a timeout, a
-  2xx describing another project or none, any other 4xx -- and a spent
-  budget leave the name unchecked, with a diagnostic and a count, and never
-  a finding; on a `--base` or `--trust-base` run an unchecked name exits 2
-  instead, unless `onlineUnchecked` is `"note"`. The lookup runs second,
-  after npm unknown-package resolution and before the three npm steps that
-  add or escalate; on a tight budget an
-  npm registered-squat or publish-age signal can be lost to PyPI lookups,
-  and that step's `online-deadline-exceeded` diagnostic says so. PyPI
-  existence is asked live and never cached. Which Python names are never
-  sent: a name a `pypi:` entry in `internalPrefixes` covers
-  (`"pypi:acme-"`); and every name in a manifest that declares a package
-  index other than PyPI (`--index-url`, `--extra-index-url`,
-  `--find-links`, `--no-index` in any spelling pip accepts, a non-explicit
-  poetry, uv or pdm source, a `Pipfile` source, a repository `uv.toml`),
-  or, for an explicit index, the names pinned to it. Those index
-  declarations are control inputs: on a `--trust-base` run they are read
-  from the trust base, and a head-side change is reported as a proposal
-  and does not take effect. A lockfile's own recorded source never skips an
-  entry by itself; it skips only when it equals an origin a manifest in the
-  same directory declares. The skip is a coverage gap, not a safety
-  property: `pypi-private-index-skipped` names each one, and for an index
-  pip or uv consults beside PyPI it says that a name not on PyPI is exposed
-  to dependency confusion and was not checked. A user-level `pip.conf`,
-  `PIP_INDEX_URL`, `UV_INDEX_URL` or a CI-level index setting is invisible
-  to this check; list such private names under `internalPrefixes` with the
-  `pypi:` prefix.
-- **Typosquat popularity asymmetry.** Escalates a non-alias-list typosquat
-  match from `low` to `high` when the candidate's own weekly downloads sit
-  below a measured floor of two thousand downloads in the last week --
-  confirming the match is not just a name that resembles something popular,
-  but a package genuinely nobody uses.
-- **Registered squat.** A new, `medium`-severity finding for a dependency
-  published within the last thirty days with fewer than fifty downloads in
-  the last week. This exists because the offline existence check reads a
-  corpus snapshot: a name registered by an attacker, then absorbed by a
-  later corpus refresh, reads as "known" forever afterward. This check has
-  no resemblance filter to narrow its candidates the way typosquat's does,
-  so it is deliberately conservative (both signals required, not either
-  alone) and reports below `high` -- it carries the same false-positive
-  risk the offline existence check has: a legitimately brand-new package
-  looks identical to a squat by age and downloads alone.
-
-- **Minimum publish age.** A `high`-severity finding for a resolved
-  dependency version published more recently than `minAgeDays` (default 7)
-  days ago, or with a future-dated publish timestamp at any floor including
-  `0`. Lets a repository align dep-guard's "too new to trust" judgment with
-  its own Dependabot minimum-release-age cooldown, rather than only ever
-  answering that question through registered-squat's hardcoded thirty-day
-  window, which exists to catch a squatted *name* rather than to express a
-  general age-acceptance policy. Reads the LOCKFILE's resolved versions,
-  not manifest ranges: in `--base` mode, every dependency whose resolved
-  version was added or changed in the diff; with no `--base`, every
-  resolved dependency in the lockfile, exactly as every other check reads
-  "added" with no earlier revision to compare against. A package the
-  registry does not know, or a version still missing from its publish-time
-  record after a live lookup, is left unflagged rather than guessed at --
-  the unknown-package check above is what says a name itself looks wrong --
-  but each case is recorded as a diagnostic rather than passed over in
-  silence, since this check's own candidates come from the lockfile, which
-  is mostly transitive entries no manifest ever names and unknown-package
-  never sees. `minAgeAllow` (an array of exact `name@version` strings) is a
-  reviewed exception for one specific release, never a standing exemption
-  for the name, and a config entry may not itself be a semver range. This
-  check applies the shared `.npmrc` rule above to the RESOLUTION as well as
-  the name, and the order matters: a scope pinned to a *private* registry
-  skips the entry unconditionally, whatever its resolvedUrl says (a
-  resolvedUrl that disagrees with a private pin is a pin *mismatch*, which
-  dependency confusion's own rule is what raises, not evidence this check
-  may proceed). Otherwise -- no pin, or a pin naming the public registry --
-  a resolvedUrl, when the lockfile entry has one, decides by its own origin
-  before anything else does; a public (or absent) pin never overrides a
-  resolvedUrl actually in hand. Only when the entry has no resolvedUrl at
-  all does the default registry decide, the same way a privately-pinned
-  scope is skipped. pnpm does not record which registry served an ordinary
-  resolution at all, so this is the ordinary shape of a pnpm lockfile entry:
-  when the project's default is private it is skipped; when none is set (or
-  it names the public registry), the entry is checked as public, since
-  nothing in the project's own configuration says otherwise -- a private
-  dependency's name is not put on the wire to a public service just to
-  price this heuristic.
-  A *user*-level `~/.npmrc` default registry, or an `npm_config_registry`
-  environment variable, is invisible to this check and to the rest of the
-  scan -- a repository relying on either of those instead of a project
-  `.npmrc` must list the private names under `internalScopes` or
-  `internalPrefixes`. The same gap applies to an npm lockfile written with
-  its own registry-resolved URLs omitted.
-
-A registry error in any of the five checks degrades to a diagnostic
-rather than a block, the design every check above already follows for its
-own network failure: it never turns an otherwise-clean scan's exit 0 into
-an exit 1 by itself. On a `--base` or `--trust-base` run the name it left
-unchecked is an exit 2 instead, as the next paragraph says.
-
-All four share one wall-clock budget per run, not per request. Once it is
-spent the remaining lookups are skipped, the affected findings keep exactly
-the result the offline checks gave them, and an `online-deadline-exceeded`
-diagnostic says how many were skipped. On a plain run (no `--base`, no
-`--trust-base`) a spent budget or an unreachable registry stays a
-diagnostic. On a run with `--base` or `--trust-base`, a candidate name left
-unchecked for either reason exits 2, listing the names with their step and
-reason in the report, on stderr and in `run.online.unchecked`, unless
-`onlineUnchecked` is `"note"` on the governing config (the trust base's on
-a `--trust-base` run). Only "it exists" or a 404 is a checked name. A name
-the `allow` list clears, a confirmed workspace sibling, an internal name,
-and a name sent to a private registry or index are never counted. The run
-still scans and the full report is printed; the exit is 2 because a
-pull-request run does not pass a name it could not check. Remedies: raise
-`onlineBudgetMs` on the base branch, set `"onlineUnchecked": "note"` there,
-or split the change. The umbrella (conductor) reads any gate's exit 2 as
-could-not-run, so its run is red too. Known open: publish-age skips a name
-whose resolved URL is not the public registry, and that URL is
-head-written; a foreign-host entry is a `high` lockfile-tamper finding, so
-it is not silent, but under `failOn: "critical"` that name passes with
-publish-age unchecked.
-
-The budget defaults to **20000ms (twenty seconds)** for a plain run: no
-`--base` and no `--trust-base` on the command line, whatever else is
-running it. That is the pre-commit hook shape, where a developer is
-waiting on the command to finish, and a repository adding twenty new names
-should not stall a commit for half a minute while every individual request
-stays comfortably inside its own timeout. It defaults to **300000ms (five
-minutes)** only when the command line actually carries `--base` or
-`--trust-base` -- not "in CI" more broadly. The GitHub Action below (see
-"In the Action") only ever adds either flag on a `pull_request` event: on
-a `push` or `schedule` run it passes neither, per its own `ARGS` assembly,
-so those runs get 20000ms too, the same as a bare `dep-guard check` in any
-job that never passes `--trust-base`. Where `--base`/`--trust-base` land is
-the pull-request-triggered run specifically, because that is the shape
-with minutes to spend and a large dependency change as the expensive
-failure mode, once its remaining lookups quietly keep their offline result
-after the hook-sized budget runs out. Either
-default can be overridden: the `onlineBudgetMs` key in `.dep-guard.json`
-sets it for every invocation (like `"online"` itself, only meaningful
-alongside it), and `--online-budget-ms <ms>` overrides both the key and the
-default for one run. An explicit config key or flag always wins over
-whichever default would otherwise apply.
-
-`--online-budget-ms` is a workflow-file decision, the same as `--online`
-and `--base` themselves: whatever value a job's own `dep-guard scan`
-invocation carries is what runs. On a **same-repository** pull request that
-value is only as trustworthy as the workflow file is, since that event runs
-the pull request's own copy of it -- see "Protecting the workflow file
-itself" below for what closes that gap (branch protection, not
-`--trust-base`), and why a fork pull request does not have the same
-exposure.
-
-`--no-online` overrides `"online": true` in the config, and the Action
-passes `--no-online` unless its `online` input is true. So on a `--base` or
-`--trust-base` run whose governing config (the trust base's, under
-`--trust-base`) says `"online": true` while the command line turns online
-off, every candidate name counts as unchecked with the reason
-`online-disabled`, and the run exits 2 under the same `onlineUnchecked`
-key. A base config with `online` false or absent is unchanged. An Action
-adopter whose base config says `"online": true` must set the Action's
-`online` input to true, or set `"onlineUnchecked": "note"` on the base
-branch.
-
-The run's JSON output always carries an `online` object under `run`,
-whether or not online checks ran, so a CI consumer (the conductor umbrella
-in particular) can read it unconditionally: `enabled`, the `budgetMs`
-actually used, `lookupsAttempted` and `cacheHits`, `lookupsSkippedByDeadline`
-(skipped lookups once the budget was spent, matching what the
-`online-deadline-exceeded` diagnostics already say -- the same name can be
-counted here more than once if two different online checks both had it
-queued when the budget ran out), and `deadlineExceeded`. Disabled online
-checks report `enabled: false` and every number at zero, never an absent
-field. Since 0.16.0 it also carries `unchecked`, `{ count, names: [{ name,
-ecosystem, step, reason, status? }] }` (sorted, uncapped), whenever online
-checks ran or the online-disabled rule above applied, at count zero too;
-`reason` is `budget`, `unreachable` or `online-disabled`.
-
-`lookupsAttempted` and `cacheHits` count the name lookups the online steps
-made: `lookupsAttempted` counts those sent to the registry, `cacheHits`
-those answered from the on-disk cache. A name is counted once per lookup,
-so one step can count a name twice (registered-squat looks up downloads and
-then the creation date) and several steps each count it again. A downloads
-lookup may batch many names into one request; these count the names, not
-the requests. `lookupsAttempted: 0` with `cacheHits: 5` is a warm cache;
-`0` and `0` is a run with nothing to look up. The text output prints both
-on its `online:` line.
-
-```json
-"online": {
-  "enabled": true,
-  "budgetMs": 300000,
-  "lookupsAttempted": 42,
-  "cacheHits": 8,
-  "lookupsSkippedByDeadline": 0,
-  "deadlineExceeded": false
-}
-```
-
-PyPI lookups count in the same totals. Beside `online`, `run.ecosystems`
-is always present and says, per ecosystem, how many new names were checked
-and how many were read but not checked and why (see "Ecosystem coverage"):
-
-```json
-"ecosystems": {
-  "npm":  { "manifests": 2, "candidates": 3, "checked": 3,
-            "notChecked": { "privateScope": 0 }, "lockfile": "read",
-            "notParsed": 0 },
-  "pypi": { "manifests": 2, "lockfiles": 1, "candidates": 7,
-            "requirements": 9, "pinned": 9, "notParsed": 0,
-            "existenceChecked": 5, "resemblanceChecked": 7,
-            "notChecked": { "offline": 0, "budget": 1, "unreachable": 1,
-                            "privateIndex": 0, "internal": 0,
-                            "lockfileUnreadable": 0 },
-            "excluded": { "url": 0, "vcs": 1, "path": 0, "editable": 0,
-                          "constraint": 0, "self": 0, "invalidName": 0,
-                          "unrecognised": 0 } },
-  "go":   { "files": 0 }
-}
-```
-
-`excluded` counts every Python requirement on the judged side that is not a
-name candidate, by why; `candidates` and the not-checked counts are new
-names after dedupe, one per normalised project name. `lockfileUnreadable`
-counts Python lockfiles that could not be read for names. `npm.lockfile` is
-`read`, `not-read` (a lockfile in a format dep-guard does not parse),
-`missing`, or `not-applicable` (the `check` command); `pypi.requirements`
-and `pypi.pinned` count named Python requirements and those pinned exactly;
-`npm.notParsed` and `pypi.notParsed` count manifests that did not parse and
-were skipped because `ignorePaths` covers them (`manifest-unparsed`);
-`go.files` counts `go.mod` and `go.sum` files.
-
-`--no-online` forces the online checks off for one run, overriding
-`"online": true` in `.dep-guard.json`. That is the flag to reach for in a
-pre-commit hook or an air-gapped build in a repository whose committed
-config turns them on.
+Online checks: see [docs/online-checks.md](docs/online-checks.md). Five
+optional checks, off by default.
 
 ## Installing the pre-commit hook (`dep-guard init`)
 
@@ -509,7 +227,7 @@ permissions:
   security-events: write
 
 steps:
-  - uses: actions/checkout@v5
+  - uses: actions/checkout@v7
     with:
       # Required on pull_request runs: pull-request mode reads the config
       # and the baseline from the base branch, which a shallow checkout
@@ -538,7 +256,8 @@ against, which is the other reason to leave the input out.
 Inputs: `path` (default `.`), `online` (`true`/`false`, default `false`),
 `fail-on` (`critical|high|medium|low|none`, unset means dep-guard's own
 default), plus `version` (an EXACT version, default the one the action
-shipped with), `trust-base` (see below), `sarif-output` (default
+shipped with), `trust-base` (see
+[Pull-request mode](docs/pull-request-mode.md)), `sarif-output` (default
 `dep-guard-results.sarif`), and `upload-sarif` (set `false` to write the
 file without uploading it, for a repository that does not have code
 scanning enabled).
@@ -551,8 +270,8 @@ Publish age (like the other three `--online` checks) needs `online: 'true'`
 set on the Action itself, not merely in `.dep-guard.json`: the Action's own
 `online` input defaults to `false` and, in that case, always appends
 `--no-online` to the scan command, which overrides a committed
-`"online": true` rather than merely leaving it alone (see "Online checks"
-above).
+`"online": true` rather than merely leaving it alone (see
+[Online checks](docs/online-checks.md)).
 
 ### Where the scanner comes from
 
@@ -648,259 +367,11 @@ not exist and the job would fail as could-not-run.
 
 ## Pull-request mode (`--trust-base`)
 
-**On a pull-request run dep-guard takes every control input from the base
-ref, and the head tree is the thing being judged.**
-
-Two discovery inputs are still read from the head, because reading them
-from the base would hide the very packages a pull request adds: the
-workspace patterns (which manifests are scanned) and the npm workspace
-siblings that are exempt from the name checks. A sibling is exempt only
-when the npm lockfile its directory installs from links it to a
-`package.json` of exactly that name in the head tree, in a directory the
-install root's `workspaces` field covers, and only for the manifests that
-lockfile covers. That `workspaces` field is read from the trust base
-wherever the base has it, so a pull request cannot widen it to cover a
-package it plants. A decoy lockfile, a link to nothing, or a link to a
-directory outside the workspaces exempts nothing
-(`workspace-link-unconfirmed` names each claim that failed and why). The
-same holds for which manifests the head installs: that cannot widen what
-the base's `ignorePaths` drops, so a pull request that wires an ignored
-directory into the install keeps its findings there (see "Configuration"
-below).
-
-Without that rule a pull request can turn the gate off in the same commit
-that carries what the gate exists to catch. `.dep-guard.json`,
-`.dep-guard.local.json`, `.dep-guard.baseline.json` and `.npmrc` all live
-in the tree under judgment, so one commit could add a hallucinated
-dependency and, in the same diff, add its name to `allow`, add its manifest
-to `ignorePaths`, raise `failOn` above the finding's severity, or write the
-finding's own fingerprint into the baseline. Every one of those exits 0
-today.
-
-`.npmrc` belongs on that list for a reason worth spelling out, because it
-is the one people miss: its scope-to-registry pins are the entire
-precondition of the dependency-confusion pin-mismatch rule, which fires
-only for a scope that *has* a pin. So a pull request that adds
-`@scope/package` resolving from the public registry **and deletes
-`.npmrc`** removes the rule rather than passing it.
-
-```
-dep-guard scan --base origin/main --trust-base origin/main
-```
-
-On a pull request, pass `--base` and `--trust-base` together. With both,
-the lockfile downgrade rule (see "Lockfile support" below) has to hold
-against the `--base` side and against the trust base. The entry-level
-checks (tamper, install script, the name checks) compare against the
-`--base` side. `--trust-base` on its own still judges the lockfile set
-against the trust base, but reports findings as an audit; with `--staged`,
-the lockfile set is compared with HEAD only.
-
-The config, the baseline and the `.npmrc` pins are read from `<ref>` with
-`git ls-tree` and `git show`. Nothing is checked out, nothing is written
-into the repository. A head-side change to any of them never takes effect
-for the run and is reported instead:
-
-```
-Pull-request mode: control inputs from origin/main
-  config changed in this pull request (proposed: allow some-package)
-  baseline changed in this pull request (1 baseline entries added)
-  npmrc changed in this pull request (proposed: unpin @scope)
-```
-
-The scope pins and the unscoped default registry (`registry=...`) are what
-is compared in `.npmrc`, not the file text, so a rotated auth token is not
-reported as an attempt to loosen the gate, but a changed default registry
-is: it is the one other line online checks read (see "Online checks"
-above), and a pull request editing only that line is reported as `npmrc
-changed in this pull request (proposed: default registry changed)`.
-
-Python package-index declarations (every index option in a requirements
-file, the poetry, uv and pdm sources, `Pipfile` sources, a repository
-`uv.toml`, and per-name mappings onto a named index) and a uv workspace
-root's `members` and `exclude` are control inputs too: each is read from the
-trust base copy of the same path, and a base copy that is a gitlink or does
-not parse stops the run (exit 2, `python-index-invalid`). A head-side change
-to the index declarations is reported as `python index changed in this pull
-request (requirements.txt)`. A head-side change to `members` or `exclude`
-has no proposal line of its own: the base copy's members decide the scope of
-every `[tool.uv.sources]` entry, and a name that only the head's wider
-`members` would bring into that scope is checked like any other, with a
-`python-workspace-unconfirmed` diagnostic saying so. A base copy that is a symlink does not stop a pull
-request that replaces the link with a regular file: the base then
-contributes no declarations for that file, so every name in it is looked up,
-and `python-index-unread-comparison-side` says so.
-
-A control input the head carries and the base does not reads `config added
-in this pull request`, and the run uses the defaults rather than the head's
-proposal. The allow counter keeps reporting what the *base* allow list
-cleared, so the two lines answer two different questions: what the approved
-config did, and what this change wanted instead.
-
-`--trust-base` is not `--base`, and neither implies the other. `--base`
-decides what the change is compared against; `--trust-base` decides by
-whose rules it is judged. They usually name the same ref in CI, because the
-base branch is both the state you diverged from and the state whose rules
-were approved, but either can be passed without the other. When
-`--trust-base` is present, an explicit `--base` that resolves to HEAD's own
-commit or tree is refused with exit 2 rather than silently comparing HEAD
-against itself and going quiet on every comparison-based signal; a bare
-`--base` with no `--trust-base` is unaffected, since comparing a dirty
-working tree against HEAD locally is legitimate.
-
-**Without a `--base`, every dependency reads as newly added**, because the
-scan has no earlier revision to compare against. That is not a special
-case of pull-request mode; it is the state of every scan that never passes
-`--base`, `--trust-base` included. The table below says which checks still
-run in that state, derived from what each check reads rather than guessed:
-
-| Check | No `--base` (every dependency reads as newly added) | With `--base` (real comparison) |
-| --- | --- | --- |
-| Unknown package | runs | runs |
-| Typosquat | runs | runs |
-| Install script | runs for every entry, reported at low, which does not block at the default fail-on | runs |
-| Lockfile tamper | does not run for comparison signals* | runs |
-| Version hygiene | runs | runs |
-| Dependency confusion | runs | runs |
-| Publish age (`--online` only)** | runs, over every resolved dependency in the lockfile | runs, over only the dependencies whose resolved version was added or changed |
-
-\* Lockfile tamper's resolved-URL, integrity, and source-host comparison
-signals need a lockfile entry on both sides of the change, so they are
-skipped with no earlier revision (`packages/core/src/delta.ts`, the
-`AUDIT_NO_TAMPER_COMPARISON` diagnostic around line 620). Its specifier-based
-git-source and url-source signals read the current manifest specifier only,
-not a comparison, and iterate `delta.changes`
-(`packages/core/src/checks/tamper.ts`, around line 911): with no earlier
-revision every dependency reads as a change, so they run over every
-dependency; with a `--base`, `computeDelta` skips a dependency whose
-specifier held and whose lock entry did not differ
-(`packages/core/src/delta.ts`, around lines 567-578), so they run only over
-added or changed dependencies there. A git source pinned to a full commit
-is reported at `low` rather than `critical` when there is no earlier
-revision, since the pin cannot be told apart from one that was already
-present (`sourceSwapReport`, around line 225).
-
-Install script is downgraded rather than skipped: with no earlier
-revision, `hasComparisonBase` is false, so a dependency that already runs
-install scripts cannot be told apart from one that just gained the
-ability. `present` is a *signal*, not a severity: the finding's severity
-drops from `high` to `low`, and the signal reported is `present` instead
-of `added` or `flag-acquired` (`packages/core/src/checks/install-script.ts`,
-`presenceReport` around line 109 and its callers around lines 200 and 267).
-The pnpm `onlyBuiltDependencies` branch (around line 300) makes the same
-severity drop on its own allowlist entries, reporting signal
-`only-built-added` as `present` instead. This is separate from pnpm's own
-install-script gap: `pnpm-lock.yaml` records no per-entry install-script
-flag at all, with or without `--base`, so its coverage is limited to
-`onlyBuiltDependencies` additions regardless (see
-[Lockfile support](#lockfile-support)). That limitation stays as
-documented; this table is about the comparison-based signals only.
-
-\*\* Publish age is one of the five `--online` checks (see "Online checks"
-above) and does not run at all without `--online` or `"online": true`,
-regardless of `--base`. When it does run, it reads `delta.lockEntryChanges`
-directly rather than `delta.changes`: with no earlier revision every
-resolved lockfile entry reads as added (the same rule every other row in
-this table follows), so every dependency in the lockfile is a candidate;
-with a `--base`, only a resolved version that was added or changed in the
-diff is (`packages/core/src/online/publish-age.ts`).
-
-The gate fails closed, exit 2, with nothing scanned, when the ref does not
-resolve, when it resolves to HEAD's own commit, and when it is a different
-commit carrying HEAD's tree. That last one is not a hypothetical: what
-GitHub publishes as `refs/pull/N/merge` is a merge commit whose tree, when
-the base has not moved since the fork, *is* the head branch's tree, so
-`--trust-base` pointed at the merge or head SHA would read every control
-input straight back out of the tree under judgment. Pass the base *branch*.
-
-`--format json` gains a `trustBase` block (`ref`, `proposals`,
-`configChanged`, `baselineChanged`, `npmrcChanged`, `configShapeChange`,
-`baselineShapeChange`, `npmrcShapeChange`, `projectPathsChanged`,
-`ignoredPathsMadeProjects`), and SARIF carries each proposal as a
-`toolExecutionNotification` rather than as a result, because a proposal is
-a fact about the run and not a finding about the code.
-
-Outside pull-request mode nothing changes. A pre-commit hook and a direct
-CLI run on your own checkout are already inside the trust boundary, so they
-never pass the flag and their output is byte for byte what it was. Two
-0.16.0 rules are the exception, applied to every `--base` and `--staged`
-run too so that a local run predicts the pull-request verdict: the
-`ignorePaths` rule in "Configuration" (which adds `N kept over
-ignorePaths` to the text summary of those runs), and, on a `--base` run
-only, the exit 2 for names left unchecked online.
-
-### In the Action
-
-The composite action passes the flag for you on a `pull_request` event, and
-on no other event, using `origin/$GITHUB_BASE_REF`. The only thing your
-workflow has to do is give `actions/checkout` `fetch-depth: 0`, because the
-base branch has to be present to be read. Set `trust-base` to a ref to
-point pull-request mode at a different base.
-
-There is deliberately **no value that turns pull-request mode off**, and
-`trust-base: off` is refused with an error rather than quietly ignored. An
-opt-out input would be settable by the pull request itself, for exactly the
-reason in the next section: on a same-repository `pull_request` event the
-workflow file runs from the pull request's own head. A knob the untrusted
-side can turn is not a boundary, so base-ref judging is the floor rather
-than a setting. If you need the old behaviour while you arrange
-`fetch-depth: 0`, stay pinned to `@v0.5.0` until you have arranged it.
-
-The action passes `--base` the same way, and separately from `trust-base`:
-on a `pull_request` event it appends `--base origin/$GITHUB_BASE_REF` by
-default, and on any other event it appends nothing by default, so a push
-run stays exactly what it was before this input existed. Set `base` to a
-ref to redirect comparison at a different base on a push, schedule, or
-workflow_dispatch run; the same `fetch-depth: 0` requirement, the same
-refusal of `off`, and the same charset rules apply as they do to
-`trust-base`. Unlike `trust-base`, `base` cannot be redirected on a
-`pull_request` event at all: an explicit value there is refused with an
-error, because a pull request could otherwise point comparison at its own
-head or branch and empty the delta the gate exists to see, so every
-`pull_request` run gets the default. An unresolvable ref exits 2 on any
-event. Without a `--base` -- a push, schedule, or workflow_dispatch run
-that has not set one -- the scan runs with no earlier revision to compare
-dependencies against and stays in audit mode; see the table above for
-exactly what that costs. A `pull_request` run always has one, since
-`GITHUB_BASE_REF` is always set on that event.
-
-### Protecting the workflow file itself
-
-One thing pull-request mode cannot do for you. On a **same-repository**
-`pull_request` event the workflow file runs from the pull request's own
-head, so a pull request can edit the workflow that runs the gate: delete
-the step, pin the action back to a version that had no pull-request mode,
-or drop `fetch-depth: 0`. Reading the control inputs from the base ref does
-not help against any of those, because by then the gate was either never
-invoked or never reached its own inputs.
-
-This is also the reason `trust-base` has no opt-out value. A workflow-level
-switch is reachable by a pull request on this event, so shipping one would
-have handed the attack a supported spelling instead of making it edit the
-workflow in ways a reviewer and a required check will notice.
-
-Close that in branch protection, not in this repository's files: make the
-dep-guard job a **required status check** on the protected branch, so a
-pull request that deletes it cannot merge, or call it through a **reusable
-workflow pinned to a ref on a protected branch**, so the pull request's own
-copy is not what runs. Pull requests from forks do not have this problem in
-the same way, since their workflow changes need approval to run at all.
-
-### Requiring a human approval
-
-Some teams want more than "the base ref decided": they want a person to
-have approved a config or baseline change before it takes effect. That is
-an add-on, and it belongs in **GitHub branch protection plus a CODEOWNERS
-entry** for `.dep-guard.json`, `.dep-guard.local.json` and
-`.dep-guard.baseline.json`, so a change to any of them needs a review from
-the named owners before it can land on the base branch.
-
-It is deliberately not a setting in `.dep-guard.json`. A mode selector that
-lives in the file a pull request controls is a knob a pull request flips to
-whichever mode is weaker; base-ref loading is the floor precisely because
-it is the one thing a pull request cannot write. An add-on that can only
-make the gate stricter is safe to offer, and this one lives where the pull
-request cannot reach it.
+Pull-request mode: see [docs/pull-request-mode.md](docs/pull-request-mode.md).
+On a pull-request run dep-guard takes every control input from the base ref,
+and the head tree is the thing being judged. The guide also covers the
+Action's handling of it, protecting the workflow file, and requiring a human
+approval.
 
 ## SARIF output (`--format sarif`)
 
@@ -923,7 +394,7 @@ The mapping, which is stable and shared across this family's gates:
 | `properties.severity` | dep-guard's own severity word, unflattened |
 | `properties.blocking` | whether this finding blocks at the run's threshold |
 | `properties.details` | the finding's `details` bag, verbatim |
-| `properties.ignoreOverride` | on a finding an `ignorePaths` entry matched and did not drop (see "Configuration"), the entries and how the change installs the path |
+| `properties.ignoreOverride` | on a finding an `ignorePaths` entry matched and did not drop (see [Configuration](docs/configuration.md)), the entries and how the change installs the path |
 | `partialFingerprints["dep-guard/v1"]` | the finding's existing fingerprint, unchanged |
 | `locations[].logicalLocations[]` | `kind: package`, `fullyQualifiedName` the package name |
 | `locations[].physicalLocation` | the manifest path, relative, under `%SRCROOT%`; omitted for `dep-guard check`, which has no file behind it |
@@ -941,14 +412,17 @@ indistinguishable from a real one once uploaded.
 ## Usage
 
 ```
-dep-guard scan --staged --corpus-dir <dir>     # what this commit adds
-dep-guard scan --base main --corpus-dir <dir>  # what this branch adds
-dep-guard scan --corpus-dir <dir>              # audit the whole tree
-dep-guard check <name> --corpus-dir <dir>      # is this one safe to add
-dep-guard init                                 # install the pre-commit hook
+dep-guard scan --staged     # what this commit adds
+dep-guard scan --base main  # what this branch adds
+dep-guard scan              # audit the whole tree
+dep-guard check <name>      # is this one safe to add
+dep-guard init              # install the pre-commit hook
 
 dep-guard scan --base origin/main --trust-base origin/main   # judging a pull request
 ```
+
+`--corpus-dir <dir>` is optional on every command: it points at a corpus you
+built yourself, and the shipped one is used by default.
 
 `--trust-base <ref>` is pull-request mode, on both `scan` and `check`: the
 config and the baseline come from `<ref>` rather than from the tree being
@@ -956,7 +430,7 @@ judged, and a head-side change to either is reported and ignored. The ref
 is also a comparison side for the lockfile set rule, and when it is a
 different tree from the `--base` ref its dependency state is read too. It
 is a different question from `--base`, which decides what the change is
-compared against. See the pull-request section above.
+compared against. See [Pull-request mode](docs/pull-request-mode.md).
 
 `--format json` prints a single result object on stdout with diagnostics on
 stderr, so a consumer can parse stdout alone. `--format sarif` does the
@@ -967,7 +441,8 @@ Exit codes are the contract: 0 clean, 1 findings at or above the threshold,
 2 something went wrong. A gate that cannot read its own
 inputs fails closed rather than reporting clean. Almost every exit 2 stops
 before a report exists. One does not: a `--base` or `--trust-base` run that
-left a candidate name unchecked online (see "Online checks") prints its
+left a candidate name unchecked online (see
+[Online checks](docs/online-checks.md)) prints its
 full report and still exits 2, with `run.couldNotRun` in the JSON and, in
 SARIF, `executionSuccessful: false` and one error notification in the
 single invocation.
@@ -977,104 +452,9 @@ Set the threshold with `--fail-on critical|high|medium|low|none`. Default is
 
 ## Configuration
 
-`.dep-guard.json` at the repo root, overlaid by an optional
-`.dep-guard.local.json`:
-
-```json
-{
-  "failOn": "medium",
-  "online": false,
-  "allow": ["some-package", "@acme/*", "pypi:some-python-project"],
-  "internalScopes": ["@acme"],
-  "internalPrefixes": ["acme-", "pypi:acme-"],
-  "extraAliases": { "unused-imports": ["eslint-plugin-unused-imports"] },
-  "ignorePaths": ["fixtures"],
-  "minAgeDays": 7,
-  "minAgeAllow": ["some-package@1.2.3"],
-  "onlineBudgetMs": 20000,
-  "onlineUnchecked": "fail",
-  "acknowledgedLockfiles": ["yarn.lock:3b18e512dba79e4c8300dd08aeb37f8e728b8dad"]
-}
-```
-
-Two things worth knowing before you use them. `allow` means "ignore this
-package everywhere" -- it silences every rule except lockfile tampering,
-which is a fact about where bytes come from rather than about the package.
-And `ignorePaths` drops findings before the gate sees them, so a pattern
-broad enough to match everything would switch the tool off; patterns made
-only of wildcards are rejected for that reason.
-
-`ignorePaths` drops findings only for paths nothing installs, or that the
-base branch already installs the same way. A change that wires an ignored
-path into the install -- a `file:`, `link:` or `portal:` dependency on it,
-a `workspaces` glob widened over it, a lockfile added beside it, a
-requirements file that includes it with `-r` or `-c` -- keeps its findings
-there, says so in an `ignore-path-project-kept` note, and under
-`--trust-base` is reported as a proposal, since the entry no longer covers
-an installed path. The comparison is the base's own: the trust base on a
-`--trust-base` run, otherwise the `--base` ref, or `HEAD` for `--staged`;
-an audit has none and drops as before. `lockfile-tamper` is never dropped
-on a path the base installs, including an entry that names a lockfile
-itself. The residual: a directory the base branch already installs under
-an ignored path keeps every other finding dropped, so any pull request can
-add a malicious dependency there and pass, with only the
-`ignore-path-dropped` note saying how many dropped findings were on
-installed projects. Which manifests count as projects is the list under
-"Lockfile support" below. Known open: `overrides` and `resolutions`
-`file:` targets, and Python path sources (`[tool.uv.sources]` path
-entries, poetry path dependencies, pip local paths and `-e`), are not
-project reasons, so a change that wires one in is not kept by this rule.
-
-`onlineUnchecked` decides what a `--base` or `--trust-base` run does with
-a candidate name no online step could check: `"fail"`, the default, exits
-2 listing the names; `"note"` keeps a diagnostic. It has no command-line
-flag, because an opt-out is a control, and under `--trust-base` it is read
-from the trust base like every other key.
-
-Python names take a `pypi:` prefix in `allow` and in `internalPrefixes`:
-`"pypi:reqeusts"` clears a Python finding for that project and
-`"pypi:acme-"` keeps every Python name starting `acme-` off the wire, both
-compared in PEP 503 normalised form (`pypi:Acme_` and `pypi:acme-` are the
-same prefix). A bare entry stays npm-only: existing lists were written and
-reviewed about npm names, and extending what a reviewed entry means to a
-second ecosystem would be a change nobody reviewed.
-
-`minAgeDays` and `minAgeAllow` configure the minimum-publish-age online
-check (see "Online checks" above); they have no
-effect without `--online` or `"online": true`. `minAgeDays` defaults to 7
-and accepts `0` (only future-dated publishes are refused). `minAgeAllow`
-takes exact `name@version` strings, never a bare name -- allowing a bare
-name would silence every future version of it too, the same much-bigger
-door `allow` is for, not a one-release exception.
-
-`onlineBudgetMs` sets the per-run online wall-clock budget (see "Online
-checks" above); it too has no effect without `--online` or `"online":
-true`. Unset, the budget defaults to 20000 for a plain run or 300000 for a
-`--base`/`--trust-base` run -- setting this key picks one number for every
-invocation regardless of shape, the same way `--online-budget-ms` picks one
-for a single run.
-
-`acknowledgedLockfiles` lets one reviewed lockfile change through the
-lockfile downgrade rule (see "Lockfile support" below). Each entry is
-`LOCKFILE:BLOBID`: a root lockfile name and the full lowercase git blob id
-of the exact bytes being acknowledged, so an entry never covers any other
-version of the file. The refusal message prints the entries to add. They
-are read only from the comparison side (the trust base, else the `--base`
-ref, else HEAD for `--staged`), so they land on the base branch first, in
-their own reviewed pull request. An acknowledgement affects that rule only:
-every finding and every check still applies, and a run that uses one says
-so in the `lockfile-downgrade-acknowledged` diagnostic. On a staged scan
-(the pre-commit hook) the entries are read from HEAD, so they are committed
-first, in a commit of their own. A lockfile path that is a symlink has no
-identity to acknowledge. dep-guard 0.10.0 and earlier refuse a config that
-contains this key, so it needs 0.10.1 or later.
-
-Every key here, the baseline file beside it, and the scope pins in
-`.npmrc`, are **control inputs**: they decide what dep-guard reports rather
-than what dep-guard is looking at. On a pull-request run they are read from
-the base ref, not from the branch under judgment, so a pull request cannot
-loosen the gate in the commit the gate is weighing. See the pull-request
-section above.
+Configuration: see [docs/configuration.md](docs/configuration.md). The
+`.dep-guard.json` keys, how `ignorePaths` and `allow` behave, and why every
+config key is read from the base ref on a pull request.
 
 ## Building a corpus
 
@@ -1132,297 +512,36 @@ result stands in for the other.
 
 ## Ecosystem coverage
 
-| Ecosystem | Files read | Name checks | Lockfile checks |
-|---|---|---|---|
-| npm | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` (`yarn.lock`, `bun.lock` noted, not parsed) | unknown-package against the shipped corpus, and the registry with `--online`; typosquat against the shipped popularity list; registered-squat and asymmetry with `--online` | tamper, install-script, publish-age (`--online`) |
-| Python (PyPI) | requirements files, `pyproject.toml`, `Pipfile`, `poetry.lock`, `uv.lock`, `pdm.lock`, `Pipfile.lock` | unknown-package with `--online` only (PyPI existence; no corpus ships); typosquat against the repository's own Python names only | none: Python lockfiles are read for names; their hashes and sources are not judged. A git or url requirement is a tamper git-source or url-source finding, as for npm. Requirements pinned exactly are not a lockfile dep-guard compares |
-| Go | none: `go.mod` and `go.sum` are not read by dep-guard | none | none |
-
-Every run that saw an ecosystem prints a `coverage:` block under the summary
-(and under the `names:` line when there is one): per ecosystem, read or not
-read, which checks ran, and which did not and why.
-
-    coverage:
-      npm: read, with a lockfile. Ran: unknown-package, typosquat, version-hygiene, dependency-confusion, lockfile-tamper, install-script. Did not run: registered-squat and publish-age (they need --online).
-      pypi: read (2 manifests, 0 lockfiles). Ran: typosquat against this repository's own Python names, tamper for git and url requirements. Did not run: unknown-package (it needs --online; no PyPI corpus ships), lockfile-tamper comparison and install-script (dep-guard reads npm and pnpm lockfiles only; Python lockfiles are read for names). All 9 requirements are pinned exactly; pinned requirements are not a lockfile dep-guard compares.
-      go: not read. go.mod and go.sum are not read by dep-guard (2 files seen).
-
-`lockfile-missing` is a note printed only for a `package.json` with no npm or
-pnpm lockfile; a Python or Go repository is described by the block above
-instead.
-
-Every run that read a Python file prints a `names:` line under its summary,
-and the JSON result carries the same counts under `run.ecosystems`:
-
-    names: npm 3 checked (corpus, registry); pypi 5 of 7 checked for existence (PyPI); 2 not checked: 1 online budget spent, 1 PyPI unreachable; resemblance checked against this repository's own Python names; 1 url, path or vcs requirement excluded
-
-An offline run with Python names also raises `pypi-names-not-checked`.
-
-Which Python files are read: `requirements.txt` and any `.txt` whose name
-starts with `requirements` or ends in `requirements.txt`
-(`requirements-dev.txt`, `dev-requirements.txt`), any `.txt` directly in a
-directory named `requirements`, `requirements.in`, every file a `-r` or
-`--requirement` line names (relative to the including file and resolved as
-the operating system opens it: each symlinked directory on the path is
-followed, and a `..` after one climbs out of the link's target; the result
-must stay inside the repository; a file that is itself a symlink is noted and
-not read, although pip would read it; at most eight includes deep, each file
-once), `pyproject.toml` (`project.dependencies` and optional dependencies,
-`build-system.requires`, `[dependency-groups]`, the poetry tables, the uv
-and pdm dev tables, `[tool.uv.sources]`), `Pipfile`, a repository `uv.toml`
-(index settings only), and the four Python lockfiles, read for names only.
-A file named by `-c` is read, and its names are counted as constraints,
-never checked: a constraint never installs a name by itself.
-
-How a requirements line is read follows pip: a `name @ url` reference or a
-line starting with a URL scheme pip accepts (`https:`, `http:`, `ftp:`,
-`file:`, `git+`, `svn`, `hg+`, `bzr+`, `ssh:`) is a url or git dependency,
-which the tamper check judges and the name checks exclude; then an archive
-(`.whl`, `.zip`, `.tar.gz` and the rest of pip's list, case-insensitively)
-or a path is excluded as `file`; `reqeusts.zip==1.0` is the PyPI project
-`reqeusts-zip`, because a version specifier makes it a name. Every option
-spelling pip accepts is read (`-r x`, `-rx`, `--requirement=x`, any unique
-abbreviation of a long option), and a line that is neither a dependency nor
-a recognised option, including one with an unexpanded `${VAR}`, is counted
-and named in `requirements-line-unread` rather than dropped. A requirements
-file that no pattern matches and no `-r` line reaches (one a workflow runs
-as `pip install -r deps.txt`) is not read.
-
-A `[tool.uv.sources]` entry applies only to the project that declares it
-and, from a uv workspace root, to that root's `members`, read from the
-trust base on a `--trust-base` run. As in uv, a project's own entry for a
-name takes precedence over its workspace root's. A `path` or `editable`
-source exempts a name only when its target is a project of that name this
-run parsed, or an archive that exists in the tree and whose file name
-carries that distribution name; a `workspace` source only when a member of
-that name exists. A `git` or `url` source
-makes the dependency a tamper subject. Even a confirmed exemption covers uv
-only: `pip install .`, `uv build --no-sources` and every consumer of a
-published package resolve the name from PyPI.
+Ecosystem coverage: see [docs/ecosystem-coverage.md](docs/ecosystem-coverage.md).
+npm and Python (PyPI) manifests and lockfiles are read; Go files are not.
 
 ## Lockfile support
 
-Coverage is honest per format rather than uniform. Where a format cannot
-answer a question, the scan says so in a diagnostic instead of staying
-quiet:
+Lockfile support: see [docs/lockfile-support.md](docs/lockfile-support.md).
+Coverage is stated per format, and where a format cannot answer a question
+the scan says so in a diagnostic.
 
-- `package-lock.json` and `npm-shrinkwrap.json` v2 and v3 -- full coverage.
-  The `packages` map is read whenever it exists, whatever `lockfileVersion`
-  says (npm installs from it either way). A file with no `packages` map at
-  all is a real v1 lockfile: it gets a diagnostic and no entries; a
-  `lockfileVersion` of 2 or 3, written as a number or as a string of digits,
-  with no `packages` map is a parse error (exit 2, `lockfile-parse`; clear it
-  by regenerating the lockfile with npm). That error is raised for the side
-  being judged; on a comparison side (HEAD for `--staged`, the `--base` ref,
-  the trust base) such a file is treated as a lockfile dep-guard does not
-  read, named in `lockfile-unread-comparison-side`, so the pull request that
-  regenerates it is judged as adding a new lockfile. Every finding's identity
-  (its package name) always comes from the lockfile key itself, or from a
-  manifest declaration -- never from a packages entry's own `name` field,
-  which is written by whoever committed the lockfile and is not something
-  dep-guard verifies at parse time. For a purely transitive `npm:` alias (one
-  only some other package's own dependency introduces, which no manifest
-  declares), the minimum-publish-age check still asks the registry about the
-  real package installed rather than the alias name, but only when the
-  entry's own resolved tarball URL vouches for that name; an unvouched name
-  is ignored for that lookup and reported in a diagnostic rather than
-  trusted or silently dropped. A registry that serves tarballs under a path
-  prefix, or that percent-encodes a scope as `%2f` in the name, will raise
-  that diagnostic for a perfectly genuine alias too -- expected noise for
-  such a registry, never a wrong finding, since the affected entry simply
-  falls back to being looked up under its lockfile key like any other.
-- `pnpm-lock.yaml` -- host, integrity, tarball and git-source checks for
-  every `lockfileVersion` from 5.x on (the slash-separated 5.x keys, the
-  6.x keys and the v9 keys). Install scripts are read from `requiresBuild`
-  in lockfiles older than v9; v9 stopped recording them, so for v9
-  additions to `onlyBuiltDependencies` are used instead. A file holding more
-  than one YAML document is read whole: the project document is what the
-  manifest walk reads, and every other document shaped like a pnpm lockfile
-  (pnpm writes one for its own managed version) is read and checked as a
-  lockfile of its own, named `pnpm-lock.yaml#package-manager` or
-  `pnpm-lock.yaml#document-N` in findings. A document that is not shaped
-  like a pnpm lockfile is not read: the file's bytes outside the documents
-  that are read are compared byte for byte, in order, with the base side,
-  and a change to them is the same exit 2 as a changed lockfile dep-guard
-  does not read (see below). pnpm records an ordinary
-  registry resolution as an integrity hash alone and writes a tarball URL
-  only when it is not the registry's standard one, so an entry with no URL
-  is compared as the default registry's tarball for its name and version
-  (the scope pin or default registry in `.npmrc` if there is one): an entry
-  that gains a URL on another host, or on another package's tarball, is a
-  finding. pnpm does not record which registry served a resolution, so a
-  registry configured somewhere dep-guard cannot see (a user-level
-  `~/.npmrc`, an environment variable) is not known to it. A transitive
-  `npm:` alias needs no special handling: pnpm's `packages` map is already
-  keyed by registry identity, not by whatever name a dependent's own alias
-  used to reach it.
-- A registry tarball that is not the package its entry names. For every
-  added or changed npm or pnpm entry resolved from a trusted registry host
-  (the public registries and every host the project `.npmrc` names), the
-  package the tarball path names has to be the package the entry is for,
-  whether or not the version moved: `ws` bumped to a new version and
-  resolved to another package's tarball on `registry.npmjs.org` is
-  `tarball-name-mismatch:<package>`, critical. A manifest-declared `npm:`
-  alias, an alias the entry already had before a bump, and a newly added
-  transitive alias npm records with both a matching `name` field and an
-  `npm:` alias edge in a dependent's entry are not mismatches; that alias
-  target is then name-checked. The
-  same package at another version in the tarball file name is
-  `tarball-version-mismatch` (high), and a URL on a trusted host whose path
-  has no tarball shape is `unparseable-tarball:<host>` (medium). A registry
-  mounted below a path is read past that path when `.npmrc` names it.
-- More than one lockfile in one directory -- every npm and pnpm lockfile
-  present is checked (`npm-shrinkwrap.json`, `package-lock.json`,
-  `pnpm-lock.yaml`), at the root and below it, and a `multiple-lockfiles`
-  diagnostic names them. Which one an install
-  honours depends on the package manager in use, so a clean file never
-  stands in for a tampered one. The run summary names the first lockfile
-  dep-guard reads. A `yarn.lock` or `bun.lock` beside them is not parsed;
-  on a run that is not refused for it (unchanged, acknowledged, or with no
-  comparison side) the `lockfile-unread-sibling` diagnostic names it.
-- No symlinked lockfile or manifest is parsed. On every side of a scan (the
-  index, a ref, the trust base, the working tree), a root lockfile dep-guard
-  parses, the root `package.json`, or a workspace member's `package.json`
-  that is a symlink is not read. A git side decides from the file mode, the
-  working tree with `lstat`; the link is never followed. On the side being
-  judged (the index under `--staged`, the working tree otherwise) the run is
-  exit 2 (`symlinked-input`) with a message naming the path: replace the
-  link with a regular file. On a comparison side (HEAD, the `--base` ref,
-  the trust base) the file is treated as absent there and the
-  `symlinked-input-comparison-side` diagnostic names it, so the pull request
-  that replaces the link is judged as adding a new file and passes when
-  that file is clean. In that pull request the checks that compare a lockfile
-  entry with its earlier resolution have no earlier resolution to compare
-  against for that file, so the note is printed and the lockfile in that pull
-  request should be reviewed by a person.
-- The lockfile downgrade rule. When the base side has a lockfile dep-guard
-  reads with at least one entry, the head side may not (a) carry a root
-  lockfile dep-guard does not read (a v1 npm file, yarn, bun, a binary
-  lockfile, or a lockfile name that is not a regular file, such as a
-  symlinked `yarn.lock`, which always counts as changed) whose bytes differ from the base, a new file
-  included, nor (b) lose every read lockfile with
-  entries while a manifest still declares a dependency a lockfile would
-  record, deleting the only lockfile included. An npm lockfile dep-guard
-  read on the base side may also never become one it does not read. A
-  violation is exit 2 (`lockfile-downgrade`), never a finding. Identity is
-  the git blob id, so a binary file changed in one byte still differs. For a
-  genuine migration: add the entries the error message prints to
-  `acknowledgedLockfiles` on the base branch first (see "Configuration");
-  or review the new lockfile by hand and merge with an admin override of
-  the failing check; or relax the gate on the base branch in a separate,
-  reviewed pull request (under conductor, `enforce: false` on the
-  dependencies gate in `.guardrails.yaml`; for the standalone action,
-  `continue-on-error` on the workflow step) and restore it afterwards. The
-  migration pull request cannot clear the rule for itself, and an advisory
-  mode does not help, because this is a could-not-run, not a finding.
-- Lockfiles below the repository root. npm and pnpm lockfiles are read
-  at any depth. A lockfile-tamper finding's `lockfilePath` is the file
-  whose entry changed; an install-script finding's is the scan's primary
-  lockfile, which in a repository with lockfiles in several directories can
-  be a different file. A finding for a declared dependency names a
-  manifest that declares it, which can be a manifest in another directory
-  that has no lockfile of its own. `package.json` and the Python files
-  listed under "Ecosystem coverage" below are read at any depth too; what
-  is checked for a Python name is in that table. A
-  `pyproject.toml` that only holds `[tool.*]` config has no dependencies;
-  that file alone does not make the scan a could-not-run when another
-  manifest or lockfile resolved. `pyproject.toml` is parsed as TOML, and
-  dependencies come from `project.dependencies`,
-  `project.optional-dependencies`, `[tool.poetry.dependencies]` and the
-  poetry group tables; a poetry `git` or `url` table is judged as a git or
-  url source. A file that does not parse stops the scan and names the
-  path, unless it is a stray that `ignorePaths` on the base covers (see
-  below for which manifests are projects), in which case it is skipped
-  with a note. Paths git ignores are not scanned. A directory
-  named `node_modules`, `.venv`, `venv`, `dist`, `build`, `vendor` or
-  `vendored` drops a manifest under it from the scan, and says so in
-  `manifest-skipped-dirname`, unless it is a workspace member, a manifest
-  with an npm-family lockfile (npm, pnpm, yarn, bun) in the same
-  directory, a member that install root's own workspace patterns name, or
-  the target of a `file:`, `link:` or `portal:` dependency or an npm
-  lockfile link; those, and any npm-family lockfile on such a path, are
-  scanned (their dependencies are read). A Python lockfile under such a
-  name is not read. A manifest under such a name that is a project
-  only through a Python lockfile beside it (`build/x/pyproject.toml` beside
-  `build/x/uv.lock`), or as a uv workspace member, is not scanned: it is
-  parsed only to decide whether it stops the scan, its dependencies are
-  not read, and the `manifest-skipped-dirname` note says so. Under
-  `node_modules` only lockfiles are read. Every other `package.json` git tracks
-  is read, test fixtures and templates included, so a fixture cannot hide
-  a dependency; an `ignorePaths` entry on the base branch is how one is
-  dropped. A manifest that does not parse stops the scan and names the
-  path. The one way to clear a broken fixture is an `ignorePaths` entry on
-  the base branch, which skips it with a `manifest-unparsed` note, and that
-  works only for a stray. The root `package.json`, a workspace member, a
-  manifest with a lockfile beside it (npm, pnpm, yarn, bun, `uv.lock`,
-  `poetry.lock`, `pdm.lock`, `Pipfile.lock`), one named by such a
-  directory's workspace patterns or by a uv workspace's `members`, and the
-  target of a `file:`, `link:` or `portal:` dependency or of an npm
-  lockfile link are projects, and stop the scan whatever `ignorePaths`
-  says. There is no default skip for a file that is not JSON, because bun
-  installs from some files that are not. A broken manifest on the base
-  branch with no entry stops every pull request against it until the base
-  is fixed. Every manifest that stops the scan is listed in one error, ten
-  at most, with its side and the reason, for example:
+## Part of the Vault & Compass guardrails
 
-      dep-guard: 2 manifests do not parse and stop the scan: packages/broken/package.json (judged side): not valid JSON; some package managers accept JSON with comments, trailing commas or text after the value, so this file may still install; a root workspace member is a project and stops the scan whatever ignorePaths says. | test/old/package.json (the --base ref "base"): not valid JSON; some package managers accept JSON with comments, trailing commas or text after the value, so this file may still install; fix the file on the base branch, or cover it with ignorePaths there. (manifest-parse)
-
-  `dep-guard scan <path>` reads dependencies and lockfile entries under
-  that directory and nothing above it. To decide which manifests under it
-  are projects, it also reads the root `package.json` and
-  `pnpm-workspace.yaml`, the manifests and workspace files beside every
-  lockfile, every `package.json` and every npm lockfile in the repository,
-  and reports nothing about them unless one cannot be read
-  (`classification-input-unread`); a lockfile in an ancestor directory is named in
-  `lockfile-outside-prefix` and not applied, so a full gate is a scan of
-  the repository root. Reported paths stay relative to the git root, and
-  config and the baseline are still read from the git root. Lockfile
-  coverage is judged per directory: a nested npm lockfile does not make a
-  root `yarn.lock` edit a downgrade, and deleting a nested lockfile whose
-  manifest still declares dependencies is one even when a root lockfile
-  remains; a nested lockfile present on the base and gone in the change
-  is named in `lockfile-nested-removed`. A lockfile this tool does not
-  read (yarn, bun, a v1 npm file) below the root is still not judged: one
-  whose bytes differ from the base is named in `lockfile-nested-changed`.
-  A path covered by `ignorePaths` (read from the base on a pull-request
-  run) drops findings under that path, and an unread lockfile there is
-  noted as `lockfile-nested-ignored` instead. `lockfile-not-read` names
-  every lockfile this tool does not read. Requirements files and the
-  `-r` and `-c` lines in them are read as "Ecosystem coverage" below
-  describes. `--staged`, `--base` and `--trust-base` compare each manifest
-  with the same path on the other side.
-- Workspace patterns -- a `workspaces` list in `package.json` is resolved
-  the way npm's own workspace mapper resolves it, checked against npm
-  10.9.8: patterns in order, a run of leading `!` negating when odd, one
-  leading `./` or `/` stripped, a later pattern cancelling an earlier
-  exclusion it matches, `*` in any segment and `**` at any depth, a
-  wildcard not matching a name that starts with `.`, and a backslash read
-  as a separator. The patterns in `pnpm-workspace.yaml` are resolved with
-  the same rules. When the repository's `core.ignorecase` is true, a
-  staged scan and the `--base` and trust-base refs match pattern segments
-  against directory names without regard to case, as npm does on a
-  case-insensitive file system. A pattern with a `..` segment or a drive
-  letter, or one that uses other glob syntax (`?`, `[...]`, `{...}`,
-  extglob groups) is exit 2 (`workspace-glob-unexpandable`), with a message
-  saying how to rewrite it; so is a `**` walk deeper than 32 directories,
-  cleared by listing the directories. That refusal is for the side being
-  judged; on a comparison side such a pattern names no workspace packages
-  there and is named in `workspace-pattern-unread-comparison-side`, so the
-  pull request that rewrites it is judged in full and passes when it is
-  clean. In that pull request the checks that compare a lockfile
-  entry with its earlier resolution have no earlier resolution to compare
-  against for that file, so the note is printed and the lockfile in that pull
-  request should be reviewed by a person. An exclusion that cannot be applied
-  exactly is not applied, which only ever widens the scan. Patterns reach
-  test fixtures and examples that are workspace members, and their findings
-  are reported like any other; an `ignorePaths` entry on the base branch
-  clears them.
-- `yarn.lock`, `bun.lock` -- manifest-level checks only. Neither records
-  install scripts, and yarn berry records no resolved URL. A transitive
-  alias in either format is therefore invisible the same way every other
-  transitive fact is: no lockfile entry is read at all for it, so nothing
-  is ever sent to an online check under the wrong name.
-- `bun.lockb` -- skipped. Undocumented binary format.
+<!-- guardrails-family: shared block, keep it identical in dep-guard, vault-guard, intent-guard and conductor -->
+The Vault & Compass guardrails are three gates over an AI-assisted coding
+session, plus an optional umbrella: [dep-guard](https://www.npmjs.com/package/@vaultcompass/dep-guard)
+checks what comes in (hallucinated package names, typosquats, tampered
+lockfile entries),
+[vault-guard](https://www.npmjs.com/package/@vaultcompass/vault-guard) checks
+what goes out (credentials about to be committed), and
+[intent-guard](https://www.npmjs.com/package/@vaultcompass/intent-guard)
+checks the change against what was approved (drift from a frozen intent
+contract, and change budgets). Each one installs, configures and runs on its
+own;
+[conductor](https://www.npmjs.com/package/@vaultcompass/conductor) is the
+optional umbrella that runs them from one policy file, one hook and one
+report, beside two scanners you install yourself:
+[gitleaks](https://github.com/gitleaks/gitleaks) for secrets anywhere in git
+history and [osv-scanner](https://github.com/google/osv-scanner) for known
+vulnerabilities. conductor scans nothing itself and installs nothing that
+is not its own.
+<!-- /guardrails-family -->
 
 ## Development
 
