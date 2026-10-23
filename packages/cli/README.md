@@ -8,9 +8,9 @@ with an exit code.
 The reason it exists: coding agents write dependency changes straight into
 manifests and lockfiles, and nobody reads install output any more, so the
 last human checkpoint that used to catch a wrong name is gone. Models
-hallucinate package names at a few percent, and the same hallucinated name
-recurs often enough across identical prompts to be worth registering in
-advance. The tools that gate installs run after the point where that lands.
+sometimes hallucinate package names, and the same hallucinated name can
+recur across prompts, which makes it worth an attacker registering in
+advance (the attack is sometimes called slopsquatting). The tools that gate installs run after the point where that lands.
 dep-guard reads the diff and scores it before anything is fetched.
 
 This package is the command line. The engine it wraps is
@@ -190,13 +190,15 @@ rather than blocking.
   version published more recently than `minAgeDays` (default 7).
 
 Names covered by `internalScopes`, `internalPrefixes`, or a private registry
-in your `.npmrc` are never sent. The root README has the full rules.
+in your `.npmrc` are never sent. The full rules are in
+[docs/online-checks.md](https://github.com/vaultcompasshq/dep-guard/blob/main/docs/online-checks.md).
 
 ## What it does not do
 
 dep-guard is narrow on purpose. It reads manifests and lockfiles at the
 moment they change, including `package.json`, npm and pnpm lockfiles,
-`requirements.txt` and `pyproject.toml` in subdirectories. Python names
+`requirements.txt` and `pyproject.toml` in subdirectories, and the poetry,
+uv, pdm and pipenv lockfiles (read for names only). Python names
 are read and, with `--online`, checked for existence on PyPI; offline they
 get only the typosquat comparison against the repository's own Python
 names, and no corpus of PyPI names exists. It skips a stray manifest under installed,
