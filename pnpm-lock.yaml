@@ -25,8 +25,8 @@ importers:
         specifier: 0.13.2
         version: 0.13.2
       '@vaultcompass/dep-guard':
-        specifier: 0.16.1
-        version: 0.16.1
+        specifier: 0.17.0
+        version: 0.17.0
       '@vaultcompass/intent-guard':
         specifier: 1.10.1
         version: 1.10.1
@@ -628,12 +628,12 @@ packages:
     engines: {node: '>=22'}
     hasBin: true
 
-  '@vaultcompass/dep-guard-core@0.16.1':
-    resolution: {integrity: sha512-HU0ezNVfi0jTfrRK55eA9WDPfSBT22mM3FPuY4uyPnL5+KOTej3uDWKfD/Z/DDuUDuKu567BNYMHS4GSFGYTdA==}
+  '@vaultcompass/dep-guard-core@0.17.0':
+    resolution: {integrity: sha512-jWU8EUK8Nm1XUfEVwBVEeqH5CyqNhS3Ij2zP9w4HwDUnPFuex15TUoEmZ+ga5dZ2v+/pmWLFwpcl47IFzOvjzQ==}
     engines: {node: '>=22'}
 
-  '@vaultcompass/dep-guard@0.16.1':
-    resolution: {integrity: sha512-XNBQMPexkf6/sqcnhrUNgcHF47EZfj9csbMRiqISyDbCtE6hHVZZI7GXhmAQheV+TKeiq7pZeRMxF9QTl+btaw==}
+  '@vaultcompass/dep-guard@0.17.0':
+    resolution: {integrity: sha512-w+rqMkz3zK0ZeTN0ET1XSmEsoDGhllIh2UhauoJY1rxa1YVsDmSle7mtJbPrrVhQsLVv3h+yN0lBtkhqQUf7Fw==}
     engines: {node: '>=22'}
     hasBin: true
 
@@ -2257,14 +2257,14 @@ snapshots:
       commander: 12.1.0
       yaml: 2.9.0
 
-  '@vaultcompass/dep-guard-core@0.16.1':
+  '@vaultcompass/dep-guard-core@0.17.0':
     dependencies:
       smol-toml: 1.9.0
       yaml: 2.9.0
 
-  '@vaultcompass/dep-guard@0.16.1':
+  '@vaultcompass/dep-guard@0.17.0':
     dependencies:
-      '@vaultcompass/dep-guard-core': 0.16.1
+      '@vaultcompass/dep-guard-core': 0.17.0
       commander: 12.1.0
 
   '@vaultcompass/intent-guard-core@1.10.1':
