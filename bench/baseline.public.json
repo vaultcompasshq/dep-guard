@@ -19,10 +19,10 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 45,
+          "total": 1159,
           "byRule": {
-            "unknown-package": 38,
-            "typosquat": 0,
+            "unknown-package": 1149,
+            "typosquat": 3,
             "install-script": 6,
             "lockfile-tamper": 0,
             "version-hygiene": 1,
@@ -33,9 +33,9 @@
           },
           "bySeverity": {
             "critical": 0,
-            "high": 38,
+            "high": 1149,
             "medium": 0,
-            "low": 7,
+            "low": 10,
             "other": 0
           }
         },
@@ -122,10 +122,10 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 214,
+          "total": 1250,
           "byRule": {
-            "unknown-package": 212,
-            "typosquat": 2,
+            "unknown-package": 1247,
+            "typosquat": 3,
             "install-script": 0,
             "lockfile-tamper": 0,
             "version-hygiene": 0,
@@ -136,9 +136,9 @@
           },
           "bySeverity": {
             "critical": 0,
-            "high": 212,
+            "high": 1247,
             "medium": 0,
-            "low": 2,
+            "low": 3,
             "other": 0
           }
         },
@@ -225,10 +225,10 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 56,
+          "total": 545,
           "byRule": {
-            "unknown-package": 54,
-            "typosquat": 1,
+            "unknown-package": 541,
+            "typosquat": 3,
             "install-script": 0,
             "lockfile-tamper": 0,
             "version-hygiene": 1,
@@ -239,9 +239,9 @@
           },
           "bySeverity": {
             "critical": 0,
-            "high": 54,
+            "high": 541,
             "medium": 1,
-            "low": 1,
+            "low": 3,
             "other": 0
           }
         },
@@ -953,10 +953,10 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 4,
+          "total": 181,
           "byRule": {
-            "unknown-package": 4,
-            "typosquat": 0,
+            "unknown-package": 180,
+            "typosquat": 1,
             "install-script": 0,
             "lockfile-tamper": 0,
             "version-hygiene": 0,
@@ -967,9 +967,9 @@
           },
           "bySeverity": {
             "critical": 0,
-            "high": 4,
+            "high": 180,
             "medium": 0,
-            "low": 0,
+            "low": 1,
             "other": 0
           }
         },
@@ -1056,10 +1056,10 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 49,
+          "total": 859,
           "byRule": {
-            "unknown-package": 34,
-            "typosquat": 0,
+            "unknown-package": 843,
+            "typosquat": 1,
             "install-script": 5,
             "lockfile-tamper": 10,
             "version-hygiene": 0,
@@ -1070,9 +1070,9 @@
           },
           "bySeverity": {
             "critical": 10,
-            "high": 34,
+            "high": 843,
             "medium": 0,
-            "low": 5,
+            "low": 6,
             "other": 0
           }
         },
@@ -1262,9 +1262,9 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 17,
+          "total": 126,
           "byRule": {
-            "unknown-package": 6,
+            "unknown-package": 115,
             "typosquat": 8,
             "install-script": 2,
             "lockfile-tamper": 1,
@@ -1276,7 +1276,7 @@
           },
           "bySeverity": {
             "critical": 0,
-            "high": 6,
+            "high": 115,
             "medium": 0,
             "low": 11,
             "other": 0
@@ -1365,10 +1365,10 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 30,
+          "total": 512,
           "byRule": {
-            "unknown-package": 30,
-            "typosquat": 0,
+            "unknown-package": 510,
+            "typosquat": 2,
             "install-script": 0,
             "lockfile-tamper": 0,
             "version-hygiene": 0,
@@ -1379,9 +1379,9 @@
           },
           "bySeverity": {
             "critical": 0,
-            "high": 30,
+            "high": 510,
             "medium": 0,
-            "low": 0,
+            "low": 2,
             "other": 0
           }
         },

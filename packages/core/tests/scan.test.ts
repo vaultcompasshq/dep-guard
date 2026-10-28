@@ -1589,6 +1589,9 @@ describe('a routine lockfile refresh files nothing', () => {
 // Reporting that as a blocking high per flagged package is how a first
 // sweep gets abandoned; the fact still gets reported, under the gate.
 describe('an audit sweep reports install scripts as a fact, not as a change', () => {
+  // The flagged entry is transitive, and since 0.17.0 an added entry no
+  // manifest declares is name-checked: its name has to be one the fixture
+  // corpus knows, or unknown-package would fail the run for another reason.
   test('a flagged dependency in an audited repo is a low, and does not fail the run', async () => {
     await write('package.json', manifestJson({ lodash: '^4.17.21' }));
     await write(
@@ -1596,10 +1599,10 @@ describe('an audit sweep reports install scripts as a fact, not as a change', ()
       npmLockJson(
         {
           'node_modules/lodash': CLEAN_LODASH,
-          'node_modules/esbuild': {
-            version: '0.21.0',
-            resolved: 'https://registry.npmjs.org/esbuild/-/esbuild-0.21.0.tgz',
-            integrity: 'sha512-esbuild',
+          'node_modules/nodemon': {
+            version: '3.1.0',
+            resolved: 'https://registry.npmjs.org/nodemon/-/nodemon-3.1.0.tgz',
+            integrity: 'sha512-nodemon',
             hasInstallScript: true,
           },
         },

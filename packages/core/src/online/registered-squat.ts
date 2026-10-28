@@ -84,7 +84,16 @@ export async function findRegisteredSquats(
   // never surfaces an internal name past in the first place -- this path is
   // genuinely reachable, so a skip here is a visible diagnostic naming the
   // package rather than a silent drop.
-  const candidates = newRegistryNames(ctx).filter(({ registryName }) => {
+  // A name only a wholly new lockfile records (or any lockfile-only name on
+  // a run with no comparison base) is judged by the offline name checks and
+  // not sent here: a fresh lockfile adds hundreds of transitive names, and
+  // putting them all on the wire would spend the online budget, which on a
+  // pull-request run turns into online-names-unchecked. A lockfile-only
+  // name a change adds to an existing lockfile is sent (NewName.freshLockfile).
+  const candidates = newRegistryNames(ctx).filter(({ registryName, freshLockfile }) => {
+    if (freshLockfile === true) {
+      return false;
+    }
     if (isInternalName(registryName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
       return false;
     }

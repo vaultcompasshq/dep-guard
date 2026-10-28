@@ -103,6 +103,9 @@ function entryFromPackageValue(
   if (value.hasInstallScript === true) {
     entry.hasInstallScript = true;
   }
+  if (value.inBundle === true) {
+    entry.inBundle = true;
+  }
   // npm writes this entry's OWN "name" field whenever the resolved
   // package's real name differs from the installed/alias name the key
   // resolves to (installedNameFromKey above) -- an npm: alias entry, most
