@@ -10,6 +10,61 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+Fixes from the 2026-10-27 cohesion audit. Each one can turn a green audit,
+commit or pull request red; none loosens a verdict.
+
+### Fixed
+
+- A local dependency whose target sits under a `node_modules` directory was
+  never read: `"helper": "file:tools/node_modules/helper"`, whose
+  `package.json` declares a known-malicious name, scanned clean in every
+  mode (`--base --trust-base` included) while npm 11 installs that name at
+  the root. The same held for `link:` and `portal:` targets, an npm
+  lockfile `"link": true` entry, and a `file:` target reached through a
+  symlinked directory. A target that a `file:`, `link:` or `portal:`
+  specifier or an npm lockfile link names explicitly is now read, and is a
+  project, wherever it sits: one that does not parse stops the scan, as
+  for any local target. Its own local dependencies are followed in turn.
+  A target that cannot be placed inside the repository stands in for
+  every `package.json`, now including those under `node_modules`; so does
+  a target that matches no listed manifest. A target spelled in another
+  case (`file:tools/NODE_MODULES/helper`, `file:Build/helper`), which npm
+  installs on a case-insensitive file system, is matched to its listed
+  path without regard to case. A repository that commits `node_modules`
+  may see new low findings: a fail-closed stand-in reads every committed
+  `node_modules` manifest (one review tree of 95 such manifests gave 12
+  lows). A committed `node_modules` package nothing names is still not
+  read; with no lockfile at all, npm installs the dependencies such a
+  package declares and dep-guard does not read them, which is recorded as
+  an open limit. The ruling this rested on, that nothing is installed from
+  inside `node_modules`, was false and is withdrawn (`docs/INVARIANTS.md`).
+- `workspace-link-unconfirmed` said `no package.json named "x" was found
+  at <dir>` for a target that was in the tree and simply not read. It now
+  says `this scan read no package.json named "x" at <dir>`.
+- `--staged` disagreed with `--base` for a workspace member that is a
+  symlink into a `node_modules` directory (`packages/a -> ../node_modules/evil`):
+  the pull-request scan caught the member's names and the commit hook
+  passed it. Both now read it, so the hook's verdict predicts the gate's.
+- An added npm or pnpm lockfile entry that no manifest declares was never
+  name-checked: a new `node_modules/<known-malicious name>` entry passed
+  with only `delta-new-lock-entries`. Every added entry no manifest
+  declares that installs from a registry is now judged by unknown-package
+  and typosquat, anchored on its lockfile, as Python lockfile names
+  already were. A changed entry, a declared one, an accepted transitive
+  alias (its target is judged instead), and a git, file or directory
+  resolution are not. An npm or pnpm entry whose version is a registry
+  tarball URL is judged like any other. With `--online`, registered-squat
+  judges these names too, except from a lockfile that is wholly new in the
+  change (or on a run with no comparison side), so a fresh lockfile does
+  not spend the online budget. An unknown entry npm marks `inBundle` is
+  worded as shipped inside its parent's tarball, not as possibly
+  hallucinated. Offline, a transitive name published after the corpus was
+  built is now an unknown-package high, as a declared one always was. On the public bench with the shipped corpus this added
+  five low typosquat findings (four in vitejs/vite, one in sveltejs/kit),
+  all on transitive names that resemble a popular one, and no
+  unknown-package finding. An audit run scans every entry as added, so
+  expect more low typosquat findings there than on a pull request.
+
 ## [0.16.1] - 2026-10-19
 
 Fixes found by running dep-guard against public repositories. No verdict

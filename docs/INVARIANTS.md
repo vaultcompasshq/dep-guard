@@ -1271,8 +1271,12 @@ a manifest with an npm-family lockfile in the same directory, a
 `package.json` the workspace patterns of such an install root name, the
 target of a `file:`, `link:` or `portal:` dependency or of an npm lockfile
 link entry, and an npm-family lockfile at any depth are read whatever
-directory names are on their path, except that nothing under
-`node_modules` is promoted this way. A Python lockfile under a skipped
+directory names are on their path. Under `node_modules` only the
+explicitly named ones are promoted: a local target or lockfile link
+target, and a member reached through a symlinked workspace path outside
+`node_modules`; a lockfile beside a manifest or a workspace pattern does
+not promote anything there (0.17.0, "A target under node_modules is
+read", below). A Python lockfile under a skipped
 directory name is not read, though it still makes the manifest beside it a
 project (below), and that manifest is parsed only to decide whether it
 stops the scan; its dependencies are not read.
@@ -1310,7 +1314,11 @@ Manifests that do not parse (0.15.0; design
   `pyproject.toml` beside `uv.lock`; or the target of a `file:`, `link:` or
   `portal:` specifier or of a `"link": true` npm lockfile entry. pnpm
   `importers` and `yarn.lock` workspace entries are not inputs. Nothing
-  under `node_modules` is a project this way. Every input is subject
+  under `node_modules` is a project as a root, a member, an install root
+  or its member, or beside a lockfile; a local target or lockfile link
+  target there, and a member a symlinked workspace path outside
+  `node_modules` lands on there, is (0.17.0, "A target under node_modules
+  is read", below). Every input is subject
   content and can only add a project path (`classifySide`, `git-source.ts`);
   a negation inside one input (a `!` workspace pattern) removes only a path
   that input alone would add, never one another input adds, since each
@@ -3779,9 +3787,19 @@ there that is neither an install root nor one of its members, and no
 repository-root workspace pattern names, is dropped, and
 `manifest-skipped-dirname` says so without promising lockfile coverage.
 
-`node_modules` is the exception, by ruling: nothing is installed from
-inside it, so a committed `node_modules` package that ships a lockfile is
-not promoted, and that lockfile is still read while its manifest is not.
+`node_modules` is the exception for a manifest nothing names: a committed
+`node_modules` package that ships a lockfile is not promoted, and that
+lockfile is still read while its manifest is not.
+
+WITHDRAWN 2026-10-27: this exception used to rest on the ruling "nothing
+is installed from inside it", and that premise is false. npm 11 installs
+the dependencies of `"helper": "file:tools/node_modules/helper"` at the
+root (audit 2026-10-27, M1, verified with a real `npm install
+--ignore-scripts`), so a manifest a `file:`, `link:` or `portal:`
+specifier, an npm lockfile link entry, or a symlinked workspace member
+names explicitly is installed wherever it sits, and is read since 0.17.0.
+The exception now covers only what sits under `node_modules` unnamed. See
+"A target under node_modules is read (0.17.0)".
 
 The two sentences an earlier version of this entry ended with were both
 false, and an independent review showed it: "no lockfile is ever read while
@@ -4157,7 +4175,10 @@ the base's entry erased its findings, exit 0, "no control input changed".
     listed member covers link/sub, the path a package manager sees, and
     gets that member's position and promotion. Its reason's pattern is
     `["symlinked-member", link/sub, covering pattern or null, ...every link
-    read on the way]`, so a widened pattern (a path newly covered has no
+    read on the way]`. Since 0.17.0 R may be under `node_modules` and the
+    member is still marked (link/sub, the path checked against coverage,
+    never is), so `--staged` reads `packages/a -> ../node_modules/evil` as
+    `--base` always did; so a widened pattern (a path newly covered has no
     reason on the base), a changed inexact pattern text, a retargeted link
     or the same manifest reached through another link path is a new reason,
     and an unchanged repository records identical reasons and is excused;
@@ -4658,3 +4679,186 @@ second guard with no distinguishable behaviour. The workspace-local half of
 exclusion lives in the steps' own candidate filters (`candidates.ts`,
 publish-age's `workspaceLocalNames`), which the offline checks share, so a
 mutation there moves offline findings too.
+
+## A target under node_modules is read (0.17.0)
+
+Audit 2026-10-27, M1 (merge-blocking), S1 and N5. Pre-existing since at
+least 0.15.0, not a 0.16 regression.
+
+- **A target an input names explicitly is read wherever it sits.** The
+  package.json of the directory a `file:`, `link:` or `portal:` specifier
+  (or a bare local path) resolves to, and of the resolved directory of an
+  npm lockfile `"link": true` entry, followed through symlinked
+  directories, is a project with its rule-5 position and promotion even
+  under `node_modules` (`mark(..., named)` in `classifySide`,
+  `git-source.ts`). It is read for names, and one that does not parse
+  stops the scan whatever `ignorePaths` says. Before, `mark` returned for
+  any path with a `node_modules` segment, so `"helper":
+  "file:tools/node_modules/helper"` declaring a known-malicious name
+  exited 0 in every mode while npm 11 installed that name at the root.
+- **A target is matched against the listed manifests, and one that
+  matches none fails closed (fix round 2).** The resolved target's
+  package.json is taken exactly when it is listed, else without regard to
+  case when exactly one listed package.json matches that way
+  (`listedManifestFor`): npm on a case-insensitive file system (macOS)
+  installs `file:tools/NODE_MODULES/helper` and `file:Build/helper` from
+  `tools/node_modules/helper` and `build/helper`. A target that matches no
+  listed manifest, or several that differ only in case, fails closed as an
+  unplaceable target does (next bullet but one). Before, the reason went
+  on a path nothing lists, nothing was read, and the case-folded spelling
+  exited 0 with no note. Judgment call: a case-insensitive match always,
+  not only when git's `core.ignorecase` is set, because the install that
+  matters may run on another machine; and the fail-closed stand-in rather
+  than could-not-run for a target that matches nothing, because a target
+  missing from the listing (an untracked build output, say) is a stand-in
+  read, not a reason to refuse the run.
+- **Its own local specifiers are followed.** A package.json under
+  `node_modules` that a target, a symlinked member or a stand-in promotes
+  is read and parsed as a classification input once, and its `file:`,
+  `link:`, `portal:` and bare-path dependencies are marked in turn, until
+  no new one is promoted. A package.json outside `node_modules` was always
+  followed this way, project or not.
+- **A target that cannot be placed stands in under `node_modules` too.**
+  A rule-5 target that leaves the repository (including one that comes
+  back in through the checkout directory's own name) puts its reason and
+  its stand-in on every listed package.json, now including those under
+  `node_modules`; so does a symlinked workspace member walk that fails
+  closed (a link it cannot place, a cycle, either visit limit), and a
+  target that matches no listed manifest. In a repository that commits
+  `node_modules`, that reads every committed `node_modules` manifest (a
+  reviewer saw 12 low findings on a 95-manifest tree). The
+  subdirectory read gate's stand-in (`standsInForPrefix`) still covers
+  nothing under `node_modules`, as `SD1n` pins.
+- **A symlinked member whose real directory is under `node_modules` is a
+  member (S1).** The npm member walk's candidates are every listed
+  package.json, so a member link `packages/a -> ../node_modules/evil`
+  marks `node_modules/evil/package.json` on a git side (`--staged`, a
+  ref) as the working tree's walk always did. The coverage test is on the
+  path the package manager sees, which never contains `node_modules`.
+- **What stays unread.** A committed `node_modules` package nothing names
+  is not a project: not as a root, a member, an install root, its member,
+  or beside a lockfile, and a workspace pattern never expands into
+  `node_modules`. Its manifest is not read for names.
+  OPEN LIMIT (recorded 2026-10-27, not fixed): with NO lockfile, a
+  force-added `node_modules/x/package.json` with an extra dependency IS
+  installed by `npm install` (verified with real npm by the independent
+  review of 0.17.0), and dep-guard does not read it. With a lockfile, npm installs what the
+  lockfile records, and the lockfile's entries are name-checked (below).
+- **The note says what the scan did.** `workspace-link-unconfirmed` says
+  `this scan read no package.json named "x" at <dir>`, not "was found":
+  the old wording claimed a file in the tree was absent.
+- **An added lockfile entry no manifest declares is name-checked (N5).**
+  `undeclaredLockEntryNames` (`checks/candidates.ts`) adds every ADDED npm
+  or pnpm lock entry change that is not declared, not an accepted
+  transitive alias, and installs from a registry (no resolved URL, or one
+  whose `resolutionKindOf` is `registry`) to the npm name candidates as an
+  added registry dependency named by the lockfile key and anchored on the
+  lockfile. The only entry skipped by its version text is a pnpm one with
+  no tarball whose version starts `file:`, `link:`, `portal:` or
+  `workspace:` (a local directory). Fix round B1, merge-blocking: the
+  first version skipped every version containing `:`, for npm too, and
+  npm records a dependency asked for by tarball URL with the URL as its
+  `version` and installs it (`npm ci --ignore-scripts` installed
+  `crossenv` that way while the scan exited 0 in every mode); a pnpm key
+  with a URL version and a registry tarball had the same hole. existence
+  and typosquat judge every such name. The online registered-squat step
+  judges it too, except a name from a lockfile that is wholly new in this
+  change (`DependencyDelta.whollyNewLockfiles`, per lockfile, the
+  `isWhollyNewLockfile` test) or from any lockfile on a run with no
+  comparison base (`NewName.freshLockfile`): a fresh lockfile adds
+  hundreds of transitive names and would spend the online budget a
+  pull-request run then refuses on. Fix round 1: the first version skipped
+  every lockfile-only name, so a fresh two-download name reached only
+  through a lockfile edge exited 0 under `--online --base --trust-base`
+  while the same name declared in the manifest exited 1. An entry npm
+  marks `inBundle` ships inside its parent's tarball; an unknown one is
+  still a high unknown-package finding, worded as bundled rather than
+  "may be hallucinated" (`LockEntry.inBundle`, `DepChange.bundled`,
+  `checks/existence.ts`). Offline, a transitive name published after the
+  corpus was built is an unknown-package high, as a declared one always
+  was. A changed entry is not re-checked, as a changed manifest
+  dependency is not. On the
+  public bench with the 0.16.1 shipped corpus this added five low
+  typosquat findings (vitejs/vite: `@yuku-codegen/binding-linux-arm-gnu`,
+  `@yuku-parser/binding-linux-arm-gnu`, `markdown-title`, `millify`;
+  sveltejs/kit: `semiver`) and no unknown-package finding; with the
+  fifty-three-name fixture corpus the bench baseline moved by about a
+  thousand unknown-package findings per large repository, which is that
+  corpus's size, not the rule (F14).
+
+Tests (`audit-2026-10-27.test.ts`, each in plain, `--base`, `--base
+--trust-base`, `--staged` and `--staged --trust-base` unless named):
+`M1 file:tools/node_modules/helper, the lockfile records no entry for the
+name`, `M1b the same with the lockfile npm 11 writes, and no false "was
+found" note`, `M1 pnpm link:tools/node_modules/helper`, `M1
+portal:tools/node_modules/helper`, `M1 file: through a symlinked directory
+into tools/node_modules/helper`, `M1 file:node_modules/helper at the root`,
+`M1 an npm lockfile link entry alone names the target`, `M1n a link entry
+whose target was not read says the scan read none there` (base, staged),
+`M1 a chain of file: targets under node_modules is followed to its end`,
+`M1 an unplaceable target stands in for a manifest under node_modules
+too`, `M1p an explicitly named target under node_modules that does not
+parse stops the scan` (audit, base, staged), control `M1c a committed
+node_modules manifest no reference names is still not read`; `S1 packages/a
+-> ../node_modules/evil`, `S1 packages/b -> ../tools/node_modules/evil`,
+`S1 an unplaceable member link stands in for a manifest under node_modules
+too` (the four delta modes); `N5 a new node_modules/lodahs registry entry in
+package-lock.json`, `N5 a nested node_modules/x/node_modules/lodahs entry
+with no resolved field`, `N5 a new lodahs entry in pnpm-lock.yaml`,
+controls `N5c an entry that is not a new registry name is not
+name-checked`, `N5c a pnpm directory dependency entry is not
+name-checked`, `N5a an accepted transitive alias is judged by its target,
+not its key`, `N5 a declared entry is still anchored on its manifest,
+once`, `N5d a declared name the base already had is not re-checked when
+its lock entry first appears`, `N5 codes stay quiet for an unchanged
+lockfile`. Fix round (all five modes unless named): `N5u an npm entry
+whose version is a registry tarball URL is name-checked`, `N5u a pnpm
+entry whose version is a registry tarball URL is name-checked`, `N5b an
+unknown bundled entry is reported as bundled, not as possibly
+hallucinated` (base, staged), `M1f a target spelled %s in another case is
+read at its listed path` (`file:tools/NODE_MODULES/helper`,
+`file:Build/helper`), `M1f a case-folded target is placed, not stood in
+for` (loadStates), `M1f a target that names no listed manifest fails
+closed`, `S1 a fan-out past the visit limit stands in for a manifest under
+node_modules` (staged). In scan-online.test.ts: `N5o a name only a wholly
+new lockfile records is not sent to registered-squat`, `N5o a lockfile-only
+name on an audit run, with no comparison base, is not sent to
+registered-squat`, `N5o a name a change adds to an existing lockfile is
+sent to registered-squat (trust base %s)` (false, true). Changed by this rule
+(scan.test.ts): `a flagged dependency in an audited repo is a low, and does
+not fail the run` now uses a transitive name the fixture corpus knows.
+
+Mutations, each applied alone, the cited file run, and reverted
+(2026-10-27):
+
+| Mutation | Went red |
+|---|---|
+| `mark` skips every `node_modules` path again, named or not | M1, M1b, M1 link:, M1 portal:, M1 through a symlinked directory, M1 at the root, M1 link entry alone, M1 chain, M1p, S1 packages/a, S1 packages/b |
+| A rule-5 target is marked unnamed | the same nine M1 tests |
+| The rule-5 fail-closed branch stands in on `packageJsons` only | M1 unplaceable |
+| No follow-up of local specifiers under `node_modules` | M1 chain |
+| The npm member walk's candidates exclude `node_modules` | all three S1 tests |
+| A symlinked member is marked unnamed | S1 packages/a, S1 packages/b |
+| The member walk's fail-closed stand-in is unnamed | S1 unplaceable |
+| The old "was found" wording | M1n |
+| `undeclaredLockEntryNames` returns nothing | the three N5 positive tests |
+| The non-registry resolution filter is dropped | N5c not a new registry name |
+| The pnpm local-version filter is dropped | N5c pnpm directory |
+| Declared entries are not skipped | N5d |
+| Accepted transitive aliases are not skipped | N5a |
+| Fix round: any version containing `:` is skipped, npm and pnpm (the shipped bug) | both N5u tests |
+| Fix round: a version containing `:` is skipped for pnpm only (the narrower split) | N5u pnpm |
+| Fix round: registered-squat skips every lockfile-only name (the first rule) | both N5o existing-lockfile tests |
+| Fix round: registered-squat never skips a lockfile-only name | N5o wholly new, N5o audit |
+| Fix round: no-comparison-base half of `freshLockfile` dropped | N5o audit |
+| Fix round: no case-insensitive match (exact only) | M1f placed, not stood in for |
+| Fix round: the fan-out branch's stand-in is unnamed (the earlier survivor) | S1 fan-out |
+| Fix round: bundled wording dropped | N5b |
+
+Still not mutated on its own: the `resolvedUrl === undefined` half of the
+pnpm local-version filter (a pnpm `file:` version with a tarball, which no
+test builds), and the case-fold ambiguity rule (two listed manifests that
+differ only in case, which a case-insensitive checkout cannot hold). The
+case-insensitive match alone does not change a verdict: without it the
+fail-closed stand-in still reads the manifest, so only the reason and the
+parse fatality (position) differ, which is what the placed test pins.

@@ -1,5 +1,6 @@
 import { acceptedTransitiveAliasTarget, type DepChange } from '../delta.js';
 import type { DepType, Protocol } from '../manifest.js';
+import { resolutionKindOf, resolutionOf } from '../resolution.js';
 import { PYTHON_EXCLUSION_CLASSES, type PythonExclusionClass } from '../python-types.js';
 import type { CheckContext } from './types.js';
 
@@ -39,6 +40,18 @@ import type { CheckContext } from './types.js';
 export interface NewName {
   change: DepChange;
   registryName: string;
+  // 'lockfile' for a name only a lockfile entry records
+  // (undeclaredLockEntryNames). Every check judges it like any other name.
+  source?: 'lockfile';
+  // Set on a lockfile-only name whose lockfile is wholly new in this change
+  // (DependencyDelta.whollyNewLockfiles), or on a run with no comparison
+  // base. The online registered-squat step does not send it: a fresh
+  // lockfile adds hundreds of transitive names, and putting every one on
+  // the wire would spend the online budget, which a pull-request run turns
+  // into online-names-unchecked. A name a change adds to an existing
+  // lockfile is sent (fix round 1: a young, unpopular name reached only
+  // through a lockfile edge passed registered-squat with exit 0).
+  freshLockfile?: true;
 }
 
 // One new Python name, from a manifest line or a lockfile entry. `name` is
@@ -166,6 +179,82 @@ function acceptedAliasTargets(ctx: CheckContext): DepChange[] {
   return changes;
 }
 
+// Every ADDED npm or pnpm lockfile entry no manifest declares that installs
+// from a registry, as an added registry dependency anchored on its
+// lockfile. A lockfile is mostly entries nobody declares, and the package
+// manager installs every one of them: a new node_modules/<name> entry for
+// a known-malicious name used to scan clean because the name checks read
+// manifest lines only (audit 2026-10-27, N5). Python lockfile names were
+// already checked this way (pypiCandidates below).
+//
+// The name is the lockfile key (npm's installed name, pnpm's registry
+// name), never the entry's own "name" field: identity never comes from a
+// field the lockfile author writes (delta.ts, LockEntryChange). Left out,
+// each for a reason:
+//
+// - a changed entry: the base had the name already, as for a manifest
+//   dependency whose version moved;
+// - a declared entry: the manifest walk judges it at its manifest;
+// - an accepted transitive alias: acceptedAliasTargets judges the target,
+//   which is what installs, and the key is only the folder name;
+// - a git, file or other non-registry resolution, and a pnpm entry whose
+//   version is a "file:", "link:", "portal:" or "workspace:" directory with
+//   no registry tarball: not registry names, as git,
+//   url and file dependencies are not on the manifest side (the tamper
+//   check judges the source). An entry with no resolved URL at all is a
+//   registry install by name and version, and is checked.
+const PNPM_LOCAL_VERSION = /^(?:file|link|portal|workspace):/;
+
+function undeclaredLockEntryNames(ctx: CheckContext): DepChange[] {
+  const changes: DepChange[] = [];
+  for (const entryChange of ctx.delta.lockEntryChanges) {
+    if (entryChange.kind !== 'added' || entryChange.declared === true) {
+      continue;
+    }
+    const format = entryChange.lockfileFormat ?? ctx.delta.lockfileFormat;
+    if (format !== 'npm' && format !== 'pnpm') {
+      continue;
+    }
+    if (acceptedTransitiveAliasTarget(entryChange) !== null) {
+      continue;
+    }
+    // pnpm writes a local directory dependency's version as "file:<dir>" or
+    // "link:<dir>" with no tarball: a directory, not a name. Only that is
+    // skipped by its version text. Any other version holding a ":" is
+    // judged by its resolution below: npm records a dependency asked for
+    // by tarball URL with the URL as its version, and installs it from
+    // that URL (fix round B1: a registry tarball URL as the version passed
+    // with exit 0).
+    const version = entryChange.after.version;
+    if (
+      format === 'pnpm' &&
+      version !== undefined &&
+      PNPM_LOCAL_VERSION.test(version) &&
+      entryChange.after.resolvedUrl === undefined
+    ) {
+      continue;
+    }
+    const url = entryChange.after.resolvedUrl;
+    const resolution = url === undefined ? null : resolutionOf(url);
+    if (resolution !== null && resolutionKindOf(resolution) !== 'registry') {
+      continue;
+    }
+    changes.push({
+      name: entryChange.name,
+      registryName: entryChange.packageName,
+      specifier: version ?? '*',
+      kind: 'added',
+      depType: 'dependencies',
+      protocol: 'registry',
+      manifestPath: entryChange.manifestPath,
+      lockfilePath: entryChange.lockfilePath,
+      lockfileFormat: format,
+      ...(entryChange.after.inBundle === true ? { bundled: true as const } : {}),
+    });
+  }
+  return changes;
+}
+
 function emptyExcluded(): Record<PythonExclusionClass, number> {
   const counts = {} as Record<PythonExclusionClass, number>;
   for (const cls of PYTHON_EXCLUSION_CLASSES) {
@@ -247,7 +336,8 @@ function npmNames(ctx: CheckContext): NewName[] {
   const seen = new Set<string>();
   const names: NewName[] = [];
 
-  for (const change of [...ctx.delta.changes, ...acceptedAliasTargets(ctx)]) {
+  const fromLockfile = new Set(undeclaredLockEntryNames(ctx));
+  for (const change of [...ctx.delta.changes, ...acceptedAliasTargets(ctx), ...fromLockfile]) {
     if (nameEcosystemOf(change.protocol) !== 'npm') {
       continue;
     }
@@ -287,7 +377,16 @@ function npmNames(ctx: CheckContext): NewName[] {
       continue;
     }
     seen.add(key);
-    names.push({ change, registryName });
+    if (!fromLockfile.has(change)) {
+      names.push({ change, registryName });
+      continue;
+    }
+    const fresh =
+      !ctx.delta.hasComparisonBase ||
+      (change.lockfilePath !== undefined && (ctx.delta.whollyNewLockfiles ?? []).includes(change.lockfilePath));
+    names.push(
+      fresh ? { change, registryName, source: 'lockfile', freshLockfile: true } : { change, registryName, source: 'lockfile' }
+    );
   }
 
   return names;

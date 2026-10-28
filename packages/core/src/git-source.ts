@@ -1950,8 +1950,11 @@ export function confirmWorkspaceLocalNames(
         if (path.posix.isAbsolute(target) || target === '..' || target.startsWith('../')) {
           return `it links to "${link.resolved}", outside the repository`;
         }
+        // "read", not "found": the scan may have left a package.json there
+        // unread (one outside a subdirectory scan), and a note that says a
+        // file in the tree is not there is false.
         if (!manifests.some((manifest) => manifest.path === manifestPathIn(targetDir) && manifest.name === link.name)) {
-          return `no package.json named "${link.name}" was found at ${targetDir === '' ? 'the root' : targetDir}`;
+          return `this scan read no package.json named "${link.name}" at ${targetDir === '' ? 'the root' : targetDir}`;
         }
         const relDir = dir === '' ? targetDir : targetDir.startsWith(`${dir}/`) ? targetDir.slice(dir.length + 1) : null;
         if (relDir !== null && workspacePatternsCover(patterns, relDir, 'excludes')) {
@@ -2061,7 +2064,12 @@ export function reconfirmWorkspaceLocalNames(
 //      inside the repository is a reason on every package.json, never on
 //      none (see rule 5 below).
 //
-// Nothing under node_modules is a project this way. Every input is subject
+// Nothing under node_modules is a project by rules 1 to 4, and nothing there
+// is an input on its own. Rule 5, and a symlinked member whose workspace path
+// is outside node_modules, are the exceptions (0.17.0): the package manager
+// installs what they name wherever it sits, and a manifest under
+// node_modules that one of them promotes has its own local specifiers
+// followed in turn. Every input is subject
 // content, and a claim in one can only add a path to the set, which makes a
 // parse error fatal. A negation inside one input (a "!" workspace pattern)
 // can remove a path that input alone would add, never one another input
@@ -2454,7 +2462,11 @@ async function classifySide(
   classifiedSides += 1;
   const side = classifiedSides;
   const listed = new Set(listedFiles);
-  const packageJsons = listedFiles.filter((relPath) => isPackageJsonPath(relPath) && !underNodeModules(relPath));
+  // Every listed package.json, and those outside node_modules: the inputs
+  // are the latter; an input that names a target explicitly (rule 5, a
+  // symlinked member) can land on either.
+  const listedPackageJsons = listedFiles.filter(isPackageJsonPath);
+  const packageJsons = listedPackageJsons.filter((relPath) => !underNodeModules(relPath));
   const lockfilePaths = listedFiles.filter(
     (relPath) => isRecognisedLockfilePath(relPath) && !underNodeModules(relPath)
   );
@@ -2538,8 +2550,20 @@ async function classifySide(
     list.push(reason);
     reasons.set(relPath, list);
   };
-  const mark = (relPath: string, position: ProtectedPosition, promote: boolean, reason: ProjectReason): void => {
-    if (underNodeModules(relPath)) {
+  // A manifest under node_modules is skipped unless the input names it
+  // explicitly (`named`): a rule-5 target, or a member a symlinked
+  // workspace path outside node_modules reaches. The package manager
+  // installs such a manifest whatever directory names are on its real path
+  // (npm 11 installs the dependencies of "file:tools/node_modules/x"), so
+  // the node_modules exception covers only what sits there unnamed.
+  const mark = (
+    relPath: string,
+    position: ProtectedPosition,
+    promote: boolean,
+    reason: ProjectReason,
+    named = false
+  ): void => {
+    if (underNodeModules(relPath) && !named) {
       return;
     }
     if (!positions.has(relPath)) {
@@ -2557,9 +2581,11 @@ async function classifySide(
   // under build/ or vendor/ the walk never placed is still read for names.
   // It gives no position, so it does not make a parse failure fatal
   // whatever ignorePaths says: a stand-in that does not parse is judged as
-  // a manifest outside any skipped name is.
-  const standIn = (relPath: string): void => {
-    if (!underNodeModules(relPath)) {
+  // a manifest outside any skipped name is. A stand-in for a named input
+  // (`named`, as in mark) covers a manifest under node_modules too, since
+  // the target it could not place may be one.
+  const standIn = (relPath: string, named = false): void => {
+    if (!underNodeModules(relPath) || named) {
       promoted.add(relPath);
     }
   };
@@ -2668,7 +2694,7 @@ async function classifySide(
         return coverage.exact ? [undefined] : coverage.inexact;
       },
       (relDir) => workspacePatternsReachBelow(patterns, relDir, true),
-      packageJsons,
+      listedPackageJsons,
       canonicalPatterns(patterns),
       position,
       promote,
@@ -2684,7 +2710,9 @@ async function classifySide(
   //   - when it reaches a directory R, each listed manifest R/<sub>/<name>
   //     is a member exactly when the patterns cover <link>/<sub>, the path
   //     a package manager sees, and is marked as a listed member would be.
-  //     The reason's pattern holds that path, the covering pattern (null
+  //     R may be under node_modules (0.17.0): the path the package manager
+  //     sees is <link>/<sub>, and the npm member walk's candidates are
+  //     every listed package.json for that reason. The reason's pattern holds that path, the covering pattern (null
   //     when exact, the text when inexact) and every link text read on the
   //     way (traceKey): a widened pattern, a retargeted link or the same
   //     path reached through another link is a different reason;
@@ -2731,7 +2759,7 @@ async function classifySide(
           link: { paths: [virtualPath], followed: false, ...(cause === undefined ? {} : { cause }) },
         });
         if (promote) {
-          standIn(candidate);
+          standIn(candidate, true);
         }
       }
     };
@@ -2770,7 +2798,7 @@ async function classifySide(
         for (const candidate of candidates) {
           addReason(candidate, { ...reason, pattern, link: { paths: [fanOutAt], followed: false, cause } });
           if (promote) {
-            standIn(candidate);
+            standIn(candidate, true);
           }
         }
         return;
@@ -2803,12 +2831,21 @@ async function classifySide(
         if (memberDir === null) {
           continue;
         }
+        // A member whose real path is under node_modules is still one: the
+        // package manager sees memberPath, which the coverage above never
+        // finds under node_modules.
         for (const covered of covering(memberDir)) {
-          mark(candidate, position, promote, {
-            ...reason,
-            pattern: JSON.stringify(['symlinked-member', memberPath, covered ?? null, ...key]),
-            link: { paths: through, followed: true },
-          });
+          mark(
+            candidate,
+            position,
+            promote,
+            {
+              ...reason,
+              pattern: JSON.stringify(['symlinked-member', memberPath, covered ?? null, ...key]),
+              link: { paths: through, followed: true },
+            },
+            true
+          );
         }
       }
       for (const nested of links) {
@@ -2912,6 +2949,31 @@ async function classifySide(
   // build/ is read for names, since the target may be it. Neither gives a
   // position, so neither makes a parse failure fatal whatever ignorePaths
   // says.
+  //
+  // A target placed inside the repository is matched against the listed
+  // package.json paths (fix round 2 of 0.17.0): exactly, else without regard
+  // to case when exactly one listed path matches that way, since npm on a
+  // case-insensitive file system (macOS) installs "file:tools/NODE_MODULES/x"
+  // from tools/node_modules/x. A target that names no listed manifest, or
+  // several that differ only in case, fails closed as an unplaceable one
+  // does: this side cannot tell which manifest it is. Before, the reason
+  // went on a path nothing lists and nothing was read.
+  let packageJsonsByFoldedPath: Map<string, string[]> | null = null;
+  const listedManifestFor = (manifestPath: string): string | null => {
+    if (listed.has(manifestPath)) {
+      return manifestPath;
+    }
+    if (packageJsonsByFoldedPath === null) {
+      const byFolded = new Map<string, string[]>();
+      for (const relPath of listedPackageJsons) {
+        const folded = relPath.toLowerCase();
+        byFolded.set(folded, [...(byFolded.get(folded) ?? []), relPath]);
+      }
+      packageJsonsByFoldedPath = byFolded;
+    }
+    const matches = packageJsonsByFoldedPath.get(manifestPath.toLowerCase()) ?? [];
+    return matches.length === 1 ? matches[0] : null;
+  };
   const markTarget = async (
     fromDir: string,
     targetText: string,
@@ -2921,17 +2983,18 @@ async function classifySide(
     const written = localTargetDir(fromDir, targetText);
     const trace: LinkTrace = [];
     const target = written === null ? null : await resolveLinkedDir(source, written, trace);
-    if (target !== null) {
-      mark(manifestPathIn(target), position, true, reason);
+    const manifest = target === null ? null : listedManifestFor(manifestPathIn(target));
+    if (manifest !== null) {
+      mark(manifest, position, true, reason, true);
       return;
     }
     const pattern = tracedPattern(targetText, trace, side);
-    for (const candidate of packageJsons) {
+    for (const candidate of listedPackageJsons) {
       addReason(candidate, { ...reason, pattern });
-      standIn(candidate);
+      standIn(candidate, true);
     }
   };
-  for (const [relPath, manifest] of parsedPackageJsons) {
+  const followLocalSpecifiers = async (relPath: string, manifest: ParsedManifest): Promise<void> => {
     for (const dep of manifest.deps) {
       // npm reads a bare "./x", "../x", "/x" or "~/x" as a local directory
       // too (npm-package-arg's isFilespec); the whole specifier is the path.
@@ -2947,6 +3010,9 @@ async function classifySide(
         input: relPath,
       });
     }
+  };
+  for (const [relPath, manifest] of parsedPackageJsons) {
+    await followLocalSpecifiers(relPath, manifest);
   }
   for (const lockPath of npmLockInputs) {
     const content = text(lockPath);
@@ -2976,6 +3042,47 @@ async function classifySide(
         root: parentDir(lockPath),
         input: lockPath,
       });
+    }
+  }
+  // Every package.json outside node_modules is an input above, so its own
+  // local specifiers were followed. One under node_modules is an input only
+  // once something names it (promoted above, by a target, a symlinked
+  // member or a stand-in): the package manager installs its local
+  // dependencies too, so they are followed the same way, until no new one
+  // is promoted. Each is read and parsed once, like any input, and one that
+  // cannot be read or parsed is a failed input like any other.
+  const followedUnderNodeModules = new Set<string>();
+  for (;;) {
+    const next = listedPackageJsons.filter(
+      (relPath) => underNodeModules(relPath) && promoted.has(relPath) && !followedUnderNodeModules.has(relPath)
+    );
+    if (next.length === 0) {
+      break;
+    }
+    const readableNext: string[] = [];
+    for (const relPath of next) {
+      followedUnderNodeModules.add(relPath);
+      if (await listedSymlink(relPath)) {
+        fail(relPath, 'symlink');
+        continue;
+      }
+      readableNext.push(relPath);
+    }
+    for (const quiet of [false, true]) {
+      const batch = readableNext.filter((relPath) => underPrefix(relPath, prefix) !== quiet);
+      const read = await readClassificationInputs(source, batch, diagnostics, quiet);
+      for (const [relPath, content] of read.contents) {
+        contents.set(relPath, content);
+      }
+      for (const relPath of read.failed) {
+        fail(relPath, 'other');
+      }
+    }
+    for (const relPath of readableNext) {
+      const manifest = manifestOf(relPath);
+      if (manifest !== null) {
+        await followLocalSpecifiers(relPath, manifest);
+      }
     }
   }
   // A requirements file another one includes with -r or -c is installed by
@@ -3298,10 +3405,17 @@ async function loadState(
   // The classification reads the whole listing, so a subdirectory scan
   // promotes exactly what a root scan does.
   //
-  // node_modules is the one exception: nothing is installed FROM inside it,
-  // and a committed node_modules package that ships its own lockfile is a
-  // dependency's file, not a project of this repository's. Only a stray
-  // manifest is dropped, and is announced below.
+  // node_modules is the one exception, for what sits there unnamed: a
+  // committed node_modules package that ships its own lockfile, or that a
+  // workspace pattern would cover, is a dependency's file, not a project of
+  // this repository's. It is not an exception for a manifest an input names
+  // explicitly (a file:, link: or portal: target, an npm lockfile link
+  // entry, a member reached through a symlinked workspace path, or a
+  // stand-in for one that could not be placed): the package manager
+  // installs that one wherever it sits (npm 11 installs the dependencies of
+  // "file:tools/node_modules/x"; audit 2026-10-27, M1). Before 0.17.0 the
+  // exception covered both, on the ruling that nothing is installed from
+  // inside node_modules, and such a target was never read.
   const classification = await classifySide(source, listedFiles, prefix, role, diagnostics, parse, npmLockfiles);
   const failures: ParseFailure[] = [];
   const attempted = new Set<string>();

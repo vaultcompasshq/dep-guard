@@ -54,6 +54,12 @@ export interface LockEntry {
   // README.md's Lockfile support section), so there is no entry to carry
   // one.
   lookupName?: string;
+  // npm only: the entry carries "inBundle": true, so it ships inside its
+  // parent package's tarball and is never fetched by name. Wording only:
+  // checks/existence.ts says so instead of "may be hallucinated". It
+  // decides nothing about whether the name is checked, and is not part of
+  // an entry's resolution identity.
+  inBundle?: true;
 }
 
 export type LockfileFormat = 'npm' | 'pnpm' | 'yarn' | 'bun' | 'none';

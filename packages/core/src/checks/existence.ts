@@ -70,7 +70,11 @@ export const existenceCheck: Check = (ctx) => {
       packageName: registryName,
       message:
         `"${registryName}"${via} is not in the known-package corpus built ${ctx.corpus.builtAt}. ` +
-        'It may be hallucinated, or published after that date.',
+        (change.bundled === true
+          ? "Its lockfile entry is marked inBundle, so it ships inside its parent package's tarball rather " +
+            'than being fetched by name: it may be a private or unpublished package the parent bundles. ' +
+            'Check what the parent package ships.'
+          : 'It may be hallucinated, or published after that date.'),
       manifestPath: change.manifestPath,
       details: {
         specifier: change.specifier,
