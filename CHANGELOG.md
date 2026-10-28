@@ -10,6 +10,8 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-28
+
 Fixes from the 2026-10-27 cohesion audit. Each one can turn a green audit,
 commit or pull request red; none loosens a verdict.
 
