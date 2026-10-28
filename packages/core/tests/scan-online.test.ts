@@ -210,6 +210,85 @@ describe('scan(): online enrichment', () => {
     expect(result.findings.some((f) => f.ruleId === 'registered-squat')).toBe(true);
   });
 
+  // 0.17.0 (audit 2026-10-27, N5): an added lockfile entry no manifest
+  // declares is name-checked offline. It is sent to registered-squat too,
+  // except from a lockfile that is wholly new in this change (or with no
+  // comparison side): a fresh lockfile adds hundreds of transitive names,
+  // and putting every one on the wire would spend the budget a
+  // pull-request run then refuses. A young, unpopular name a change adds
+  // to an existing lockfile reaches registered-squat as a declared one
+  // would (fix round 1: it used to pass with exit 0).
+  async function lockfileOnlyName(baseHasLockfile: boolean, trustBase: boolean, audit = false) {
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map([['some-brand-new-thing', 2]]), noRecord: new Set() });
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: new Date().toISOString(),
+      latestVersion: '0.0.1',
+      latestPublishedAt: new Date().toISOString(),
+      deprecated: false,
+      unpublished: false,
+      securityHolder: false,
+      versionTimes: {},
+    });
+    const dir = initRepo();
+    if (baseHasLockfile) {
+      commitManifestWithLock(dir, { react: '1.0.0' });
+    } else {
+      commitManifest(dir, { react: '1.0.0' });
+    }
+    execFileSync('git', ['tag', 'base'], { cwd: dir });
+    const packages = {
+      '': { name: 'x', version: '1.0.0', dependencies: { react: '1.0.0' } },
+      'node_modules/react': {
+        version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/react/-/pkg-1.0.0.tgz',
+        integrity: 'sha512-notreal',
+      },
+      'node_modules/some-brand-new-thing': {
+        version: '0.0.1',
+        resolved: 'https://registry.npmjs.org/some-brand-new-thing/-/some-brand-new-thing-0.0.1.tgz',
+        integrity: 'sha512-notreal',
+      },
+    };
+    writeFileSync(
+      path.join(dir, 'package-lock.json'),
+      JSON.stringify({ name: 'x', version: '1.0.0', lockfileVersion: 3, requires: true, packages })
+    );
+    execFileSync('git', ['add', '.'], { cwd: dir });
+    execFileSync('git', ['commit', '-q', '-m', 'lockfile only'], { cwd: dir });
+
+    const result = await scan({
+      repoRoot: dir,
+      mode: audit ? { kind: 'audit' } : { kind: 'base', ref: 'base' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+      ...(trustBase ? { trustBase: 'base' } : {}),
+    });
+    const sent = fetchWeeklyDownloadsMock.mock.calls.flatMap(([names]) => names);
+    return { result, sent };
+  }
+
+  test('N5o a name only a wholly new lockfile records is not sent to registered-squat', async () => {
+    const { result, sent } = await lockfileOnlyName(false, false);
+    expect(sent).not.toContain('some-brand-new-thing');
+    expect(result.findings.some((f) => f.ruleId === 'registered-squat')).toBe(false);
+  });
+
+  test('N5o a lockfile-only name on an audit run, with no comparison base, is not sent to registered-squat', async () => {
+    const { sent } = await lockfileOnlyName(true, false, true);
+    expect(sent).not.toContain('some-brand-new-thing');
+  });
+
+  test.each([[false], [true]])(
+    'N5o a name a change adds to an existing lockfile is sent to registered-squat (trust base %s)',
+    async (trustBase) => {
+      const { result, sent } = await lockfileOnlyName(true, trustBase);
+      expect(sent).toContain('some-brand-new-thing');
+      const squat = result.findings.filter((f) => f.ruleId === 'registered-squat');
+      expect(squat.map((f) => [f.packageName, f.manifestPath])).toEqual([['some-brand-new-thing', 'package-lock.json']]);
+      expect(result.exitCode).toBe(1);
+    }
+  );
+
   test('--online adds a registered-squat finding when npm confirms it has no download record at all', async () => {
     // The headline zero-download-blindness case, exercised through the
     // real cachedFetchWeeklyDownloads wiring rather than a check-level

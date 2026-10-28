@@ -33,6 +33,10 @@ export interface DepChange {
   // Python only, carried from ManifestDep.gitTable: a git table whose pin is
   // judged from its own rev key alone, never from the specifier text.
   gitTable?: { rev: string | null };
+  // Set only on a name built from an undeclared npm lock entry marked
+  // "inBundle" (checks/candidates.ts): it ships inside its parent's
+  // tarball. Message wording only.
+  bundled?: true;
   before?: LockEntry;
   after?: LockEntry;
 }
@@ -158,6 +162,12 @@ export interface DependencyDelta {
   // reads it to report that as one finding. False or absent otherwise,
   // including with no comparison base and a delta built by hand.
   lockfileWhollyNew?: boolean;
+  // Every read npm or pnpm lockfile, primary or extra, that is wholly new
+  // in this change in the same sense (isWhollyNewLockfile). Empty with no
+  // comparison base, and absent on a delta built by hand. The online
+  // registered-squat step does not send a lockfile-only name from one of
+  // these (checks/candidates.ts, NewName.source).
+  whollyNewLockfiles?: readonly string[];
   // Package names the AFTER side's lockfile records as workspace-local
   // (RepoState.workspaceLocalNames, itself a carry of
   // ParsedLockfile.workspaceLocalNames -- see lockfiles/types.ts). A
@@ -1484,6 +1494,12 @@ export function computeDelta(
   // the install-script check names the package list under one lockfile path.
   const lockfileWhollyNew =
     (after.extraLockfiles ?? []).length === 0 && isWhollyNewLockfile(before !== null, after.lockfile, primaryChanges);
+  // Per lockfile, with extras too: what the registered-squat step reads to
+  // keep a fresh lockfile's transitive names off the wire.
+  const whollyNewLockfiles: string[] = [];
+  if (after.lockfile !== null && isWhollyNewLockfile(before !== null, after.lockfile, primaryChanges)) {
+    whollyNewLockfiles.push(after.lockfile.path);
+  }
   for (const extra of after.extraLockfiles ?? []) {
     const counterpart = counterpartOf(extra);
     if (before === null) {
@@ -1507,6 +1523,9 @@ export function computeDelta(
           `that work by comparison (${comparisonTamperSignalList()}) could not be evaluated for ` +
           `${uncomparable === 1 ? 'it' : 'them'}`,
       });
+    }
+    if (isWhollyNewLockfile(before !== null, extra, extraDiff.changes)) {
+      whollyNewLockfiles.push(extra.path);
     }
     lockEntries.changes.push(...extraDiff.changes);
     lockEntries.diagnostics.push(...extraDiff.diagnostics);
@@ -1548,6 +1567,7 @@ export function computeDelta(
     lockfileFormat,
     hasComparisonBase: before !== null,
     ...(lockfileWhollyNew ? { lockfileWhollyNew: true } : {}),
+    whollyNewLockfiles,
     workspaceLocalNames: after.workspaceLocalNames,
     ...(after.workspaceLocalNamesByDir === undefined
       ? {}

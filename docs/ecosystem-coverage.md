@@ -2,7 +2,7 @@
 
 | Ecosystem | Files read | Name checks | Lockfile checks |
 |---|---|---|---|
-| npm | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` (`yarn.lock`, `bun.lock` noted, not parsed) | unknown-package against the shipped corpus, and the registry with `--online`; typosquat against the shipped popularity list; registered-squat and asymmetry with `--online` | tamper, install-script, publish-age (`--online`) |
+| npm | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` (`yarn.lock`, `bun.lock` noted, not parsed) | unknown-package against the shipped corpus, and the registry with `--online`; typosquat against the shipped popularity list; registered-squat and asymmetry with `--online`. Judged: every added manifest dependency, and (0.17.0) every added npm or pnpm lockfile entry no manifest declares that installs from a registry, anchored on its lockfile; registered-squat does not send a lockfile-only name from a lockfile wholly new in the change, or on a run with no comparison side | tamper, install-script, publish-age (`--online`) |
 | Python (PyPI) | requirements files, `pyproject.toml`, `Pipfile`, `poetry.lock`, `uv.lock`, `pdm.lock`, `Pipfile.lock` | unknown-package with `--online` only (PyPI existence; no corpus ships); typosquat against the repository's own Python names only | none: Python lockfiles are read for names; their hashes and sources are not judged. A git or url requirement is a tamper git-source or url-source finding, as for npm. Requirements pinned exactly are not a lockfile dep-guard compares |
 | Go | none: `go.mod` and `go.sum` are not read by dep-guard | none | none |
 
