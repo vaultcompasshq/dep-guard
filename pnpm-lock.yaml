@@ -28,8 +28,8 @@ importers:
         specifier: 0.17.0
         version: 0.17.0
       '@vaultcompass/intent-guard':
-        specifier: 1.10.1
-        version: 1.10.1
+        specifier: 1.10.2
+        version: 1.10.2
       '@vaultcompass/vault-guard':
         specifier: 1.12.1
         version: 1.12.1
@@ -637,18 +637,18 @@ packages:
     engines: {node: '>=22'}
     hasBin: true
 
-  '@vaultcompass/intent-guard-core@1.10.1':
-    resolution: {integrity: sha512-embSzvOOO+vjekeyWHPPafj1SBKZRJjfMDKvV6PVJ2aCb/0QqcNddHgcxIPnTJegKTK1BfAueA/Hr+zpUIO3Cw==}
+  '@vaultcompass/intent-guard-core@1.10.2':
+    resolution: {integrity: sha512-yVP1EWw3HFLc2gt+cWfnwu8YJTz+6SINPEQXjRYU9CKLnNS+YnFxZO03lsLY9jyi+CbG6bc5e7M2AwlZ4yZzIA==}
 
-  '@vaultcompass/intent-guard-schema@1.10.1':
-    resolution: {integrity: sha512-ro1UOkYXkJwNuIlbrkNMlL77tU2yQ5nLzQKY9VvclqkovUV/F1CqUTDm44T3dgvzel7yU6/7n4tysXhUMGnlgQ==}
+  '@vaultcompass/intent-guard-schema@1.10.2':
+    resolution: {integrity: sha512-SO4ofI2hALlNUBBIQvR86r42kxEBSpibDmf6OfufGCqGCqgg9Ovmfgy70x1o/50WYz5UuDSsLXUhH9x8FKWPFA==}
 
-  '@vaultcompass/intent-guard-skill@1.10.1':
-    resolution: {integrity: sha512-hDjaIIqJZDwCIjbBmEBYQ5lSRK3IlfXdjPQfDdUIcqZnM6YqQwRxehDCjCdameKg30k9DVDiuyhAmHF2GJk+Tg==}
+  '@vaultcompass/intent-guard-skill@1.10.2':
+    resolution: {integrity: sha512-BgQ5m/bXgeQh317LbaAud6+mrCeCyJe4SjI4bwMR2wLUn4KVzKnSMkj1ye9ZTJbeUGV5h0iT2TR+OzEs3RXLbQ==}
     hasBin: true
 
-  '@vaultcompass/intent-guard@1.10.1':
-    resolution: {integrity: sha512-jOPLk/dQt0PK54ZprVNhGLBRvBLabpnIFSs+S7XLXfBtOsiMa5l1WrePi+bzmCFlpCHOaWxmI0uCRU/zu6jKKA==}
+  '@vaultcompass/intent-guard@1.10.2':
+    resolution: {integrity: sha512-D/7q3yIaZDza7E1miFonlI+DBiYVH2m+P3X+k38Q/9FFkaJ2R/Pb3kHJmwuUDl0XZToIdgOfgmYDWYdNt5Pujg==}
     hasBin: true
 
   '@vaultcompass/vault-guard-core@1.12.1':
@@ -2267,25 +2267,25 @@ snapshots:
       '@vaultcompass/dep-guard-core': 0.17.0
       commander: 12.1.0
 
-  '@vaultcompass/intent-guard-core@1.10.1':
+  '@vaultcompass/intent-guard-core@1.10.2':
     dependencies:
-      '@vaultcompass/intent-guard-schema': 1.10.1
+      '@vaultcompass/intent-guard-schema': 1.10.2
       yaml: 2.9.0
 
-  '@vaultcompass/intent-guard-schema@1.10.1':
+  '@vaultcompass/intent-guard-schema@1.10.2':
     dependencies:
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
 
-  '@vaultcompass/intent-guard-skill@1.10.1':
+  '@vaultcompass/intent-guard-skill@1.10.2':
     dependencies:
-      '@vaultcompass/intent-guard-core': 1.10.1
-      '@vaultcompass/intent-guard-schema': 1.10.1
+      '@vaultcompass/intent-guard-core': 1.10.2
+      '@vaultcompass/intent-guard-schema': 1.10.2
       yaml: 2.9.0
 
-  '@vaultcompass/intent-guard@1.10.1':
+  '@vaultcompass/intent-guard@1.10.2':
     dependencies:
-      '@vaultcompass/intent-guard-skill': 1.10.1
+      '@vaultcompass/intent-guard-skill': 1.10.2
 
   '@vaultcompass/vault-guard-core@1.12.1':
     dependencies:
