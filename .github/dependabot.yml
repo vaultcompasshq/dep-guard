@@ -1,0 +1,44 @@
+version: 2
+updates:
+  # Root npm dependencies. pnpm uses the npm ecosystem here.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions versions in .github/workflows/.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    groups:
+      # The CodeQL sub-actions (init, autobuild, analyze, upload-sarif) are
+      # one product. The analysis refuses to run when their versions
+      # disagree, so they must move in a single pull request.
+      codeql:
+        patterns:
+          - "github/codeql-action*"
+      # Every other action in one pull request, so a weekly run is one review.
+      actions:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "github/codeql-action*"
+    labels:
+      - dependencies
+      - github-actions
