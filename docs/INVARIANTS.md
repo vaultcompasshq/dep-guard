@@ -2403,7 +2403,7 @@ true per-name otherwise. So in base mode this array is exactly "every
 resolved version added or changed in the diff", and with no earlier
 revision it is exactly "every resolved dependency in the lockfile" --
 the same "no before, everything reads as added" rule every other row in
-the README's pull-request-mode table follows, arrived at for free rather
+the pull-request-mode table in `docs/pull-request-mode.md` follows, arrived at for free rather
 than by branching on `hasComparisonBase` inside this check.
 
 This also means an npm workspace-local sibling is never a candidate
@@ -3238,7 +3238,7 @@ run passes no `--base` unless the `base` input is set, and scans in audit
 mode when it is not, so the comparison-based lockfile-tamper signals
 (integrity-changed, tarball-repointed, and the rest of the list in the
 `delta-new-lock-entries` diagnostic) do not evaluate there; see the
-README's pull-request-mode table (`README.md`, "Pull-request mode") for
+pull-request-mode table (`docs/pull-request-mode.md`) for
 which checks still run in that state. Before issue #62 the composite
 Action never passed `--base` on any event, so every CI run, `pull_request`
 included, scanned in audit mode; that gap was pre-existing in 0.5.0 and
