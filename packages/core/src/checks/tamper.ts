@@ -1513,12 +1513,62 @@ export const tamperCheck: Check = (ctx) => {
     return [];
   };
 
+  // An npm entry with no usable "resolved" whose own "name" field differs from its
+  // key installs the package that field names, by name and version (audit
+  // 2026-10-28, B2). npm writes such a field for an alias, and records the
+  // alias as an "npm:<name>@" edge in the dependent's (or the root's)
+  // dependency map, or the manifest declares the alias. With neither, the
+  // field is a substitution nothing asked for. The name checks judge the
+  // named package either way (checks/candidates.ts); this says the swap
+  // itself happened. An entry shipped inside its parent's tarball is never
+  // fetched by name and is left out; a changed entry whose name field did
+  // not move was already reviewed.
+  const unvouchedNameFinding = (entryChange: LockEntryChange): Omit<Finding, 'fingerprint'> | null => {
+    const { after } = entryChange;
+    const field = after.nameField;
+    if (
+      (entryChange.lockfileFormat ?? delta.lockfileFormat) !== 'npm' ||
+      // An empty "resolved" is no resolved to npm (review N-1: it
+      // installed the name field), and one this scan cannot parse is not
+      // a location it can hold the entry to either.
+      (after.resolvedUrl !== undefined && after.resolvedUrl.trim() !== '' && resolutionOf(after.resolvedUrl) !== null) ||
+      after.inBundle === true ||
+      field === undefined ||
+      field === entryChange.name ||
+      field === entryChange.packageName ||
+      (entryChange.aliasTargets ?? []).includes(field) ||
+      candidatesOfLockEntry(entryChange).some((before) => before.nameField === field)
+    ) {
+      return null;
+    }
+    return {
+      ruleId: 'lockfile-tamper',
+      severity: 'medium',
+      packageName: entryChange.packageName,
+      message:
+        `"${entryChange.packageName}" records "name": "${field}" and no resolved location, so an install ` +
+        `fetches "${field}" and puts it under this name, and nothing in the lockfile or a manifest asks ` +
+        'for that alias.',
+      manifestPath: entryChange.manifestPath,
+      details: {
+        signal: `name-field-unvouched:${field}`,
+        kind: (delta.hasComparisonBase ? entryChange.kind : 'present') satisfies ReportedKind,
+        namedPackage: field,
+        afterPath: pathLabel(after),
+      },
+    };
+  };
+
   // Every entry the lockfile diff produced, whether or not any
   // manifest declares it, and however many entries share one name.
   if (comparableLockfile) {
     for (const entryChange of delta.lockEntryChanges) {
       for (const finding of tarballIdentityFindings(entryChange)) {
         report(finding, entryChange.lockfilePath);
+      }
+      const unvouched = unvouchedNameFinding(entryChange);
+      if (unvouched !== null) {
+        report(unvouched, entryChange.lockfilePath);
       }
       const candidates = candidatesOfLockEntry(entryChange);
       if (candidates.length === 0) {

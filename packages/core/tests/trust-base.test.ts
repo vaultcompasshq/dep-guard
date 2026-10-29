@@ -1013,7 +1013,13 @@ describe('no-flag parity', () => {
       mode: { kind: 'base', ref: 'main' },
       corpusDir: FIXTURE_CORPUS,
     });
-    await write('.dep-guard.baseline.json', baselineJson([first.findings[0]?.fingerprint ?? '']));
+    // The one finding shown is the manifest's, merged with the lock entry's
+    // (2026-10-28): it names the lock entry's fingerprint too, and each is
+    // suppressed only by its own baseline entry, so both are baselined.
+    const shown = first.findings[0];
+    const lockfileFingerprint = shown?.details?.lockfileFingerprint;
+    expect(typeof lockfileFingerprint).toBe('string');
+    await write('.dep-guard.baseline.json', baselineJson([shown?.fingerprint ?? '', String(lockfileFingerprint)]));
     await commitAll('baseline it');
 
     const result = await scan({
@@ -1023,7 +1029,7 @@ describe('no-flag parity', () => {
     });
 
     expect(result.findings).toHaveLength(0);
-    expect(result.suppressed).toBe(1);
+    expect(result.suppressed).toBe(2);
     expect(result.exitCode).toBe(0);
   });
 });
