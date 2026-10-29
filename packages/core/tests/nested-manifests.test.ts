@@ -1536,7 +1536,10 @@ describe('a change that wires an ignored path into the install (0.16.0)', () => 
 
     const result = await pullRequest();
 
-    expect(lodahsFindings(result)).toHaveLength(0);
+    // The project's own findings stay the adopter's standing choice; the
+    // lock entry it installs is judged on its own, anchored on the
+    // lockfile (2026-10-28 review: no declaration exempts a lock entry).
+    expect([...new Set(lodahsFindings(result).map((finding) => finding.manifestPath))]).toEqual(['package-lock.json']);
     expect(result.ignored).toBeGreaterThan(0);
     expect(result.ignoreKept).toBe(0);
     expect(diagnostic(result, 'ignore-path-dropped')).toContain(
@@ -1544,7 +1547,7 @@ describe('a change that wires an ignored path into the install (0.16.0)', () => 
     );
     expect(result.trustBase?.proposals).toEqual([]);
     expect(result.trustBase?.projectPathsChanged).toBe(false);
-    expect(result.exitCode).toBe(0);
+    expect(result.exitCode).toBe(1);
   });
 
   test('H3t a lockfile-tamper finding on a project the base installs is never dropped', async () => {
@@ -1715,8 +1718,12 @@ describe('a change that wires an ignored path into the install (0.16.0)', () => 
       trustBase: 'main',
     });
 
-    expect(lodahsFindings(local)).toHaveLength(0);
-    expect(local.exitCode).toBe(0);
+    // Against HEAD the project's own findings are the standing choice and
+    // dropped; the lock entry it installs is judged on its own, anchored on
+    // the lockfile (the 2026-10-28 review removed the declaration
+    // exemption that used to drop it with them).
+    expect([...new Set(lodahsFindings(local).map((finding) => finding.manifestPath))]).toEqual(['package-lock.json']);
+    expect(local.exitCode).toBe(1);
     expect(lodahsFindings(trusted).length).toBeGreaterThan(0);
     expect(trusted.exitCode).toBe(1);
   });
@@ -1727,7 +1734,9 @@ describe('a change that wires an ignored path into the install (0.16.0)', () => 
 
     const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
 
-    expect(lodahsFindings(result)).toHaveLength(0);
+    // The manifest's findings drop as before; the lock entry is judged on
+    // its own, anchored on the lockfile (2026-10-28 review).
+    expect([...new Set(lodahsFindings(result).map((finding) => finding.manifestPath))]).toEqual(['package-lock.json']);
     expect(result.ignored).toBeGreaterThan(0);
     expect(result.ignoreKept).toBe(0);
     expect(codes(result)).not.toContain('ignore-path-project-kept');

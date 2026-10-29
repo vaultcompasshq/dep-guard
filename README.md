@@ -256,7 +256,7 @@ against, which is the other reason to leave the input out.
 Inputs: `path` (default `.`), `online` (`true`/`false`, default `false`),
 `fail-on` (`critical|high|medium|low|none`, unset means dep-guard's own
 default), plus `version` (an EXACT version, default the one the action
-shipped with), `trust-base` (see
+shipped with), `trust-base` and `base` (see
 [Pull-request mode](docs/pull-request-mode.md)), `sarif-output` (default
 `dep-guard-results.sarif`), and `upload-sarif` (set `false` to write the
 file without uploading it, for a repository that does not have code
@@ -266,7 +266,7 @@ The SARIF is uploaded *before* the run is failed, so a scan that found
 something still gets its findings into code scanning. `security-events:
 write` is required for the upload; `actions/checkout` must run first.
 
-Publish age (like the other three `--online` checks) needs `online: 'true'`
+Publish age (like the other four `--online` checks) needs `online: 'true'`
 set on the Action itself, not merely in `.dep-guard.json`: the Action's own
 `online` input defaults to `false` and, in that case, always appends
 `--no-online` to the scan command, which overrides a committed

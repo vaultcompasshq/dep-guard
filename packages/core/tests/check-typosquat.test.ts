@@ -352,6 +352,27 @@ describe('typosquatCheck: scoped names compare on the differing tail', () => {
     expect(findings[0].details).toMatchObject({ matchedBy: 'keyboard-adjacency' });
   });
 
+  // Audit 2026-10-28, N-c: vitest's lockfile installs @unocss/preset-wind4,
+  // the official sibling of the popular @unocss/preset-wind3. Only the
+  // scope's owner can publish under @unocss, so a PUBLISHED same-scope
+  // look-alike is a sibling, not a squat. An unpublished one still matches
+  // (the @types/ps and @types/ns tests above: neither is in the corpus).
+  test('a published name under the same scope as its look-alike is not reported', () => {
+    const top = ['@unocss/preset-wind3', 'react', 'vue'];
+    const dir = mkdtempSync(path.join(tmpdir(), 'depguard-typosquat-'));
+    const known = [...top, '@unocss/preset-wind4', '@unocss/preset-wnd3'];
+    writeFileSync(path.join(dir, 'names.bloom'), BloomFilter.create(known, known.length, 0.001).serialize());
+    writeFileSync(path.join(dir, 'top.json'), JSON.stringify(top));
+    writeFileSync(path.join(dir, 'aliases.json'), JSON.stringify({}));
+    writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({ builtAt: '2026-08-01', nameCount: known.length, fpRate: 0.001 }));
+    const corpus = loadCorpus(dir);
+
+    expect(findingsFor('@unocss/preset-wind4', { corpus })).toEqual([]);
+    expect(findingsFor('@unocss/preset-wnd3', { corpus })).toEqual([]);
+    // Unpublished, the same spelling is still reported.
+    expect(findingsFor('@unocss/preset-wind5', { corpus })).toHaveLength(1);
+  });
+
   test('a same-scope transform (not edit-distance or keyboard) matches on a short tail', () => {
     // "sm" is an adjacent transposition of "ms".
     const findings = findingsFor('@types/sm', { corpus: scopedCorpus });

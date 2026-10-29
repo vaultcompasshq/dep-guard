@@ -54,6 +54,17 @@ export interface LockEntry {
   // README.md's Lockfile support section), so there is no entry to carry
   // one.
   lookupName?: string;
+  // npm only: the entry's own "name" field, verbatim, vouched or not. Like
+  // lookupName it is never identity. It is read only where reading it can
+  // add a finding and never clear one:
+  //   - checks/candidates.ts name-checks it when it differs from the key.
+  //     With no "resolved", npm installs exactly this name at the entry's
+  //     version (audit 2026-10-28, B2), so it is the installed package;
+  //   - checks/tamper.ts reports an unresolved entry whose name field
+  //     differs from its key with no alias edge asking for it;
+  //   - delta.ts's resolutionIdentity, so an entry whose name field moved
+  //     is a changed entry rather than an unchanged one.
+  nameField?: string;
   // npm only: the entry carries "inBundle": true, so it ships inside its
   // parent package's tarball and is never fetched by name. Wording only:
   // checks/existence.ts says so instead of "may be hallucinated". It

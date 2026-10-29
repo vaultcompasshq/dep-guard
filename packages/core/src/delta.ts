@@ -118,6 +118,19 @@ export interface LockEntryChange {
   beforeCandidates?: LockEntry[];
 }
 
+// A line that names a registry package now and did not before: its
+// protocol moved into registry or alias from file:, link:, workspace:, git
+// or any other. Switching a local package to a registry spec of the same
+// name is the dependency-confusion move, and no name check read the old
+// line (review of the 2026-10-28 fix, R2).
+function isRegistryProtocol(protocol: Protocol): boolean {
+  return protocol === 'registry' || protocol === 'alias';
+}
+
+function newlyRegistryLine(previous: ManifestDep, dep: ManifestDep): boolean {
+  return isRegistryProtocol(dep.protocol) && !isRegistryProtocol(previous.protocol);
+}
+
 // The alias target an ADDED lock entry that no manifest declares may
 // install, or null. npm records a transitive alias ("string-width-cjs"
 // installed from string-width) as an entry whose own "name" field is the
@@ -398,6 +411,9 @@ function resolutionIdentity(entry: LockEntry): string {
     entry.resolvedUrl ?? '',
     entry.integrity ?? '',
     entry.hasInstallScript === true ? 'install-script' : '',
+    // An npm entry with no "resolved" installs the package its name field
+    // names, so a moved name field is a different resolution.
+    entry.nameField ?? '',
   ]);
 }
 
@@ -574,20 +590,28 @@ function manifestsWithOwnLockfile(
   return owned;
 }
 
+function lockfileManifests(
+  manifests: RepoState['manifests'],
+  lockfilePath: string,
+  owned: ReadonlySet<string>
+): RepoState['manifests'] {
+  const dir = parentDirOf(lockfilePath);
+  return [
+    ...manifests.filter((manifest) => parentDirOf(manifest.path) === dir),
+    ...manifests.filter((manifest) => parentDirOf(manifest.path) !== dir && !owned.has(manifest.path)),
+  ];
+}
+
 function attributeLockNames(
   manifests: RepoState['manifests'],
   lockfilePath: string,
   owned: ReadonlySet<string>
 ): Map<string, ManifestDep & { manifestPath: string }> {
-  const dir = parentDirOf(lockfilePath);
   // Same directory first, then manifests that do not have a lockfile of
   // their own (workspace members recorded in the root lockfile). A
   // manifest that sits beside a different lockfile is not a declaration
   // of this file's entries.
-  const ordered = [
-    ...manifests.filter((manifest) => parentDirOf(manifest.path) === dir),
-    ...manifests.filter((manifest) => parentDirOf(manifest.path) !== dir && !owned.has(manifest.path)),
-  ];
+  const ordered = lockfileManifests(manifests, lockfilePath, owned);
   const attribution = new Map<string, ManifestDep & { manifestPath: string }>();
   for (const manifest of ordered) {
     for (const dep of manifest.deps) {
@@ -1326,6 +1350,17 @@ export function computeDelta(
   ];
   const beforeDeps = indexDeps(before);
   const changes: DepChange[] = [];
+  // A line is judged as new, not as a changed one whose name the base
+  // already accepted, when nothing accepted that name before (review of the
+  // 2026-10-28 fix): its manifest is a project now and was read on the
+  // comparison side without being one, so npm installed nothing from its
+  // old lines (R1: an ignored fixture made a project by one file: line),
+  // or see newlyRegistryLine.
+  const madeProjectNow = (manifestPath: string): boolean =>
+    before?.projects !== undefined &&
+    after.projects !== undefined &&
+    (after.projects.reasons.get(manifestPath) ?? []).length > 0 &&
+    (before.projects.reasons.get(manifestPath) ?? []).length === 0;
 
   for (const manifest of after.manifests) {
     for (const dep of manifest.deps) {
@@ -1364,7 +1399,7 @@ export function computeDelta(
         previous !== undefined &&
         previous.specifier === dep.specifier &&
         pinProvenance(previous) === pinProvenance(dep);
-      if (specifierHeld && !lockEntriesDiffer(beforeSelection.entry, afterSelection.entry)) {
+      if (specifierHeld && !madeProjectNow(manifest.path) && !lockEntriesDiffer(beforeSelection.entry, afterSelection.entry)) {
         // T8-2: this dependency leaves no other trace in the scan, so an
         // ambiguity that could have decided whether the tampered entry or
         // the clean one was compared has to survive the skip. A merely
@@ -1386,7 +1421,7 @@ export function computeDelta(
         name: dep.name,
         registryName: dep.registryName,
         specifier: dep.specifier,
-        kind: previous === undefined ? 'added' : 'changed',
+        kind: previous === undefined || newlyRegistryLine(previous, dep) || madeProjectNow(manifest.path) ? 'added' : 'changed',
         depType: dep.depType,
         protocol: dep.protocol,
         manifestPath: manifest.path,

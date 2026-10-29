@@ -23,7 +23,6 @@ import {
   loadRefState,
   loadStates,
   refsNameSameTree,
-  matchGlobPath,
   probeManifestOnDisk,
   projectManifestForLockfile,
   projectReasonText,
@@ -32,6 +31,7 @@ import {
   resolveScanRoot,
 } from './git-source.js';
 import type { ScanMode } from './git-source.js';
+import { matchingIgnoreEntries, normalizeIgnorePattern } from './ignore-paths.js';
 import { assertBaseNotHeadUnderTrustBase, loadConfigAtRef, loadTrustedControls } from './trust-base.js';
 import type { ControlShapeChange, TrustedControls } from './trust-base.js';
 import {
@@ -234,62 +234,8 @@ function dedupeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
   return unique;
 }
 
-function normalizeIgnorePattern(pattern: string): string {
-  let normalized = pattern.trim();
-  while (normalized.startsWith('./')) {
-    normalized = normalized.slice(2);
-  }
-  while (normalized.endsWith('/')) {
-    normalized = normalized.slice(0, -1);
-  }
-  return normalized;
-}
-
-// config.ignorePaths was validated by config.ts from the day it landed but
-// consumed nowhere until this filter. Three ways an entry can cover a
-// finding's manifestPath: an exact match, a directory prefix (a plain
-// "vendor/" entry covers every manifest underneath it, gitignore-style), or
-// -- for an entry that actually contains a wildcard -- the same
-// greedy-star, no-RegExp matcher git-source.ts uses for workspace globs.
-// ignorePaths is attacker-writable content exactly like a workspaces
-// array, and two ReDoS bugs already came from a regex built out of pattern
-// text shaped like this; reusing the hardened matcher rather than writing
-// a second one is the point.
-//
-// Returns every normalized entry that matches manifestPath, in
-// configuration order -- not just the first one found. Callers use the
-// full list (not a boolean, and not a single winner) to track, across a
-// whole scan, which configured entries ever matched anything at all --
-// see the ignore-path-unmatched diagnostic in applyPathFilters() below:
-// the matcher's whole-path, segment-for-segment semantics are
-// exactly right for safety, but they also mean a natural-looking entry
-// like "packages/*" silently matches nothing against a manifest one
-// segment deeper ("packages/app/package.json"), and a user has no other
-// way to notice.
-//
-// Returning on the FIRST match and stopping would mean ignorePaths
-// ["package.json", "**"] reports "**" unmatched for a finding at
-// "package.json" -- "**" genuinely covers it too, it would just never be
-// reached because the exact entry ahead of it in the array matched first.
-// Every matching entry is credited instead, not only whichever one
-// happened to be checked first.
-function matchingIgnoreEntries(manifestPath: string, ignorePaths: readonly string[]): string[] {
-  const matches: string[] = [];
-  for (const raw of ignorePaths) {
-    const pattern = normalizeIgnorePattern(raw);
-    if (pattern.length === 0) {
-      continue;
-    }
-    if (
-      pattern === manifestPath ||
-      manifestPath.startsWith(`${pattern}/`) ||
-      (pattern.includes('*') && matchGlobPath(pattern, manifestPath))
-    ) {
-      matches.push(pattern);
-    }
-  }
-  return matches;
-}
+// normalizeIgnorePattern and matchingIgnoreEntries live in ignore-paths.ts,
+// shared with the name-candidate step.
 
 // Runs all six checks against one shared CheckContext. The context's
 // diagnostics array has to be the SAME array across every check call, not
@@ -1112,15 +1058,62 @@ function ignoredPathProposals(madeProjects: readonly IgnoredPathMadeProject[]): 
   return lines;
 }
 
+// The name rules both walks raise for one package.
+const NAME_RULES: ReadonlySet<string> = new Set(['typosquat', 'unknown-package', 'registered-squat']);
+
+// Which lockfile-anchored name findings repeat a manifest finding: same
+// rule, same package, and the manifest is one that lockfile records. A
+// lockfile name finding is anchored on its lockfile (manifestPath is the
+// lockfile's path).
+function mergeLockfileNameFindings(
+  raws: readonly Omit<Finding, 'fingerprint'>[],
+  manifestLockfile: (manifestPath: string) => string | undefined
+): {
+  dropped: Set<Omit<Finding, 'fingerprint'>>;
+  lockfileOf: Map<Omit<Finding, 'fingerprint'>, Omit<Finding, 'fingerprint'>>;
+} {
+  const dropped = new Set<Omit<Finding, 'fingerprint'>>();
+  const lockfileOf = new Map<Omit<Finding, 'fingerprint'>, Omit<Finding, 'fingerprint'>>();
+  const manifestFindings = new Map<string, Omit<Finding, 'fingerprint'>>();
+  for (const raw of raws) {
+    const lockfile = NAME_RULES.has(raw.ruleId) ? manifestLockfile(raw.manifestPath) : undefined;
+    if (lockfile === undefined || lockfile === raw.manifestPath) {
+      continue;
+    }
+    const key = JSON.stringify([raw.ruleId, raw.packageName, lockfile]);
+    if (!manifestFindings.has(key)) {
+      manifestFindings.set(key, raw);
+    }
+  }
+  for (const raw of raws) {
+    if (!NAME_RULES.has(raw.ruleId)) {
+      continue;
+    }
+    const manifestFinding = manifestFindings.get(JSON.stringify([raw.ruleId, raw.packageName, raw.manifestPath]));
+    if (manifestFinding === undefined) {
+      continue;
+    }
+    dropped.add(raw);
+    lockfileOf.set(manifestFinding, raw);
+  }
+  return { dropped, lockfileOf };
+}
+
 export function applyPathFilters(
   rawFindings: Omit<Finding, 'fingerprint'>[],
   config: Pick<ResolvedConfig, 'ignorePaths'>,
   baseline: Set<string>,
   diagnostics: Diagnostic[],
   alreadyMatched: ReadonlySet<string> = new Set(),
-  sides: PathFilterSides = NO_REFERENCE
+  sides: PathFilterSides = NO_REFERENCE,
+  manifestLockfile: (manifestPath: string) => string | undefined = () => undefined
 ): PathFilterResult {
   const findings: Finding[] = [];
+  const survivors: Array<{
+    raw: Omit<Finding, 'fingerprint'>;
+    keep: { position: string } | null;
+    matches: string[];
+  }> = [];
   let suppressed = 0;
   let ignored = 0;
   let ignoreKept = 0;
@@ -1191,11 +1184,43 @@ export function applyPathFilters(
       }
       ignoreKept += 1;
     }
-    const fingerprint = fingerprintFinding(raw);
-    if (baseline.has(fingerprint)) {
+    // The baseline, before the merge below (lockfilePath is not part of a
+    // fingerprint, so merging cannot move one).
+    if (baseline.has(fingerprintFinding(raw))) {
       suppressed += 1;
       continue;
     }
+    survivors.push({ raw, keep, matches });
+  }
+
+  // One package, one rule, one lockfile: a name a manifest line and a
+  // lockfile entry both carry is checked twice (checks/candidates.ts,
+  // lockEntryNames, exempts nothing), and reported once. Only over what
+  // survived ignorePaths AND the baseline: a manifest finding either one
+  // dropped never takes the lockfile's with it (re-review RB1: a baselined
+  // stray line swallowed a new nested install). The kept finding is the
+  // manifest's, with the lockfile added as its second anchor.
+  const mergedInto = mergeLockfileNameFindings(
+    survivors.map((survivor) => survivor.raw),
+    manifestLockfile
+  );
+  for (const { raw: survivorRaw, keep, matches } of survivors) {
+    if (mergedInto.dropped.has(survivorRaw)) {
+      continue;
+    }
+    // The merged finding names the lockfile finding's own fingerprint, so a
+    // reader who baselines what this run shows can baseline both at once:
+    // each is suppressed only by its own entry.
+    const lockfileFinding = mergedInto.lockfileOf.get(survivorRaw);
+    const raw =
+      lockfileFinding === undefined
+        ? survivorRaw
+        : {
+            ...survivorRaw,
+            lockfilePath: lockfileFinding.manifestPath,
+            details: { ...survivorRaw.details, lockfileFingerprint: fingerprintFinding(lockfileFinding) },
+          };
+    const fingerprint = fingerprintFinding(raw);
     findings.push(
       keep === null ? { ...raw, fingerprint } : { ...raw, fingerprint, ignoreOverride: { entries: matches, position: keep.position } }
     );
@@ -1746,7 +1771,21 @@ export async function scan(opts: {
   const ecosystems = summarizeEcosystems(ctx, statePair.after.manifests, pypiStats, statePair.after.notParsed ?? []);
 
   const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
-  const filtered = applyPathFilters(rawFindings, config, baseline, diagnostics, lockfileIgnoreMatches, pathFilterSides);
+  const lockfileByManifest = new Map<string, string>();
+  for (const change of delta.changes) {
+    if (change.lockfilePath !== undefined && !lockfileByManifest.has(change.manifestPath)) {
+      lockfileByManifest.set(change.manifestPath, change.lockfilePath);
+    }
+  }
+  const filtered = applyPathFilters(
+    rawFindings,
+    config,
+    baseline,
+    diagnostics,
+    lockfileIgnoreMatches,
+    pathFilterSides,
+    (manifestPath) => lockfileByManifest.get(manifestPath)
+  );
   // On a pull-request run, a path the change makes a project under an
   // ignorePaths entry is a change to that control, so it is a proposal,
   // pushed the way the Python index proposal is.

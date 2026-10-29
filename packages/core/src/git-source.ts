@@ -1991,7 +1991,8 @@ export function confirmWorkspaceLocalNames(
       message:
         `${lockfilePath}: records "link": true for ` +
         `${still.map(([name, reason]) => `"${name}" (${reason})`).join(', ')}, so ` +
-        `${still.length === 1 ? 'that name is' : 'those names are'} name-checked like any registry dependency`,
+        `${still.length === 1 ? 'that name is' : 'those names are'} not treated as a workspace package: a ` +
+        'registry dependency or registry lock entry of that name is name-checked like any other',
     });
   }
   return byDir;

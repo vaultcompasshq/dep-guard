@@ -413,14 +413,30 @@ function matchName(name: string, ctx: CheckContext, index: TopIndex): Match | nu
     return null;
   }
 
-  return (
-    separatorMatch(name, ctx.corpus, index) ??
-    scopeMatch(name, ctx.corpus, index) ??
-    repetitionMatch(name, ctx.corpus, index) ??
-    transpositionMatch(name, ctx.corpus, index) ??
-    keyboardMatch(name, ctx.corpus, index) ??
-    distanceMatch(name, ctx.corpus)
-  );
+  // A published name under the same npm scope as the name it resembles
+  // ("@unocss/preset-wind4" beside "@unocss/preset-wind3") was published by
+  // that scope's owner: nobody else can publish under a scope, so it is a
+  // sibling, not a squat (audit 2026-10-28, N-c, from vitest's lockfile).
+  // Only a name the corpus knows: an unpublished same-scope name is still
+  // the hallucination the existence check reports, and its resemblance is
+  // still worth saying. Each rule is tried in turn, so a sibling skipped
+  // here can still match an unscoped target through a later rule.
+  const known = ctx.corpus.hasName(name);
+  const rules: Array<() => Match | null> = [
+    () => separatorMatch(name, ctx.corpus, index),
+    () => scopeMatch(name, ctx.corpus, index),
+    () => repetitionMatch(name, ctx.corpus, index),
+    () => transpositionMatch(name, ctx.corpus, index),
+    () => keyboardMatch(name, ctx.corpus, index),
+    () => distanceMatch(name, ctx.corpus),
+  ];
+  for (const rule of rules) {
+    const match = rule();
+    if (match !== null && !(known && sameScopeTails(name, match.target) !== null)) {
+      return match;
+    }
+  }
+  return null;
 }
 
 // Confidence, not proximity, decides severity. The alias list is 48 pairs

@@ -125,8 +125,7 @@ inputs:
       dependencies against, so the lockfile-tamper signals that work by
       comparison (resolved-URL change, integrity change, source-host
       change) cannot run, and every dependency reads as newly added. See
-      the README's pull-request-mode table for exactly what still runs in
-      that case.
+      docs/pull-request-mode.md for exactly what still runs in that case.
 
       There is no value that turns comparison off, and `off` is refused
       with an error on every event rather than ignored, for the same
@@ -848,7 +847,7 @@ runs:
         # decides what the scan compares dependencies against, not whose
         # config is trusted, so without it the scan has no earlier
         # revision and the lockfile-tamper comparison signals cannot run
-        # (see the README's pull-request-mode table).
+        # (see docs/pull-request-mode.md).
         #
         # UNLIKE --trust-base, DG_BASE CANNOT BE NON-EMPTY HERE ON A
         # pull_request EVENT. The validate step above refuses an explicit

@@ -1,4 +1,4 @@
-import { acceptedTransitiveAliasTarget, type DepChange } from '../delta.js';
+import { acceptedTransitiveAliasTarget, type DepChange, type LockEntryChange } from '../delta.js';
 import type { DepType, Protocol } from '../manifest.js';
 import { resolutionKindOf, resolutionOf } from '../resolution.js';
 import { PYTHON_EXCLUSION_CLASSES, type PythonExclusionClass } from '../python-types.js';
@@ -41,7 +41,7 @@ export interface NewName {
   change: DepChange;
   registryName: string;
   // 'lockfile' for a name only a lockfile entry records
-  // (undeclaredLockEntryNames). Every check judges it like any other name.
+  // (lockEntryNames). Every check judges it like any other name.
   source?: 'lockfile';
   // Set on a lockfile-only name whose lockfile is wholly new in this change
   // (DependencyDelta.whollyNewLockfiles), or on a run with no comparison
@@ -179,22 +179,49 @@ function acceptedAliasTargets(ctx: CheckContext): DepChange[] {
   return changes;
 }
 
-// Every ADDED npm or pnpm lockfile entry no manifest declares that installs
-// from a registry, as an added registry dependency anchored on its
-// lockfile. A lockfile is mostly entries nobody declares, and the package
-// manager installs every one of them: a new node_modules/<name> entry for
-// a known-malicious name used to scan clean because the name checks read
-// manifest lines only (audit 2026-10-27, N5). Python lockfile names were
-// already checked this way (pypiCandidates below).
+// Every added or changed npm or pnpm lockfile entry that installs from a
+// registry, as an added registry dependency anchored on its lockfile. A lockfile is mostly entries nobody declares, and the
+// package manager installs every one of them: a new node_modules/<name>
+// entry for a known-malicious name used to scan clean because the name
+// checks read manifest lines only (audit 2026-10-27, N5). Python lockfile
+// names were already checked this way (pypiCandidates below).
 //
-// The name is the lockfile key (npm's installed name, pnpm's registry
-// name), never the entry's own "name" field: identity never comes from a
-// field the lockfile author writes (delta.ts, LockEntryChange). Left out,
-// each for a reason:
+// The name checked is the name the entry INSTALLS. That is the lockfile
+// key (npm's installed name, pnpm's registry name), except for an npm
+// entry whose own "name" field differs from its key: npm installs that
+// name (from "resolved" when there is one, which the tamper check's
+// tarball-identity rule holds to the key; by name and version when there
+// is not, audit 2026-10-28, B2). The name field is checked IN ADDITION to
+// the key, never instead of it, unless an alias edge or an alias
+// declaration says the key is only a folder name. Checking a name is
+// additive: it can raise a finding and never clear one, so a field the
+// lockfile author writes is safe here and still never becomes identity
+// (delta.ts, LockEntryChange).
 //
-// - a changed entry: the base had the name already, as for a manifest
-//   dependency whose version moved;
-// - a declared entry: the manifest walk judges it at its manifest;
+// No manifest line exempts an entry, whether or not some manifest declares
+// its name. Every attempt to say which declaration "already judged" the
+// name was wider than its reason: any line of any protocol (a "file:" line
+// named after a malicious package, audit 2026-10-28 B1), an ignored stray,
+// a line already on the base in a manifest npm never installed from, and a
+// line whose protocol moved from file: to registry (review R1, R2, N-2) all
+// let a registry entry of that name install unjudged. The exemption only
+// ever avoided reporting one name twice; scan.ts reports a manifest finding
+// and a lockfile finding of one package under one rule as one finding with
+// both anchors (mergeLockfileNameFindings), after ignorePaths.
+//
+// A changed entry is checked only for a name it did not install before:
+// its name field, when no earlier candidate under the same key carried
+// it. Its key is the name npm installed there on the comparison side
+// already, so the change brings no new name; checking it again sent every
+// transitive version bump to the online checks (three times the lookups
+// on the online fixtures, so a lockfile refresh would spend a
+// pull-request run's budget) and made every bump of a name the corpus
+// does not know a blocking unknown-package. What this rule removed is the
+// exemption for names a manifest DECLARES, not this one for names the
+// base already INSTALLED under the same key.
+//
+// Left out, each for a reason:
+//
 // - an accepted transitive alias: acceptedAliasTargets judges the target,
 //   which is what installs, and the key is only the folder name;
 // - a git, file or other non-registry resolution, and a pnpm entry whose
@@ -205,12 +232,18 @@ function acceptedAliasTargets(ctx: CheckContext): DepChange[] {
 //   registry install by name and version, and is checked.
 const PNPM_LOCAL_VERSION = /^(?:file|link|portal|workspace):/;
 
-function undeclaredLockEntryNames(ctx: CheckContext): DepChange[] {
+// The names an entry installs: see the comment above.
+function installedNames(entryChange: LockEntryChange, format: 'npm' | 'pnpm'): { key: string; field: string | null } {
+  const field = entryChange.after.nameField;
+  if (format !== 'npm' || field === undefined || field.trim().length === 0 || field === entryChange.name) {
+    return { key: entryChange.name, field: null };
+  }
+  return { key: entryChange.name, field };
+}
+
+function lockEntryNames(ctx: CheckContext): DepChange[] {
   const changes: DepChange[] = [];
   for (const entryChange of ctx.delta.lockEntryChanges) {
-    if (entryChange.kind !== 'added' || entryChange.declared === true) {
-      continue;
-    }
     const format = entryChange.lockfileFormat ?? ctx.delta.lockfileFormat;
     if (format !== 'npm' && format !== 'pnpm') {
       continue;
@@ -239,18 +272,33 @@ function undeclaredLockEntryNames(ctx: CheckContext): DepChange[] {
     if (resolution !== null && resolutionKindOf(resolution) !== 'registry') {
       continue;
     }
-    changes.push({
-      name: entryChange.name,
-      registryName: entryChange.packageName,
-      specifier: version ?? '*',
-      kind: 'added',
-      depType: 'dependencies',
-      protocol: 'registry',
-      manifestPath: entryChange.manifestPath,
-      lockfilePath: entryChange.lockfilePath,
-      lockfileFormat: format,
-      ...(entryChange.after.inBundle === true ? { bundled: true as const } : {}),
-    });
+    const { key, field } = installedNames(entryChange, format);
+    // The key is only a folder name when the lockfile's own alias edge, or
+    // a manifest alias line under this key (its registry name is then the
+    // entry's packageName, delta.ts), asks for the name field.
+    const keyIsFolder =
+      field !== null && ((entryChange.aliasTargets ?? []).includes(field) || entryChange.packageName === field);
+    const added = entryChange.kind === 'added';
+    const earlier = entryChange.beforeCandidates ?? (entryChange.before === undefined ? [] : [entryChange.before]);
+    const fieldIsNew = field !== null && (added || !earlier.some((before) => before.nameField === field));
+    const names = [...(added && !keyIsFolder ? [key] : []), ...(field !== null && fieldIsNew ? [field] : [])];
+    for (const name of names) {
+      changes.push({
+        name: entryChange.name,
+        registryName: name,
+        specifier: version ?? '*',
+        kind: 'added',
+        depType: 'dependencies',
+        protocol: 'registry',
+        // Always the lockfile: the entry is what installs, and a declaring
+        // manifest is no anchor for it (B1: an ignored stray manifest took
+        // the finding down with it).
+        manifestPath: entryChange.lockfilePath,
+        lockfilePath: entryChange.lockfilePath,
+        lockfileFormat: format,
+        ...(entryChange.after.inBundle === true ? { bundled: true as const } : {}),
+      });
+    }
   }
   return changes;
 }
@@ -336,7 +384,7 @@ function npmNames(ctx: CheckContext): NewName[] {
   const seen = new Set<string>();
   const names: NewName[] = [];
 
-  const fromLockfile = new Set(undeclaredLockEntryNames(ctx));
+  const fromLockfile = new Set(lockEntryNames(ctx));
   for (const change of [...ctx.delta.changes, ...acceptedAliasTargets(ctx), ...fromLockfile]) {
     if (nameEcosystemOf(change.protocol) !== 'npm') {
       continue;
@@ -354,7 +402,11 @@ function npmNames(ctx: CheckContext): NewName[] {
       continue;
     }
 
-    if (isWorkspaceLocal(ctx, change, registryName)) {
+    // A lockfile name is never workspace-local here: a workspace package
+    // is a "link" entry, which never reaches the entry list, so a lock
+    // entry of the same name is a registry install of something else
+    // (B1).
+    if (!fromLockfile.has(change) && isWorkspaceLocal(ctx, change, registryName)) {
       continue;
     }
 

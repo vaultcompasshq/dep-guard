@@ -2,9 +2,20 @@
 
 | Ecosystem | Files read | Name checks | Lockfile checks |
 |---|---|---|---|
-| npm | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` (`yarn.lock`, `bun.lock` noted, not parsed) | unknown-package against the shipped corpus, and the registry with `--online`; typosquat against the shipped popularity list; registered-squat and asymmetry with `--online`. Judged: every added manifest dependency, and (0.17.0) every added npm or pnpm lockfile entry no manifest declares that installs from a registry, anchored on its lockfile; registered-squat does not send a lockfile-only name from a lockfile wholly new in the change, or on a run with no comparison side | tamper, install-script, publish-age (`--online`) |
+| npm | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` (`yarn.lock`, `bun.lock` noted, not parsed) | unknown-package against the shipped corpus, and the registry with `--online`; typosquat against the shipped popularity list; registered-squat and asymmetry with `--online`. Judged: every added registry or alias manifest dependency (a line whose protocol moves into registry counts as added), and every added npm or pnpm lockfile entry that installs from a registry, whatever any manifest declares, anchored on its lockfile (0.17.0 claimed this but left out any entry whose name some manifest line carried, a `file:` or ignored one included; fixed after 0.17.0). A manifest finding and a lockfile finding of one package under one rule are reported once, with both paths. For npm the name an entry installs is its key and, when it differs, its own `name` field (pnpm takes it from the key); registered-squat does not send a lockfile-only name from a lockfile wholly new in the change, or on a run with no comparison side | tamper, install-script, publish-age (`--online`) |
 | Python (PyPI) | requirements files, `pyproject.toml`, `Pipfile`, `poetry.lock`, `uv.lock`, `pdm.lock`, `Pipfile.lock` | unknown-package with `--online` only (PyPI existence; no corpus ships); typosquat against the repository's own Python names only | none: Python lockfiles are read for names; their hashes and sources are not judged. A git or url requirement is a tamper git-source or url-source finding, as for npm. Requirements pinned exactly are not a lockfile dep-guard compares |
 | Go | none: `go.mod` and `go.sum` are not read by dep-guard | none | none |
+
+Known false-positive class: typosquat lows on real, established packages
+whose names sit one or two edits from a popular one. A lockfile carries
+hundreds of transitive names, so judging them (0.17.0) surfaces more of
+these: on vitest-dev/vitest, `flru`, `markdown-title` and `millify` are
+real packages reported as low typosquats. Resemblance alone cannot tell a
+sibling from a squat, which is why every resemblance match is low and
+outside the default gate; `allow` silences a reviewed name. One sub-class
+has a principled answer and is not reported: a published name under the
+same npm scope as the name it resembles (`@unocss/preset-wind4` beside
+`@unocss/preset-wind3`), since only the scope's owner can publish there.
 
 Every run that saw an ecosystem prints a `coverage:` block under the summary
 (and under the `names:` line when there is one): per ecosystem, read or not
