@@ -3367,8 +3367,8 @@ control for version choice: it admits every published version. On a same-repo
 is written by the pull request being judged. Once a second scanner version
 exists, that is a bypass with an innocent shape: deleting a security step reads
 as deleting a security step, while `version: 0.11.0` reads as version
-management. Twenty-two scanners are published below the tag scanner, 0.1.0
-through 0.16.1, so the shape check admits twenty-two versions below it. What stops those today is
+management. Twenty-three scanners are published below the tag scanner, 0.1.0
+through 0.17.0, so the shape check admits twenty-three versions below it. What stops those today is
 not the shape check but a FLAG: `--trust-base` arrived in 0.6.0, the run step
 appends it on every pull-request run with no opt-out, and a scanner at or below
 0.5.0 answers `error: unknown option '--trust-base'`. A backward pin therefore
@@ -3462,8 +3462,8 @@ else.
   that branch's own workflow file, written by the same author, with
   `GITHUB_BASE_REF` empty, so it is as author-controlled as a pull request and
   the rule does not cover it.
-- It is not free today. Twenty-two scanners are published below the tag scanner,
-  so a consumer pinning any of 0.1.0 through 0.16.1 passes the shape check on a
+- It is not free today. Twenty-three scanners are published below the tag scanner,
+  so a consumer pinning any of 0.1.0 through 0.17.0 passes the shape check on a
   pull request now and is
   refused, with a message telling them to remove the input or raise it. A pin
   below 0.6.0 is already broken on that event, because no scanner below 0.6.0
@@ -3471,14 +3471,14 @@ else.
   that failure from the scan to a named refusal at validate. A pin of 0.6.0
   through 0.11.0 fails on version alone, since each knows `--trust-base` and
   would otherwise run cleanly; 0.11.0 is the withdrawn release this tag
-  replaces. Pins at or above 0.17.0 are unaffected.
+  replaces. Pins at or above 0.18.0 are unaffected.
 
 **Enforced by:** the `pinning the scanner backward on a pull request` cases in
 `scripts/tests/action-run-script.test.mjs`. One case drives the SHIPPED,
 unmodified step with `version: 0.5.9` and `GITHUB_BASE_REF` set, and asserts
-the refusal names both 0.5.9 and 0.17.0, with the same input accepted when
+the refusal names both 0.5.9 and 0.18.0, with the same input accepted when
 `GITHUB_BASE_REF` is unset: the rule is observable on the real file, because
-twenty-two published versions sit below the tag scanner. The cases that need a
+twenty-three published versions sit below the tag scanner. The cases that need a
 version below a FUTURE tag scanner, to exercise the comparison as it will
 behave once a second scanner in the 0.11.1-or-newer family ships, drive the real
 step text with the tag-scanner constant advanced one minor version and assert

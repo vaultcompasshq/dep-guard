@@ -233,7 +233,7 @@ steps:
       # and the baseline from the base branch, which a shallow checkout
       # does not have.
       fetch-depth: 0
-  - uses: vaultcompasshq/dep-guard@v0.17.0
+  - uses: vaultcompasshq/dep-guard@v0.18.0
     with:
       path: .
       online: 'true'
@@ -292,8 +292,8 @@ refused with a message saying so.
 
 **On a pull request, `version` may not pin BACKWARD.** The shape check above
 proves the value names a version and says nothing about which one, so every
-published version clears it, and twenty-two are published below the tag scanner
-(0.1.0 through 0.16.1).
+published version clears it, and twenty-three are published below the tag scanner
+(0.1.0 through 0.17.0).
 What stops a backward pin today is not that check but a flag: `--trust-base`
 arrived in the 0.6.0 scanner, the run step appends it on every pull-request run
 with no opt-out, and a scanner at or below 0.5.0 answers `error: unknown option
@@ -313,7 +313,7 @@ allowed there, on an assumption the rule does not enforce: that a newer scanner
 is at least as strict. That assumption has already failed once: 0.11.0 could
 skip a workspace member or a lockfile under a directory named `build`,
 `dist`, `vendor`, `vendored`, `venv` or `.venv`, and is deprecated on npm.
-Use 0.17.0 or newer; do not pin 0.11.0. Nothing bounds a forward
+Use 0.18.0 or newer; do not pin 0.11.0. Nothing bounds a forward
 pin. The comparison is against a constant in `action.yml`, which comes from the ref your workflow's `uses:`
 names rather than from the pull request's tree. That holds when your workflow
 names this action by owner and ref; if it names a LOCAL PATH instead, the
@@ -329,14 +329,14 @@ branch's own workflow file, written by the same author, so it is as
 author-controlled as a pull request and is not covered.
 
 The refusal names both numbers and the fix, which is to **remove the `version`
-input**. What it costs: twenty-two scanners are published below the tag scanner,
-so a workflow pinning any of `0.1.0` through `0.16.1` passes the shape check on a pull request today and
+input**. What it costs: twenty-three scanners are published below the tag scanner,
+so a workflow pinning any of `0.1.0` through `0.17.0` passes the shape check on a pull request today and
 is refused by this rule. A pin below `0.6.0` is already broken on that event,
 since those scanners do not know `--trust-base`; the change there is that the
 job fails at the validate step with a message saying why. A pin of `0.6.0`,
-`0.7.0`, `0.8.0`, `0.9.0`, `0.10.0`, `0.10.1`, `0.11.0`, `0.11.1`, `0.12.0`, `0.13.0`, `0.14.0`, `0.15.0`, `0.16.0`, or `0.16.1` fails on version alone: it
+`0.7.0`, `0.8.0`, `0.9.0`, `0.10.0`, `0.10.1`, `0.11.0`, `0.11.1`, `0.12.0`, `0.13.0`, `0.14.0`, `0.15.0`, `0.16.0`, `0.16.1`, or `0.17.0` fails on version alone: it
 knows `--trust-base` and would otherwise run cleanly. **Remove the `version` input,
-or raise it to `0.17.0` or newer.**
+or raise it to `0.18.0` or newer.**
 
 **What it does not cover, and what it costs on forks.** A fork's
 `pull_request` run uses the base repository's workflow file, so a fork author

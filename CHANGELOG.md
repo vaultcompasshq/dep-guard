@@ -10,6 +10,11 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-28
+
+This is a security release: it closes lockfile name-check bypasses found in
+the 2026-10-28 audit.
+
 Fixes from the 2026-10-28 cohesion audit. Each one can turn a green audit,
 commit or pull request red; none loosens a verdict except the same-scope
 typosquat change, which drops a low.
