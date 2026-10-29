@@ -34,9 +34,11 @@ export function sanitizeText(input: string): string {
 }
 
 function renderFinding(finding: Finding): string {
-  const location = finding.lockfilePath
-    ? `${finding.manifestPath}, ${finding.lockfilePath}`
-    : finding.manifestPath;
+  // A finding anchored on its lockfile names it once (audit 2026-10-28, N-d).
+  const location =
+    finding.lockfilePath && finding.lockfilePath !== finding.manifestPath
+      ? `${finding.manifestPath}, ${finding.lockfilePath}`
+      : finding.manifestPath;
   return `  ${sanitizeText(finding.packageName)}  [${finding.severity}]  ${finding.ruleId}  ${sanitizeText(finding.message)} (${sanitizeText(location)})`;
 }
 

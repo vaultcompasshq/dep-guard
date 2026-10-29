@@ -121,16 +121,19 @@ function entryFromPackageValue(
   // that vouching is not silently used and not silently dropped either: a
   // name this parser cannot verify has to be visible as unverified.
   if (typeof value.name === 'string') {
+    entry.nameField = value.name;
     const vouched = entry.resolvedUrl === undefined ? null : registryTarballPackageName(entry.resolvedUrl);
     if (vouched !== null && vouched === value.name) {
       entry.lookupName = value.name;
     } else {
+      // Not "ignored": the name checks judge it (LockEntry.nameField). What
+      // an unvouched name never becomes is identity or a lookup hint.
       diagnostics.push({
         code: UNVERIFIABLE_NAME_CODE,
         message:
           `${path}: packages["${key}"] declares "name": "${value.name}", but its resolved location ` +
-          'does not vouch for that name (no registry tarball URL naming it exactly); the lockfile-' +
-          'declared name is ignored for registry lookups',
+          'does not vouch for that name (no registry tarball URL naming it exactly); that name is ' +
+          'name-checked but never used as the entry\'s identity or for registry lookups',
       });
     }
   }

@@ -601,8 +601,8 @@ describe('N5 an added lockfile entry no manifest declares is name-checked', () =
   });
 
   // Not name checks' business: a version bump of a name the base already
-  // had, a git or file resolution (the tamper check judges those), and a
-  // pnpm directory dependency.
+  // installed under the same key, a git or file resolution (the tamper
+  // check judges those), and a pnpm directory dependency.
   test('N5c an entry that is not a new registry name is not name-checked', async () => {
     await write('package.json', pkg('app', {}));
     await write('package-lock.json', npmLock({ 'node_modules/react/node_modules/lodahs': registryEntry('lodahs', '1.0.0') }));
@@ -684,10 +684,11 @@ describe('N5 an added lockfile entry no manifest declares is name-checked', () =
     }
   });
 
-  // A name the base manifest already declared was accepted then; its lock
-  // entry appearing later (a lockfile regenerated after the fact) is a
-  // declared entry and is not re-checked as new.
-  test('N5d a declared name the base already had is not re-checked when its lock entry first appears', async () => {
+  // Reversed by the 2026-10-28 review: no declaration exempts a lock entry
+  // any more (every attempt to say which one "already judged" the name
+  // was wider than its reason), so a new entry of a name the base manifest
+  // already declared is checked, anchored on the lockfile.
+  test('N5d a declared name the base already had is checked when its lock entry first appears', async () => {
     await write('package.json', pkg('app', { lodahs: '^1.0.0' }));
     await write('package-lock.json', npmLock());
     await commit('base');
@@ -698,7 +699,10 @@ describe('N5 an added lockfile entry no manifest declares is name-checked', () =
     const results = await runModes(['base', 'trust', 'staged']);
     for (const [mode, result] of results) {
       const named = findingsFor(result, 'lodahs').filter((finding) => ['typosquat', 'unknown-package'].includes(finding.ruleId));
-      expect({ mode, named }).toEqual({ mode, named: [] });
+      expect({ mode, anchors: [...new Set(named.map((finding) => finding.manifestPath))] }).toEqual({
+        mode,
+        anchors: ['package-lock.json'],
+      });
     }
   });
 

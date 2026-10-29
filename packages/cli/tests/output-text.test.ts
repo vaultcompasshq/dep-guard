@@ -369,3 +369,24 @@ describe('renderText: online summary line', () => {
     expect(text).not.toContain('online:');
   });
 });
+
+// Audit 2026-10-28, N-d: a finding anchored on its lockfile printed the
+// path twice.
+describe('renderText finding location', () => {
+  const finding = (manifestPath: string): ScanResult['findings'][number] => ({
+    ruleId: 'lockfile-tamper',
+    severity: 'high',
+    packageName: 'lodahs',
+    message: 'm',
+    manifestPath,
+    lockfilePath: 'package-lock.json',
+    fingerprint: 'f',
+  });
+
+  test('names a lockfile anchor once, and a manifest anchor with its lockfile', () => {
+    const text = renderText({ ...scanResult(OFFLINE), findings: [finding('package-lock.json'), finding('package.json')] });
+    expect(text).toContain('(package-lock.json)');
+    expect(text).not.toContain('(package-lock.json, package-lock.json)');
+    expect(text).toContain('(package.json, package-lock.json)');
+  });
+});

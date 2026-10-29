@@ -115,9 +115,9 @@ jobs:
 
     - name: Run the guardrail gates
       id: conductor
-      uses: vaultcompasshq/conductor@257830bd4b94a81419189b641508f1dda0950d00 # v0.15.0
+      uses: vaultcompasshq/conductor@be3f33defcca091c403af6d2dc6e377ef5b94af7 # v0.16.0
       with:
-        dep-guard-version: 0.17.0
+        dep-guard-version: 0.18.0
         output: conductor.sarif
 
     - name: Upload the SARIF log

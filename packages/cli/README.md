@@ -107,10 +107,12 @@ versions:
 - `1` -- findings at or above the threshold.
 - `2` -- something went wrong: an unreadable corpus, an invalid config, a
   bad flag. A gate that cannot read its own inputs fails closed rather than
-  reporting clean.
+  reporting clean. A `--base` or `--trust-base` run that left a candidate
+  name unchecked by an online check also exits `2`, with a full report,
+  unless `onlineUnchecked` is set to `"note"`.
 
 Set the threshold with `--fail-on critical|high|medium|low|none`. The
-default is `medium`. Diagnostics never move the exit code.
+default is `medium`. Other diagnostics never move the exit code.
 
 `--format json` prints exactly one result object on stdout and sends every
 diagnostic to stderr, so stdout can be piped straight into a parser with no

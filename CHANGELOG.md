@@ -10,6 +10,95 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-28
+
+This is a security release: it closes lockfile name-check bypasses found in
+the 2026-10-28 audit.
+
+Fixes from the 2026-10-28 cohesion audit. Each one can turn a green audit,
+commit or pull request red; none loosens a verdict except the same-scope
+typosquat change, which drops a low.
+
+### Fixed
+
+- **0.17.0 overstated what it closed.** Its entry above says every added
+  lockfile entry "no manifest declares" is judged, and that a "declared"
+  one is left out because the manifest walk judges it. "Declared" meant
+  that some manifest line anywhere carried the entry's name, whatever its
+  protocol and whether ignorePaths dropped that manifest's findings. Two
+  reproduced bypasses installed a known-malicious package with real
+  `npm ci` and exited 0, through conductor's `--trust-base` run too:
+  - a `file:` (or `link:`, `workspace:`, git) dependency named after the
+    package, beside a registry entry of that name nested under another
+    package (`node_modules/ms/node_modules/<name>`). No name check reads a
+    `file:` line, so nothing judged the registry entry. An npm workspace
+    package of the same name exempted it the same way;
+  - a stray manifest covered by ignorePaths declaring the name, whether
+    added in the change or already on the base. That line exempted the
+    entry, and the only finding left was the manifest's own, which
+    ignorePaths dropped (or none, when the line was already on the base).
+  An independent review of a narrower fix found three more shapes of the
+  same hole: an ignored fixture already on the base made a project by one
+  `file:` line, a local `file:` package switched to a registry spec of the
+  same name, and a base line in a stray npm never installs from. The rule
+  is now simple: **no manifest line exempts a lockfile entry.** Every added
+  npm or pnpm lockfile entry that installs from a registry is name-checked
+  by the name it installs, anchored on its lockfile, whatever any manifest
+  declares. A changed entry is checked for a name it did not install
+  before (its `name` field moved); its key, which npm installed there on
+  the base already, is not re-checked. Where a manifest finding and a
+  lockfile finding name the same package under the same rule, they are
+  reported as one finding with both anchors, after ignorePaths and after
+  the baseline, so a manifest finding either one drops never takes the
+  lockfile's with it. The merged finding names the lockfile finding's
+  fingerprint as `details.lockfileFingerprint`: to baseline such a name,
+  baseline both fingerprints. Behaviour change: the lock entries an ignored
+  project installs are now judged on their own, anchored on the lockfile;
+  the project's own manifest findings stay the adopter's standing choice.
+  Also on the manifest side: a line whose protocol moves into registry or
+  alias (from `file:`, `link:`, `workspace:`, git or url) is judged as a
+  new registry line, and every line of a manifest this change makes a
+  project, that was read but was not a project on the base, is judged as
+  new.
+- **An npm entry's `name` field is now name-checked.** An entry with a
+  `name` field and no `resolved` installs the package that field names, by
+  name and version, and only the key was checked: `node_modules/supports-color`
+  with `"name": "crossenv"` installed crossenv and scanned clean. The field
+  is checked in addition to the key (instead of it when an `npm:` alias
+  edge or an alias declaration asks for it), on an added entry and on a
+  changed one whose field moved. It is still never the entry's identity.
+  An unresolved entry (no `resolved`, an empty one, or one this scan
+  cannot parse; npm treats an empty one as absent) whose field differs
+  from its key with no alias edge or declaration asking for it is also a
+  medium lockfile-tamper finding (`name-field-unvouched:<name>`). pnpm
+  takes the installed name from the key, not from a `name` field (checked
+  with real pnpm by the review), so this applies to npm only; that pnpm
+  did take the version from the entry's `version` field over the key's. The `npm-lockfile-unverifiable-name`
+  note no longer says the field is ignored. A resolved URL that names
+  another package was already a critical tarball-identity finding,
+  declared or not; that is now pinned by a test.
+- `workspace-link-unconfirmed` said an unconfirmed name "is name-checked
+  like any registry dependency", which was false for a `file:` line of
+  that name. It now says the name is not treated as a workspace package,
+  so a registry dependency or registry lock entry of it is name-checked.
+- A lockfile-anchored finding printed its path twice in text output
+  ("(package-lock.json, package-lock.json)"). It prints it once.
+- A typosquat low on a published name under the same npm scope as the
+  name it resembles is dropped: only the scope's owner can publish there,
+  so `@unocss/preset-wind4` beside `@unocss/preset-wind3` is a sibling. An
+  unpublished same-scope name is still reported.
+
+### Changed
+
+- Development dependency fast-uri 3.1.9 (transitive, dev only), closing
+  four Dependabot alerts.
+- Documentation: the Action input list names `base`; publish age is one of
+  five online checks (four others, not three); the npm page says which
+  exit 2 still prints a report; action.yml points at
+  docs/pull-request-mode.md; docs/ecosystem-coverage.md records typosquat
+  lows on real transitive packages (`flru`, `markdown-title`, `millify` on
+  vitest) as a known false-positive class.
+
 ## [0.17.0] - 2026-10-28
 
 Fixes from the 2026-10-27 cohesion audit. Each one can turn a green audit,

@@ -3367,8 +3367,8 @@ control for version choice: it admits every published version. On a same-repo
 is written by the pull request being judged. Once a second scanner version
 exists, that is a bypass with an innocent shape: deleting a security step reads
 as deleting a security step, while `version: 0.11.0` reads as version
-management. Twenty-two scanners are published below the tag scanner, 0.1.0
-through 0.16.1, so the shape check admits twenty-two versions below it. What stops those today is
+management. Twenty-three scanners are published below the tag scanner, 0.1.0
+through 0.17.0, so the shape check admits twenty-three versions below it. What stops those today is
 not the shape check but a FLAG: `--trust-base` arrived in 0.6.0, the run step
 appends it on every pull-request run with no opt-out, and a scanner at or below
 0.5.0 answers `error: unknown option '--trust-base'`. A backward pin therefore
@@ -3462,8 +3462,8 @@ else.
   that branch's own workflow file, written by the same author, with
   `GITHUB_BASE_REF` empty, so it is as author-controlled as a pull request and
   the rule does not cover it.
-- It is not free today. Twenty-two scanners are published below the tag scanner,
-  so a consumer pinning any of 0.1.0 through 0.16.1 passes the shape check on a
+- It is not free today. Twenty-three scanners are published below the tag scanner,
+  so a consumer pinning any of 0.1.0 through 0.17.0 passes the shape check on a
   pull request now and is
   refused, with a message telling them to remove the input or raise it. A pin
   below 0.6.0 is already broken on that event, because no scanner below 0.6.0
@@ -3471,14 +3471,14 @@ else.
   that failure from the scan to a named refusal at validate. A pin of 0.6.0
   through 0.11.0 fails on version alone, since each knows `--trust-base` and
   would otherwise run cleanly; 0.11.0 is the withdrawn release this tag
-  replaces. Pins at or above 0.17.0 are unaffected.
+  replaces. Pins at or above 0.18.0 are unaffected.
 
 **Enforced by:** the `pinning the scanner backward on a pull request` cases in
 `scripts/tests/action-run-script.test.mjs`. One case drives the SHIPPED,
 unmodified step with `version: 0.5.9` and `GITHUB_BASE_REF` set, and asserts
-the refusal names both 0.5.9 and 0.17.0, with the same input accepted when
+the refusal names both 0.5.9 and 0.18.0, with the same input accepted when
 `GITHUB_BASE_REF` is unset: the rule is observable on the real file, because
-twenty-two published versions sit below the tag scanner. The cases that need a
+twenty-three published versions sit below the tag scanner. The cases that need a
 version below a FUTURE tag scanner, to exercise the comparison as it will
 behave once a second scanner in the 0.11.1-or-newer family ships, drive the real
 step text with the tag-scanner constant advanced one minor version and assert
@@ -4748,6 +4748,11 @@ least 0.15.0, not a 0.16 regression.
   `this scan read no package.json named "x" at <dir>`, not "was found":
   the old wording claimed a file in the tree was absent.
 - **An added lockfile entry no manifest declares is name-checked (N5).**
+  SUPERSEDED IN PART 2026-10-28: "not declared" below was decided by name
+  against any manifest line of any protocol, including ignored strays, and
+  two bypasses passed through it (B1, B2 in the 2026-10-28 section at the
+  end of this file, which states the rule as it now stands; the function
+  is now `lockEntryNames`). As written for 0.17.0:
   `undeclaredLockEntryNames` (`checks/candidates.ts`) adds every ADDED npm
   or pnpm lock entry change that is not declared, not an accepted
   transitive alias, and installs from a registry (no resolved URL, or one
@@ -4856,9 +4861,191 @@ Mutations, each applied alone, the cited file run, and reverted
 | Fix round: bundled wording dropped | N5b |
 
 Still not mutated on its own: the `resolvedUrl === undefined` half of the
-pnpm local-version filter (a pnpm `file:` version with a tarball, which no
-test builds), and the case-fold ambiguity rule (two listed manifests that
+pnpm local-version filter (pinned 2026-10-28 by `N-b`, see below), and the
+case-fold ambiguity rule (two listed manifests that
 differ only in case, which a case-insensitive checkout cannot hold). The
 case-insensitive match alone does not change a verdict: without it the
 fail-closed stand-in still reads the manifest, so only the reason and the
 parse fatality (position) differ, which is what the placed test pins.
+
+## Lockfile names: nothing exempts an entry, and which name it installs (2026-10-28)
+
+Audit 2026-10-28, B1 and B2 (merge-blocking), N-a to N-d. Both blockers
+were pre-existing in 0.16.1 and made the 0.17.0 N5 claim above false: a
+known-malicious package that real `npm ci --ignore-scripts` (npm 10.9.8)
+installed scanned clean with exit 0, through conductor 0.15.0 in
+`--trust-base` mode too.
+
+- **No manifest line exempts a lockfile entry (B1, review R1, R2, N-2).**
+  `lockEntryNames` (`checks/candidates.ts`) turns every ADDED npm or pnpm
+  lock entry change that installs from a registry (and is not an accepted
+  transitive alias, a non-registry resolution, or a pnpm directory
+  version without a tarball) into a name candidate, whatever any manifest
+  declares, anchored on the LOCKFILE. A CHANGED entry yields only a name
+  it did not install before (its npm name field, when no earlier
+  candidate under the key carried it); its key is what npm installed
+  there on the comparison side already. A lockfile name is never dropped
+  as workspace-local in `npmNames`: a workspace package is a `link` entry,
+  which never reaches the entry list. History: 0.17.0 skipped any entry
+  some manifest line of any protocol named (B1); a fix that exempted only
+  registry lines in kept manifests or projects still missed three shapes
+  found by review (R1: an ignored stray on the base made a project by one
+  `file:` line; R2: a `file:` line switched to a registry spec of the
+  same name; N-2: a base line in a stray npm never installed from), each
+  installing crossenv with real `npm ci` at exit 0. The exemption only
+  ever avoided a duplicate report, so it is gone and the duplicate is
+  handled in output.
+- **One package, one rule, one lockfile: one finding.**
+  `mergeLockfileNameFindings` (`scan.ts`, called from `applyPathFilters`)
+  drops a lockfile-anchored typosquat, unknown-package or
+  registered-squat finding when a manifest finding of the same rule and
+  package survives ignorePaths and that manifest's lockfile
+  (`DepChange.lockfilePath`) is the lockfile anchoring it; the manifest
+  finding then carries the lockfile as `lockfilePath`, its second anchor
+  (not part of a fingerprint). It runs after the ignorePaths decision, so
+  a manifest finding the filter dropped (an ignored stray, an ignored
+  project's standing choice, any ignored path on an audit) leaves the
+  lockfile finding standing; and after the baseline, so a baselined
+  manifest finding never takes a new lockfile install with it (re-review
+  RB1, test `RB1 a baselined manifest finding does not swallow a new
+  lockfile install`; mutation "baseline applied after the merge" killed by
+  it). The merged finding carries the lockfile finding's own fingerprint
+  as `details.lockfileFingerprint`; each is suppressed only by its own
+  baseline entry, so baselining a declared name takes both (trust-base
+  test `with no flag a head-side baseline entry still suppresses, exactly
+  as before` now baselines both and counts two suppressed). Behaviour
+  change: the lock entries an
+  ignored project installs are judged on their own (nested-manifests H3,
+  H10, H11 now expect a finding anchored on package-lock.json).
+- **A line nothing judged before is judged as new (review R1, R2).**
+  `computeDelta` (`delta.ts`) gives `kind: 'added'` to a manifest line
+  whose protocol moves into registry or alias from any other
+  (`newlyRegistryLine`), and to every line of a manifest that is a
+  project on the judged side and was read but not a project on the
+  comparison side (`madeProjectNow`); such a line is not skipped as
+  unchanged either. Every manifest-side check (names, confusion,
+  hygiene) then judges it as the new install it is.
+- **An npm entry's `name` field is name-checked (B2).** With no
+  `resolved`, npm installs the package the entry's `name` field names at
+  its version. `LockEntry.nameField` carries the field verbatim, vouched
+  or not; it is never identity (`packageName` stays the key or the
+  declaring manifest's registry name). `installedNames` and
+  `lockEntryNames` check the field in addition to the key, instead of it
+  only when an `npm:<field>@` alias edge (`aliasTargets`) or a manifest
+  alias line under the key (the entry's `packageName` is then the field)
+  asks for it; on an added entry, and on a changed one whose field no
+  earlier candidate carried.
+  `resolutionIdentity` (`delta.ts`) includes the field, so an entry whose
+  only change is its name field is changed, not unchanged.
+  `unvouchedNameFinding` (`checks/tamper.ts`) raises a medium
+  lockfile-tamper `name-field-unvouched:<name>` for an npm entry with no
+  usable `resolved` (absent, empty, which npm treats as absent (review
+  N-1), or unparseable), not `inBundle`, whose field differs from its key
+  and its packageName, with no alias edge asking for it and no earlier
+  candidate carrying it. pnpm entries carry no such field
+  (`lockfiles/pnpm.ts` never sets it). The review checked real pnpm: an
+  added `supports-color@9.4.0` entry with `name: crossenv` made pnpm fetch
+  supports-color (the name comes from the key, so no name-check hole), at
+  the entry's `version` field rather than the key's version, a version
+  substitution this scan does not report (review N-3, pnpm 10).
+- **The diagnostics say what happens.** `npm-lockfile-unverifiable-name`
+  says the unvouched name is name-checked, not "ignored";
+  `workspace-link-unconfirmed` says the name is not treated as a
+  workspace package, not that it "is name-checked like any registry
+  dependency" (false for a `file:` line of it, N-a). Text output names a
+  lockfile anchor once (N-d).
+- **A published same-scope look-alike is not a typosquat (N-c).**
+  `matchName` (`checks/typosquat.ts`) passes over a resemblance match
+  whose target shares the candidate's npm scope when the corpus knows the
+  candidate: only the scope's owner can publish under a scope. An
+  unpublished same-scope name still matches (and is unknown-package
+  besides). Each rule is tried in turn, so a skipped sibling can still
+  match an unscoped target through a later rule. Other resemblance lows on
+  real packages (`flru`, `markdown-title`, `millify` on vitest) are a known
+  false-positive class with no principled rule (docs/ecosystem-coverage.md).
+
+Tests added by the review round (`audit-2026-10-28.test.ts`): `R a manifest
+line and its lock entry give one finding per rule, listing both anchors`
+(delta), `R1 an ignored stray this change makes a project has its old
+lines judged` (delta), `R2 a line whose protocol moves from file: to
+registry is judged as added` (all five), `R2 a line whose protocol moves
+from workspace: to registry is judged as added (pnpm)` (all five), `R-N2 a
+base line in a stray npm does not install from does not exempt a new
+install` (delta), `R a base line in an ignored project does not exempt a
+new lock entry` (delta), `R-N1 an empty resolved is no resolved for
+name-field-unvouched` (delta). Changed by this rule
+(`audit-2026-10-27.test.ts`): `N5d a declared name the base already had is
+checked when its lock entry first appears` (was "not re-checked"); in
+nested-manifests.test.ts H3, H10 (staged against HEAD) and H11 now expect
+the lock entry's finding anchored on package-lock.json.
+
+Tests (`audit-2026-10-28.test.ts`, modes named): `B1 a file: declaration
+beside a nested registry entry of the same name (npm)` (all five), `B1 a
+link: declaration beside a registry entry of the same name (pnpm)` (all
+five), `B1 a declaration in a manifest ignorePaths covers does not exempt
+the lock entry` (all five), `B1 an ignored declaration already on the base
+does not exempt the lock entry` (all five), `B1 an npm workspace member
+does not exempt a registry entry of the same name` (the four delta modes),
+`B1 a registry-looking line for an npm workspace package does not exempt a
+registry entry` (delta), `B1 an alias declaration does not exempt a nested
+entry that installs the key name` (delta), control `B1 a nested entry of a
+name a kept registry declaration judges is not checked twice` (delta);
+`N-b a "file:" version carrying a registry tarball is name-checked` (all
+five); `B2 an added entry with a name field, an alias edge and no
+resolved` (all five), `B2 a name field with no alias edge is checked, and
+is lockfile tampering` (all five), `B2 a changed entry whose name field now
+names another package` (delta), `B2 an entry whose only change is its name
+field` (delta), controls `B2 a resolved URL naming another package is
+blocked, declared or not` (delta), `B2 a declared alias entry is judged by
+its target at the manifest, once` (delta). The titles that say "does not
+exempt" date from the narrower rule; each now pins that the entry is
+checked. In
+check-typosquat.test.ts: `a published name under the same scope as its
+look-alike is not reported`. In cli output-text.test.ts: `names a lockfile
+anchor once, and a manifest anchor with its lockfile`.
+
+Mutations, each applied alone, the cited file run, and reverted
+(2026-10-28):
+
+| Mutation | Went red |
+|---|---|
+| A declared entry is exempt again (the 0.17.0 skip) | six B1 tests, R one finding per rule, R1, R-N2, R base line in an ignored project, N5d |
+| The merge never drops a lockfile finding | R one finding per rule, R1, R2 (both), B1 not checked twice, B2 declared alias, N5 declared entry anchored once, H1 |
+| The merge runs before ignorePaths | B1 ignorePaths covers, B1 ignored already on the base, H3, H10, H11 |
+| A changed entry's key is checked too | N5c, the three scan-online cacheHits tests |
+| A protocol move into registry is not an added line | R2 file:, R2 workspace: |
+| A promoted manifest's lines are not added lines | R1 |
+| `npmNames` drops lockfile names as workspace-local again | B1 workspace member, B1 registry-looking line |
+| Lockfile names anchored on the declaring manifest | six B1 tests, R one finding per rule, R1, R-N2, R ignored project, H3, H10, H11 |
+| The name field is never checked | B2 alias edge, no alias edge, changed, name-field-only, declared alias |
+| An alias edge does not make the key a folder name | B2 alias edge |
+| An alias line (packageName) does not make the key a folder name | B2 declared alias |
+| A changed entry's name field is never checked | B2 changed, B2 name-field-only |
+| The name field is left out of resolution identity | B2 name-field-only |
+| `name-field-unvouched` never reported | B2 no alias edge |
+| `name-field-unvouched` ignores the alias edge | B2 alias edge |
+| An empty `resolved` counts as present | R-N1 |
+| The pnpm local-version skip ignores the tarball (N-b) | N-b |
+| The same-scope typosquat skip never applies | same-scope look-alike |
+| Text output prints both paths whatever they are | lockfile anchor once |
+
+The name-field, alias-edge, resolution-identity, unvouched-finding, N-b,
+same-scope and text-output rows were measured before the review round
+on code those rows' targets did not change in it; the others were
+measured on the final code.
+
+Against real npm (2026-10-28, npm 10.9.8, the audit's own fixtures): on
+`h4` (a `file:` line named crossenv, crossenv nested under ms) and `h5b`
+(`node_modules/supports-color` with `"name": "crossenv"` and no
+`resolved`), `npm ci --ignore-scripts` installed crossenv 0.0.2-security
+at `node_modules/ms/node_modules/crossenv` and at
+`node_modules/supports-color`; with `--base main --trust-base main`
+0.17.0 exited 0 on both and this rule exits 1 with a critical crossenv
+typosquat anchored on package-lock.json. `h1` (ignored stray, added) and
+`h3` (ignored stray, on the base) move the same way. On the review's
+fixtures, `npm ci --ignore-scripts` installed crossenv 0.0.2-security at
+`node_modules/crossenv` on `ra` (R1) and `ph` (R2); this rule exits 1 on
+both with a critical crossenv typosquat, listed as `docs/example/package.json,
+package-lock.json` on `ra` and `package.json, package-lock.json` on `ph`;
+`sh` (N-2) exits 1 anchored on package-lock.json, and `rr2` (N-1) gives
+the medium `name-field-unvouched:is-number`.
