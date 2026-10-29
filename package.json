@@ -26,7 +26,7 @@
   "devDependencies": {
     "@jest/globals": "^30.5.2",
     "@types/jest": "^30.0.0",
-    "@types/node": "^22.19.0",
+    "@types/node": "^26.6.5",
     "@vaultcompass/conductor": "0.16.0",
     "@vaultcompass/dep-guard": "0.18.0",
     "@vaultcompass/intent-guard": "1.10.3",
