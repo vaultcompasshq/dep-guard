@@ -928,7 +928,9 @@ describe('uv source precedence: the nearest declaring file wins', () => {
 
   function evilTamper(result: Awaited<ReturnType<typeof ScanFn>>) {
     return result.findings.filter(
-      (finding) => finding.ruleId === 'lockfile-tamper' && String(finding.details?.signal).includes('evil.example.org')
+      // The signal is "git-source:HOST". Compared exactly, not by substring,
+      // so a host that merely contains evil.example.org does not count.
+      (finding) => finding.ruleId === 'lockfile-tamper' && finding.details?.signal === 'git-source:evil.example.org'
     );
   }
 

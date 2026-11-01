@@ -47,6 +47,18 @@ function parseArgs(argv) {
   return options;
 }
 
+// Counts a request as npm traffic by its parsed hostname, never by substring:
+// npmjs.org itself or a subdomain of it, and nothing that merely contains it.
+function isNpmRegistryHost(url) {
+  let hostname;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+  return hostname === 'npmjs.org' || hostname.endsWith('.npmjs.org');
+}
+
 const options = parseArgs(process.argv.slice(2));
 const requests = { pypi: [], npm: 0, other: 0 };
 const realFetch = globalThis.fetch;
@@ -56,7 +68,7 @@ globalThis.fetch = async (input, init) => {
     throw new TypeError('network blocked for this validation run');
   }
   if (!url.startsWith('https://pypi.org/')) {
-    if (url.includes('npmjs.org')) requests.npm += 1;
+    if (isNpmRegistryHost(url)) requests.npm += 1;
     else requests.other += 1;
     return realFetch(input, init);
   }
