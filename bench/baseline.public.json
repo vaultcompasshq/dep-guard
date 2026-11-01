@@ -225,9 +225,9 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 545,
+          "total": 549,
           "byRule": {
-            "unknown-package": 541,
+            "unknown-package": 545,
             "typosquat": 3,
             "install-script": 0,
             "lockfile-tamper": 0,
@@ -239,7 +239,7 @@
           },
           "bySeverity": {
             "critical": 0,
-            "high": 541,
+            "high": 545,
             "medium": 1,
             "low": 3,
             "other": 0
@@ -1056,9 +1056,9 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 859,
+          "total": 860,
           "byRule": {
-            "unknown-package": 843,
+            "unknown-package": 844,
             "typosquat": 1,
             "install-script": 5,
             "lockfile-tamper": 10,
@@ -1070,7 +1070,7 @@
           },
           "bySeverity": {
             "critical": 10,
-            "high": 843,
+            "high": 844,
             "medium": 0,
             "low": 6,
             "other": 0
@@ -1365,9 +1365,9 @@
         "suppressed": 0,
         "ignored": 0,
         "findings": {
-          "total": 512,
+          "total": 528,
           "byRule": {
-            "unknown-package": 510,
+            "unknown-package": 526,
             "typosquat": 2,
             "install-script": 0,
             "lockfile-tamper": 0,
@@ -1379,7 +1379,7 @@
           },
           "bySeverity": {
             "critical": 0,
-            "high": 510,
+            "high": 526,
             "medium": 0,
             "low": 2,
             "other": 0
@@ -1469,6 +1469,212 @@
       "repo": "cookiecutter/cookiecutter-django",
       "sha": "33aca01e5a46c5cf8eb9e405ce133452ba387595",
       "skipped": "manifest-parse"
+    },
+    {
+      "repo": "diegosouzapw/OmniRoute",
+      "sha": "139070680f77728e2309eb4df18463282a1c990a",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 2963,
+          "byRule": {
+            "unknown-package": 2936,
+            "typosquat": 4,
+            "install-script": 23,
+            "lockfile-tamper": 0,
+            "version-hygiene": 0,
+            "dependency-confusion": 0,
+            "registered-squat": 0,
+            "publish-age": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 0,
+            "high": 2936,
+            "medium": 0,
+            "low": 27,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 7,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-limits": 0,
+            "audit-no-tamper-comparison": 5,
+            "check-single-name-only": 0,
+            "classification-input-unread": 0,
+            "delta-ambiguous-lock-entry": 2,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-project-kept": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-downgrade-acknowledged": 0,
+            "lockfile-format-manifest-only": 0,
+            "lockfile-missing": 0,
+            "lockfile-nested-changed": 0,
+            "lockfile-nested-ignored": 0,
+            "lockfile-nested-removed": 0,
+            "lockfile-not-read": 0,
+            "lockfile-outside-prefix": 0,
+            "lockfile-unread-comparison-side": 0,
+            "lockfile-unread-sibling": 0,
+            "manifest-alias-empty": 0,
+            "manifest-skipped-dirname": 0,
+            "manifest-unparsed": 0,
+            "multiple-lockfiles": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-unverifiable-name": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "online-check-unreachable": 0,
+            "online-deadline-exceeded": 0,
+            "online-names-unchecked": 0,
+            "path-outside-root": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-multi-document-lockfile": 0,
+            "pnpm-no-install-script-flag": 0,
+            "publish-age-allowed": 0,
+            "publish-age-package-unknown": 0,
+            "publish-age-private-origin-skipped": 0,
+            "publish-age-version-unknown": 0,
+            "pypi-names-not-checked": 0,
+            "pypi-private-index-skipped": 0,
+            "python-index-unread-comparison-side": 0,
+            "python-lockfile-unreadable": 0,
+            "python-name-invalid": 0,
+            "python-workspace-unconfirmed": 0,
+            "registered-squat-private-origin-skipped": 0,
+            "requirements-line-unread": 0,
+            "symlink-cycle": 0,
+            "symlinked-input-comparison-side": 0,
+            "tamper-resolution-unreadable": 0,
+            "typosquat-asymmetry-private-origin-skipped": 0,
+            "unknown-package-private-origin-skipped": 0,
+            "unknown-package-private-scope-skipped": 0,
+            "workspace-dir-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 0,
+            "workspace-link-unconfirmed": 0,
+            "workspace-pattern-unread-comparison-side": 0,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 1,
+          "pnpm": 0,
+          "yarn": 0,
+          "bun": 0,
+          "none": 0,
+          "other": 0
+        }
+      }
+    },
+    {
+      "repo": "safishamsi/graphify",
+      "sha": "32e5efe935e6844ef39a5e33409e4efe848f2172",
+      "counts": {
+        "exitCode": 0,
+        "suppressed": 0,
+        "ignored": 0,
+        "findings": {
+          "total": 10,
+          "byRule": {
+            "unknown-package": 0,
+            "typosquat": 10,
+            "install-script": 0,
+            "lockfile-tamper": 0,
+            "version-hygiene": 0,
+            "dependency-confusion": 0,
+            "registered-squat": 0,
+            "publish-age": 0,
+            "other": 0
+          },
+          "bySeverity": {
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 10,
+            "other": 0
+          }
+        },
+        "diagnostics": {
+          "total": 2,
+          "byCode": {
+            "audit-anchor-differs": 0,
+            "audit-limits": 0,
+            "audit-no-tamper-comparison": 0,
+            "check-single-name-only": 0,
+            "classification-input-unread": 0,
+            "delta-ambiguous-lock-entry": 0,
+            "delta-new-lock-entries": 0,
+            "ignore-path-dropped": 0,
+            "ignore-path-project-kept": 0,
+            "ignore-path-unmatched": 0,
+            "lockfile-binary-skipped": 0,
+            "lockfile-downgrade-acknowledged": 0,
+            "lockfile-format-manifest-only": 0,
+            "lockfile-missing": 1,
+            "lockfile-nested-changed": 0,
+            "lockfile-nested-ignored": 0,
+            "lockfile-nested-removed": 0,
+            "lockfile-not-read": 0,
+            "lockfile-outside-prefix": 0,
+            "lockfile-unread-comparison-side": 0,
+            "lockfile-unread-sibling": 0,
+            "manifest-alias-empty": 0,
+            "manifest-skipped-dirname": 0,
+            "manifest-unparsed": 0,
+            "multiple-lockfiles": 0,
+            "npm-lockfile-invalid-entry": 0,
+            "npm-lockfile-unverifiable-name": 0,
+            "npm-lockfile-v1": 0,
+            "npmrc-pin-unparseable": 0,
+            "online-check-unreachable": 0,
+            "online-deadline-exceeded": 0,
+            "online-names-unchecked": 0,
+            "path-outside-root": 0,
+            "pnpm-lockfile-invalid-entry": 0,
+            "pnpm-multi-document-lockfile": 0,
+            "pnpm-no-install-script-flag": 0,
+            "publish-age-allowed": 0,
+            "publish-age-package-unknown": 0,
+            "publish-age-private-origin-skipped": 0,
+            "publish-age-version-unknown": 0,
+            "pypi-names-not-checked": 1,
+            "pypi-private-index-skipped": 0,
+            "python-index-unread-comparison-side": 0,
+            "python-lockfile-unreadable": 0,
+            "python-name-invalid": 0,
+            "python-workspace-unconfirmed": 0,
+            "registered-squat-private-origin-skipped": 0,
+            "requirements-line-unread": 0,
+            "symlink-cycle": 0,
+            "symlinked-input-comparison-side": 0,
+            "tamper-resolution-unreadable": 0,
+            "typosquat-asymmetry-private-origin-skipped": 0,
+            "unknown-package-private-origin-skipped": 0,
+            "unknown-package-private-scope-skipped": 0,
+            "workspace-dir-unreadable": 0,
+            "workspace-duplicate-directory": 0,
+            "workspace-glob-unsupported": 0,
+            "workspace-link-unconfirmed": 0,
+            "workspace-pattern-unread-comparison-side": 0,
+            "other": 0
+          }
+        },
+        "lockfile": {
+          "npm": 0,
+          "pnpm": 0,
+          "yarn": 0,
+          "bun": 0,
+          "none": 1,
+          "other": 0
+        }
+      }
     }
   ]
 }

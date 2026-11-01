@@ -133,6 +133,20 @@
       "expectSkip": "manifest-parse",
       "skipNote": "The template's pyproject.toml contains template syntax and is not valid TOML, so the scan stops with a manifest parse error (exit 2) beside the repository's lockfiles.",
       "shape": "templated pyproject beside lockfiles; a manifest that cannot be parsed"
+    },
+    {
+      "repo": "diegosouzapw/OmniRoute",
+      "url": "https://github.com/diegosouzapw/OmniRoute.git",
+      "sha": "139070680f77728e2309eb4df18463282a1c990a",
+      "expectLockfile": "npm",
+      "shape": "large TypeScript tree with an npm lockfile at the root and nested package-lock files under packages and electron"
+    },
+    {
+      "repo": "safishamsi/graphify",
+      "url": "https://github.com/safishamsi/graphify.git",
+      "sha": "32e5efe935e6844ef39a5e33409e4efe848f2172",
+      "expectLockfile": "none",
+      "shape": "Python project with a pyproject.toml and a uv.lock and no npm lockfile at the root, so the Python manifest and lockfile surface has a baseline; the lockfile one-hot records JavaScript formats only and reads none here"
     }
   ]
 }
