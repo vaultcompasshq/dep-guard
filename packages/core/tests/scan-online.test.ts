@@ -1282,6 +1282,44 @@ describe('scan(): run.online summary', () => {
       expect(result.run.online).toMatchObject({ lookupsAttempted: 5, cacheHits: 0 });
     });
 
+    // The bumps above stay at their own paths, so registered-squat never
+    // sees their names. A name at a path the base did not have is new
+    // there, whatever other path carries it (audit 2026-11-01, MB1), and
+    // goes to registered-squat like any added name: its downloads lookup is
+    // counted beside publish-age's packument lookup, which every changed
+    // entry already had.
+    test('cold cache: a name at a new nested path goes to registered-squat as well as publish-age', async () => {
+      const dir = bumpRepo();
+      const packages: Record<string, unknown> = {
+        '': { name: 'x', version: '1.0.0', dependencies: Object.fromEntries(bumped.map((name) => [name, '^1.0.0'])) },
+      };
+      for (const name of bumped) {
+        packages[`node_modules/${name}`] = {
+          version: '1.1.0',
+          resolved: `https://registry.npmjs.org/${name}/-/${name}-1.1.0.tgz`,
+          integrity: 'sha512-notreal-1.1.0',
+        };
+      }
+      packages['node_modules/bump-one/node_modules/bump-two'] = {
+        version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/bump-two/-/bump-two-1.0.0.tgz',
+        integrity: 'sha512-notreal-1.0.0',
+      };
+      writeFileSync(
+        path.join(dir, 'package-lock.json'),
+        JSON.stringify({ name: 'x', version: '1.0.0', lockfileVersion: 3, requires: true, packages })
+      );
+      execFileSync('git', ['add', '.'], { cwd: dir });
+      execFileSync('git', ['commit', '-q', '-m', 'nested copy'], { cwd: dir });
+
+      const result = await scan(scanOpts(dir));
+
+      const downloadsNames = fetchWeeklyDownloadsMock.mock.calls.flatMap((call) => call[0] as string[]);
+      expect(downloadsNames).toEqual(['bump-two']);
+      expect(result.run.online).toMatchObject({ cacheHits: 0 });
+      expect(result.run.online.lookupsAttempted).toBe(fetchPackumentMock.mock.calls.length + 1);
+    });
+
     test('warm cache (version times): no lookups, every lookup a cache hit', async () => {
       const dir = bumpRepo();
       const opts = { repoRoot: dir, mode: { kind: 'base' as const, ref: 'HEAD~1' }, corpusDir: FIXTURE_CORPUS, online: true };

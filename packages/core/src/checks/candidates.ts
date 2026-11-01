@@ -1,6 +1,7 @@
 import { acceptedTransitiveAliasTarget, type DepChange, type LockEntryChange } from '../delta.js';
+import type { LockEntry } from '../lockfiles/types.js';
 import type { DepType, Protocol } from '../manifest.js';
-import { resolutionKindOf, resolutionOf } from '../resolution.js';
+import { registryTarballPackageName, resolutionKindOf, resolutionOf } from '../resolution.js';
 import { PYTHON_EXCLUSION_CLASSES, type PythonExclusionClass } from '../python-types.js';
 import type { CheckContext } from './types.js';
 
@@ -209,16 +210,34 @@ function acceptedAliasTargets(ctx: CheckContext): DepChange[] {
 // and a lockfile finding of one package under one rule as one finding with
 // both anchors (mergeLockfileNameFindings), after ignorePaths.
 //
-// A changed entry is checked only for a name it did not install before:
-// its name field, when no earlier candidate under the same key carried
-// it. Its key is the name npm installed there on the comparison side
-// already, so the change brings no new name; checking it again sent every
-// transitive version bump to the online checks (three times the lookups
-// on the online fixtures, so a lockfile refresh would spend a
-// pull-request run's budget) and made every bump of a name the corpus
-// does not know a blocking unknown-package. What this rule removed is the
-// exemption for names a manifest DECLARES, not this one for names the
-// base already INSTALLED under the same key.
+// "New" is decided at the entry's own install location, never by name
+// across the lockfile (audit 2026-11-01, MB1). For npm that is the
+// packages-map path (LockEntryChange.atPathBefore): an entry at a path the
+// comparison side did not have is new there, whatever other paths carry
+// the same name, and every name it installs is checked. An earlier entry
+// at another path proves nothing about this one, and an earlier entry
+// under the same key need not have installed the key's package at all: an
+// npm alias installs its name field's package under the key, so pairing by
+// name let a nested registry entry of an alias's key install unjudged.
+// For pnpm, whose key is the registry name and which has no such path, it
+// is the earlier candidates under the same key.
+//
+// At a location the comparison side DID have, the key is skipped only
+// when the earlier entry there installed the key's own package from a
+// registry (installedFromRegistry): no name field naming another package,
+// not bundled, and no resolved URL or a registry tarball URL naming exactly
+// the key. That is a version bump of a name already judged, and checking
+// it again sent every transitive bump to the online checks (three times
+// the lookups on the online fixtures, so a lockfile refresh would spend a
+// pull-request run's budget) and made every bump of a name the corpus does
+// not know a blocking unknown-package. An earlier entry there that was an
+// alias, bundled, a git, file or directory source, or a tarball of another
+// package installed something else, so the key is checked. The name field
+// is checked unless the earlier entry at the same location installed that
+// same name from a registry, by the same test: carrying the field is not
+// enough, since a git entry carries it too. What the 2026-10-28 rule removed is the exemption for names a
+// manifest DECLARES; this one is for a name the base already INSTALLED at
+// the same place.
 //
 // Left out, each for a reason:
 //
@@ -231,6 +250,49 @@ function acceptedAliasTargets(ctx: CheckContext): DepChange[] {
 //   check judges the source). An entry with no resolved URL at all is a
 //   registry install by name and version, and is checked.
 const PNPM_LOCAL_VERSION = /^(?:file|link|portal|workspace):/;
+
+// The comparison side's entries an entry is judged against for "is this
+// name new here": for npm, the one entry at the same packages-map path
+// (LockEntryChange.atPathBefore), never another path that carries the same
+// name; for pnpm, whose key is the registry name, the earlier candidates
+// under the same key. Empty when the entry is new at its path.
+function earlierAtSameInstall(entryChange: LockEntryChange): LockEntry[] {
+  if (entryChange.atPathBefore !== undefined) {
+    return entryChange.atPathBefore === null ? [] : [entryChange.atPathBefore];
+  }
+  if (entryChange.kind === 'added') {
+    return [];
+  }
+  return entryChange.beforeCandidates ?? (entryChange.before === undefined ? [] : [entryChange.before]);
+}
+
+// Whether an earlier entry (under lockfile key `key`) installed the package
+// called `name` from a registry. The package an entry installs is its name
+// field when it has one, else its key; it came from a registry when the
+// entry has either no resolved URL (npm and pnpm then fetch that package by
+// name and version) or a registry tarball URL whose path names exactly that
+// package. Not a registry install: a bundled entry (it ships inside its
+// parent's tarball, with no resolved URL, and was never fetched by name;
+// review of the 2026-11-01 fix, B1), a pnpm local-directory version, a
+// git, file, directory or other non-registry resolution, and a
+// registry-kind URL whose path does not name the package. The key rule
+// asks this for the key (so an alias, whose name field names its target,
+// installed something else under the key), and the name-field rule asks it
+// for the field (so a git entry that carried the same field installed it
+// from git, review B2). The two rules use one test.
+function installedFromRegistry(entry: LockEntry, key: string, name: string): boolean {
+  if ((entry.nameField ?? key) !== name || entry.inBundle === true) {
+    return false;
+  }
+  if (entry.resolvedUrl === undefined) {
+    return entry.version === undefined || !PNPM_LOCAL_VERSION.test(entry.version);
+  }
+  const resolution = resolutionOf(entry.resolvedUrl);
+  if (resolution === null || resolutionKindOf(resolution) !== 'registry') {
+    return false;
+  }
+  return registryTarballPackageName(entry.resolvedUrl) === name;
+}
 
 // The names an entry installs: see the comment above.
 function installedNames(entryChange: LockEntryChange, format: 'npm' | 'pnpm'): { key: string; field: string | null } {
@@ -278,10 +340,12 @@ function lockEntryNames(ctx: CheckContext): DepChange[] {
     // entry's packageName, delta.ts), asks for the name field.
     const keyIsFolder =
       field !== null && ((entryChange.aliasTargets ?? []).includes(field) || entryChange.packageName === field);
-    const added = entryChange.kind === 'added';
-    const earlier = entryChange.beforeCandidates ?? (entryChange.before === undefined ? [] : [entryChange.before]);
-    const fieldIsNew = field !== null && (added || !earlier.some((before) => before.nameField === field));
-    const names = [...(added && !keyIsFolder ? [key] : []), ...(field !== null && fieldIsNew ? [field] : [])];
+    const earlier = earlierAtSameInstall(entryChange);
+    const keyIsNew = !earlier.some((before) => installedFromRegistry(before, key, key));
+    // installedFromRegistry asks for the field as the installed name, so it
+    // holds only when the earlier entry carried this same field.
+    const fieldIsNew = field !== null && !earlier.some((before) => installedFromRegistry(before, key, field));
+    const names = [...(keyIsNew && !keyIsFolder ? [key] : []), ...(field !== null && fieldIsNew ? [field] : [])];
     for (const name of names) {
       changes.push({
         name: entryChange.name,

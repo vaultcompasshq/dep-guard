@@ -1,6 +1,18 @@
 import type { Diagnostic } from '../types.js';
 
 export interface LockEntry {
+  // npm only: the entry's packages-map key ("node_modules/a/node_modules/b"),
+  // the folder npm installs it into. Entries are keyed by installed name
+  // across every depth, so two entries of one name at different paths are
+  // different installs; delta.ts pairs an entry with the comparison side's
+  // entry at this same path to decide whether its name is new
+  // (LockEntryChange.atPathBefore). Never identity, and not part of an
+  // entry's resolution identity: an entry that only moved is unchanged.
+  //
+  // pnpm has no counterpart: its packages-map key is the registry name and
+  // version, and an alias lives in the dependent's own block, so a pnpm
+  // entry of a name is always an install of that registry name.
+  lockPath?: string;
   version?: string;
   resolvedUrl?: string;
   integrity?: string;
@@ -67,9 +79,13 @@ export interface LockEntry {
   nameField?: string;
   // npm only: the entry carries "inBundle": true, so it ships inside its
   // parent package's tarball and is never fetched by name. Wording only:
-  // checks/existence.ts says so instead of "may be hallucinated". It
-  // decides nothing about whether the name is checked, and is not part of
-  // an entry's resolution identity.
+  // checks/existence.ts says so instead of "may be hallucinated". Two
+  // further readers, both only able to add a check (review of the
+  // 2026-11-01 fix, B1): delta.ts's resolutionIdentity includes it, so an
+  // unresolved entry fetched by name is not "unchanged" against a bundled
+  // one of the same version; and checks/candidates.ts's
+  // installedFromRegistry never counts a bundled earlier entry as a
+  // registry install of its key.
   inBundle?: true;
 }
 

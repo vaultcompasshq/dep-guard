@@ -90,7 +90,9 @@ function entryFromPackageValue(
   value: Record<string, unknown>,
   diagnostics: Diagnostic[]
 ): LockEntry {
-  const entry: LockEntry = {};
+  // The packages-map key itself, so the delta can pair an entry with the
+  // one at the same path on the other side (LockEntry.lockPath).
+  const entry: LockEntry = { lockPath: key };
   if (typeof value.version === 'string') {
     entry.version = value.version;
   }

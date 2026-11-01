@@ -10,6 +10,47 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Security
+
+- **A lockfile entry at a new path is name-checked, whatever other paths
+  carry its name (audit 2026-11-01, MB1).** 0.18.0 said a changed entry's
+  key is not re-checked because npm "installed it there on the base
+  already". It paired entries by name across every `node_modules` depth,
+  so an entry at a path the base never had counted as changed whenever
+  the name sat anywhere else, and the earlier entry need not have
+  installed that package at all: an npm alias installs another package
+  under the key. A pull request could add
+  `node_modules/which/node_modules/crossenv` from the registry, lockfile
+  only, beside a base alias keyed `crossenv` (the shape
+  `string-width-cjs` takes in many real lockfiles), and real `npm ci`
+  installed the known-malicious name with exit 0, through conductor's
+  `--trust-base` run too. A name the corpus does not know skipped
+  unknown-package, registered-squat and publish-age the same way. Now
+  every npm entry keeps its packages-map path, and an entry at a path the
+  base did not have is new for the name checks. An entry at a path the
+  base did have keeps its key unchecked only when the base entry there
+  installed the key's own package from a registry (no name field naming
+  another package, not bundled, and no resolved URL or a registry tarball
+  naming the key); an alias, a bundled entry, a name field with no
+  resolved, a tarball of another package, or a git, file or directory
+  source there has its key checked. An entry's `name` field is skipped by
+  the same test: only when the base entry at that path installed that
+  name from a registry, not merely carried it. A bundled entry and an
+  unresolved entry of the same version are no longer treated as the same
+  resolution, so an entry fetched by name beside a bundled copy is judged.
+  pnpm keys are registry names, so pnpm pairs by name as before, with the
+  same registry test. This can turn a green pull request red; it loosens
+  nothing. Upgrading: with `--online`, a name new at its path now also
+  goes to registered-squat (publish-age already looked up every changed
+  entry): one lookup per name new at its path in the change, not per
+  bump. Two kinds of bump now count as new and are looked up too: a bump
+  that npm re-hoists to a different path, and every bump on a registry
+  whose tarball URLs dep-guard cannot parse for the package name (GitHub
+  Packages download URLs, percent-encoded scopes), which offline can also
+  raise unknown-package for a name the corpus does not know. On
+  nestjs/nest, `--base HEAD~29` needed 63 lookups where 0.18.0 needed 62;
+  vitest (pnpm) was unchanged at 53.
+
 ### Changed
 
 - The release workflow now sets `permissions: contents: read` at the top

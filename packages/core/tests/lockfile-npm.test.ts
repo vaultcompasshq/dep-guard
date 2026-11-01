@@ -50,6 +50,7 @@ describe('parseNpmLockfile entry extraction', () => {
   test('a normal registry dep carries version, resolvedUrl and integrity', () => {
     const result = parseNpmLockfile(PATH, FIXTURE_CONTENT);
     expect(only(result, 'lodash')).toEqual({
+      lockPath: 'node_modules/lodash',
       version: '4.17.21',
       resolvedUrl: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
       integrity:
@@ -325,6 +326,7 @@ describe('parseNpmLockfile workspaceLocalNames', () => {
     expect(result.entries.has('@npmcli/mock-globals')).toBe(false);
     expect(result.entries.get('lodash')).toEqual([
       {
+        lockPath: 'node_modules/lodash',
         version: '4.17.21',
         resolvedUrl: 'https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz',
         integrity: 'sha512-abc==',
@@ -448,12 +450,15 @@ describe('parseNpmLockfile multi-version entries', () => {
     // other, and no npm-lockfile-duplicate-name diagnostic is emitted
     // since nothing is lost.
     expect(result.entries.size).toBe(1);
+    // Each keeps its own packages-map path, which the delta pairs by.
     expect(result.entries.get('dup-pkg')).toEqual([
       {
+        lockPath: 'node_modules/dup-pkg',
         version: '1.0.0',
         resolvedUrl: 'https://registry.npmjs.org/dup-pkg/-/dup-pkg-1.0.0.tgz',
       },
       {
+        lockPath: 'node_modules/host/node_modules/dup-pkg',
         version: '9.9.9',
         resolvedUrl: 'https://evil.example.com/dup-pkg-9.9.9.tgz',
       },
