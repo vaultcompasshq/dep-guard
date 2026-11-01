@@ -4782,7 +4782,9 @@ least 0.15.0, not a 0.16 regression.
   `checks/existence.ts`). Offline, a transitive name published after the
   corpus was built is an unknown-package high, as a declared one always
   was. A changed entry is not re-checked, as a changed manifest
-  dependency is not. On the
+  dependency is not (narrowed 2026-11-01, MB1: only a same-path entry
+  whose base installed the key's own package from a registry; see
+  "Lockfile names are new by path"). On the
   public bench with the 0.16.1 shipped corpus this added five low
   typosquat findings (vitejs/vite: `@yuku-codegen/binding-linux-arm-gnu`,
   `@yuku-parser/binding-linux-arm-gnu`, `markdown-title`, `millify`;
@@ -4810,8 +4812,10 @@ node_modules manifest no reference names is still not read`; `S1 packages/a
 too` (the four delta modes); `N5 a new node_modules/lodahs registry entry in
 package-lock.json`, `N5 a nested node_modules/x/node_modules/lodahs entry
 with no resolved field`, `N5 a new lodahs entry in pnpm-lock.yaml`,
-controls `N5c an entry that is not a new registry name is not
-name-checked`, `N5c a pnpm directory dependency entry is not
+controls `N5c a same-path bump of a registry entry of its key, and a git
+or file entry, are not name-checked` (retitled 2026-11-01, MB1; it was
+"an entry that is not a new registry name is not name-checked"), `N5c a
+pnpm directory dependency entry is not
 name-checked`, `N5a an accepted transitive alias is judged by its target,
 not its key`, `N5 a declared entry is still anchored on its manifest,
 once`, `N5d a declared name the base already had is not re-checked when
@@ -4881,10 +4885,12 @@ installed scanned clean with exit 0, through conductor 0.15.0 in
   lock entry change that installs from a registry (and is not an accepted
   transitive alias, a non-registry resolution, or a pnpm directory
   version without a tarball) into a name candidate, whatever any manifest
-  declares, anchored on the LOCKFILE. A CHANGED entry yields only a name
-  it did not install before (its npm name field, when no earlier
-  candidate under the key carried it); its key is what npm installed
-  there on the comparison side already. A lockfile name is never dropped
+  declares, anchored on the LOCKFILE. Which names are new is decided by
+  install location, not by name: see "Lockfile names are new by path"
+  below (2026-11-01, MB1), which corrects the rule this bullet stated
+  until then (a changed entry's key was never checked, because "npm
+  installed it there on the comparison side already"; false for an entry
+  at a new path and for an alias). A lockfile name is never dropped
   as workspace-local in `npmNames`: a workspace package is a `link` entry,
   which never reaches the entry list. History: 0.17.0 skipped any entry
   some manifest line of any protocol named (B1); a fix that exempted only
@@ -4933,8 +4939,11 @@ installed scanned clean with exit 0, through conductor 0.15.0 in
   `lockEntryNames` check the field in addition to the key, instead of it
   only when an `npm:<field>@` alias edge (`aliasTargets`) or a manifest
   alias line under the key (the entry's `packageName` is then the field)
-  asks for it; on an added entry, and on a changed one whose field no
-  earlier candidate carried.
+  asks for it; unless the comparison side's entry at the same install
+  location installed that same name from a registry (2026-11-01, and its
+  review B2; until then the field was skipped when the one counterpart
+  `pickCounterpart` chose by name, or any surviving candidate when that
+  pick was ambiguous, carried the same field, from any source).
   `resolutionIdentity` (`delta.ts`) includes the field, so an entry whose
   only change is its name field is changed, not unchanged.
   `unvouchedNameFinding` (`checks/tamper.ts`) raises a medium
@@ -5049,3 +5058,137 @@ both with a critical crossenv typosquat, listed as `docs/example/package.json,
 package-lock.json` on `ra` and `package.json, package-lock.json` on `ph`;
 `sh` (N-2) exits 1 anchored on package-lock.json, and `rr2` (N-1) gives
 the medium `name-field-unvouched:is-number`.
+
+## Lockfile names are new by path (2026-11-01)
+
+Audit 2026-11-01, MB1 (merge-blocking, pre-existing in 0.17.0 and
+0.18.0). The 2026-10-28 rule above said a changed entry's key is not
+re-checked because npm "installed it there on the comparison side
+already". That was false twice: entries were paired by installed name
+across every `node_modules` depth, so an entry at a brand-new path was
+"changed" whenever the name sat at any other path; and the earlier entry
+need not have installed the key's package at all, since an npm alias
+installs its name field's package under the key. With an alias in the
+base (`node_modules/crossenv` with `"name": "cross-env"`), a lockfile-only
+head adding `node_modules/which/node_modules/crossenv` from the registry
+scanned clean, exit 0, through conductor 0.16.0 in `--trust-base` mode,
+while `npm ci --ignore-scripts` installed the security holding package
+there.
+
+- **Every npm lock entry keeps its packages-map path.**
+  `entryFromPackageValue` (`lockfiles/npm.ts:95`) sets
+  `LockEntry.lockPath` to the packages-map key. It is never identity and
+  is not part of `resolutionIdentity`, so an entry that only moved is
+  still unchanged. pnpm entries carry none: a pnpm key is the registry
+  name, and an alias lives in the dependent's own block.
+- **The name checks pair by path.** `diffLockEntries` (`delta.ts:663`,
+  `delta.ts:709`, `entriesByPath` at `delta.ts:720`) sets
+  `LockEntryChange.atPathBefore` to the comparison side's entry at the
+  same path, or null when that path is new. `kind`, `before` and
+  `beforeCandidates` still pair by name: they feed the tamper and
+  install-script comparisons, which ask what the name resolved to before
+  (so `host-changed` still fires for a new registry entry beside a base git
+  or `file:` entry of the name).
+- **A bundled entry is its own resolution.** `resolutionIdentity`
+  (`delta.ts:435`) includes `inBundle`, so an unresolved entry fetched by
+  name is not dropped as unchanged against a bundled entry of the same
+  version at another path (review of this fix, B1, fixture ib3: it was
+  dropped before any check ran, `--online` included).
+- **A name is new unless the same install location installed it from a
+  registry.** `lockEntryNames` (`checks/candidates.ts:344` to `:348`)
+  asks `installedFromRegistry` (`checks/candidates.ts:283`) of every entry
+  from `earlierAtSameInstall` (`checks/candidates.ts:259`; for npm the
+  entry at the same path, for pnpm the earlier candidates under the key).
+  An earlier entry installed a name from a registry when its name field,
+  or its key when it has none, is that name; it is not bundled; and it has
+  either no resolved URL (not a pnpm `file:`/`link:`/`portal:`/`workspace:`
+  version) or a registry-kind URL whose tarball path names exactly that
+  name. The key is checked unless an earlier entry installed the key that
+  way; the name field is checked unless an earlier entry installed the
+  field that way. One test serves both rules (review B2, fixture fl: a git
+  entry carrying the same field had exempted the field once it moved to a
+  registry tarball, where 0.18.0 reported a high unknown-package). So: a
+  new path is added for the name checks whatever other paths carry the
+  name; a same-path bump of a registry entry of the key is not re-checked;
+  a same-path entry whose base was an alias, bundled (review B1, fixture
+  ib2), a name field with no resolved, a tarball of another package, or a
+  git, file or directory source has its key checked. Accepted transitive
+  aliases and the alias-edge or alias-line folder-name rule are unchanged.
+- **Online cost.** A name at a new path goes to registered-squat like any
+  added name (publish-age already looked up every added or changed
+  entry). Measured with `--online`, published 0.18.0 against this rule,
+  same trees: nestjs/nest 95dd6b0 `--base HEAD~29` (npm) needs 63 lookups
+  where it needed 62, findings unchanged (33 online, 0 offline);
+  vitest-dev/vitest a57b4d8 `--base HEAD~30` (pnpm) 53 and 53, 0 findings.
+  The extra lookups are one per name new at its path in the change, not
+  one per bump. Two kinds of bump do count as new: a bump that npm
+  re-hoists to a different path, and every bump on a registry whose
+  tarball URLs `registryTarballPackageName` cannot parse (GitHub Packages
+  download URLs, percent-encoded scopes), whose earlier entry therefore
+  never proves the key. Both are stricter, never looser; the second can
+  also raise unknown-package on a bump of a name the corpus does not
+  know, a false-positive class recorded as a follow-up (review N-b).
+
+Tests (`audit-2026-11-01.test.ts`, modes named): `MB1 t1 a nested
+registry entry beside a transitive alias of the same key is name-checked`
+(all five), `MB1 a registry entry at a new path is name-checked even when
+another path installs the same package` (delta), `MB1 a1 dropping a
+declared alias and adding a nested registry entry of its key is
+name-checked` (delta), `MB1 a same-path entry whose base installed an
+alias target is name-checked by its key` (delta), `MB1 a same-path entry
+whose base had a name field and no resolved is name-checked by its key`
+(delta), `MB1 a same-path entry whose base tarball named another package
+is name-checked by its key` (delta), `MB1 a same-path entry that moves
+from git to the registry is name-checked by its key` (delta); from the
+review of the fix, `MB1 ib2 a same-path entry whose base was bundled is
+name-checked by its key` (delta), `MB1 ib3 an unresolved entry at a new
+path beside a bundled one of the same version is name-checked` (delta),
+`MB1 fl a same-path name field the base installed from git is
+name-checked when it moves to the registry` (delta); controls
+`MB1 a2 a kept alias declaration still raises tarball identity on a nested
+entry of its key` (delta), `MB1 g1 git a base entry from another origin
+still raises host-changed beside the name check` and `MB1 f1 file: tarball
+a base entry from another origin still raises host-changed beside the name
+check` (delta), `MB1 a same-path bump of a registry entry of the key is
+not name-checked again` (delta). In scan-online.test.ts: `cold cache: a
+name at a new nested path goes to registered-squat as well as
+publish-age`. Retitled in audit-2026-10-27.test.ts: `N5c a same-path bump
+of a registry entry of its key, and a git or file entry, are not
+name-checked` (same assertions; it pinned the old exemption only in the
+sense that it never had a new-path case). The three scan-online
+`cacheHits` tests bump entries at their own paths and keep their counts.
+
+Mutations, each applied alone to the targeted files
+(audit-2026-11-01, -10-27, -10-28, scan-online) and reverted:
+
+| Mutation | Went red |
+|---|---|
+| No `atPathBefore` (pair by name, the narrowed exemption kept) | MB1 new path beside the same package, the scan-online new nested path test |
+| Any earlier entry at the same path exempts the key (path pairing kept) | MB1 same-path alias target, name field and no resolved, ib2 bundled, tarball of another package, git to registry |
+| Both: the 0.18.0 key rule | the nine MB1 positive tests other than fl, including t1, a1, ib2 and ib3, g1 and f1 (their name check), the scan-online new nested path test |
+| `installedFromRegistry` ignores the tarball name | MB1 same-path tarball of another package |
+| `installedFromRegistry` ignores the name field when asked about the key | MB1 same-path name field and no resolved |
+| `installedFromRegistry` counts a bundled entry as a registry install | MB1 ib2 |
+| `inBundle` left out of `resolutionIdentity` | MB1 ib3 |
+| The field is exempt when the same-path entry merely carried it | MB1 fl |
+
+t1 and a1 go red only when both halves are undone: each half closes them
+on its own (path pairing makes the nested entry new; the narrowed
+exemption refuses an alias as the earlier entry). The table was re-measured
+after the review fixes, with the ib2, ib3 and fl tests present.
+
+Against real npm (2026-11-01, npm 10.9.9, the audit's own x1 and x2
+fixtures, shipped 0.18.0 corpus): `npm ci --ignore-scripts` installs the
+crossenv security holding package at
+`node_modules/which/node_modules/crossenv` on `t1` and at
+`node_modules/ms/node_modules/crossenv` on `a1`; this rule exits 1 on both
+(`--base` and `--trust-base` the base branch) with a critical crossenv
+typosquat on package-lock.json. Controls: `a2` adds that typosquat beside
+its critical tarball-identity finding, `g1` and `f1` beside their critical
+host-changed finding; all exit 1. On the review's fixtures, `npm ci
+--ignore-scripts` installs the holding package at
+`node_modules/which/node_modules/crossenv` on `ib2` and at
+`node_modules/crossenv` on `ib3`; each now exits 1 with a critical crossenv
+typosquat on package-lock.json (each exited 0 on the first version of this
+fix). `fl` again reports the high unknown-package for
+`corp-internal-utils-xyz` beside its two critical lockfile-tamper findings.

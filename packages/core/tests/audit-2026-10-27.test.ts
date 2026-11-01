@@ -600,10 +600,15 @@ describe('N5 an added lockfile entry no manifest declares is name-checked', () =
     }
   });
 
-  // Not name checks' business: a version bump of a name the base already
-  // installed under the same key, a git or file resolution (the tamper
-  // check judges those), and a pnpm directory dependency.
-  test('N5c an entry that is not a new registry name is not name-checked', async () => {
+  // Not name checks' business: a version bump at a path where the base
+  // already installed the key's own package from the registry, a git or
+  // file resolution (the tamper check judges those), and a pnpm directory
+  // dependency. The bump is exempt only because the base entry at that SAME
+  // path installed lodahs from the registry: the same name at a path the
+  // base did not have, or a base entry there that installed something else
+  // (an alias, a git or file source), is name-checked (audit 2026-11-01,
+  // MB1, in audit-2026-11-01.test.ts).
+  test('N5c a same-path bump of a registry entry of its key, and a git or file entry, are not name-checked', async () => {
     await write('package.json', pkg('app', {}));
     await write('package-lock.json', npmLock({ 'node_modules/react/node_modules/lodahs': registryEntry('lodahs', '1.0.0') }));
     await commit('base');

@@ -116,6 +116,19 @@ export interface LockEntryChange {
   // unreported. A check that reads `before` alone here is asserting the
   // guess.
   beforeCandidates?: LockEntry[];
+  // npm only, set when the after entry carries its packages-map path
+  // (LockEntry.lockPath): the comparison side's entry at that same path,
+  // or null when the comparison side had no entry there. `kind`, `before`
+  // and `beforeCandidates` pair by installed name across every depth, which
+  // is right for the tamper and install-script comparisons (what did this
+  // name resolve to before) and wrong for the name checks: an entry at a
+  // path the base never had installs a package there for the first time,
+  // whatever other paths carry the same name, and the earlier entry under
+  // that name need not have installed that package at all (an npm alias
+  // installs its name field's package under the key; audit 2026-11-01,
+  // MB1). checks/candidates.ts reads this to decide which names are new.
+  // Absent for pnpm and for a hand-built change: those pair by name.
+  atPathBefore?: LockEntry | null;
 }
 
 // A line that names a registry package now and did not before: its
@@ -414,6 +427,12 @@ function resolutionIdentity(entry: LockEntry): string {
     // An npm entry with no "resolved" installs the package its name field
     // names, so a moved name field is a different resolution.
     entry.nameField ?? '',
+    // A bundled entry ships inside its parent's tarball and is never
+    // fetched; the same version with no resolved elsewhere is fetched from
+    // the registry by name. Not the same resolution (review of the
+    // 2026-11-01 fix, B1: an unresolved entry at a new path matched a
+    // bundled one and was dropped as unchanged before any check).
+    entry.inBundle === true ? 'in-bundle' : '',
   ]);
 }
 
@@ -641,6 +660,7 @@ function diffLockEntries(
   const attribution = attributeLockNames(manifests, after.path, manifestsWithOwnLockfile(manifests, lockfiles));
   const entryChanges: LockEntryChange[] = [];
   const diagnostics: Diagnostic[] = [];
+  const beforeByPath = entriesByPath(before);
 
   for (const [name, afterEntries] of after.entries) {
     const beforeEntries = before?.entries.get(name) ?? [];
@@ -684,11 +704,29 @@ function diffLockEntries(
         ...(counterpart.ambiguous
           ? { counterpartAmbiguous: true, beforeCandidates: counterpart.candidates }
           : {}),
+        // Paired by path, not by name, for the name checks: see
+        // LockEntryChange.atPathBefore.
+        ...(entry.lockPath === undefined ? {} : { atPathBefore: beforeByPath.get(entry.lockPath) ?? null }),
       });
     }
   }
 
   return { changes: entryChanges, diagnostics };
+}
+
+// The comparison side's entries by packages-map path (npm), for
+// LockEntryChange.atPathBefore. A path appears once in a packages map, so
+// the first entry seen at a path is the only one.
+function entriesByPath(lockfile: ParsedLockfile | null): Map<string, LockEntry> {
+  const byPath = new Map<string, LockEntry>();
+  for (const entries of lockfile?.entries.values() ?? []) {
+    for (const entry of entries) {
+      if (entry.lockPath !== undefined && !byPath.has(entry.lockPath)) {
+        byPath.set(entry.lockPath, entry);
+      }
+    }
+  }
+  return byPath;
 }
 
 // A primary lockfile with entries, judged against an earlier revision, whose

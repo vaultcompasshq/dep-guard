@@ -283,7 +283,7 @@ describe('lockfile detection', () => {
 
     expect(after.lockfile?.format).toBe('npm');
     expect(after.lockfile?.path).toBe('package-lock.json');
-    expect(after.lockfile?.entries.get('left-pad')).toEqual([{ version: '1.0.0' }]);
+    expect(after.lockfile?.entries.get('left-pad')).toEqual([{ lockPath: 'node_modules/left-pad', version: '1.0.0' }]);
   });
 
   test('pnpm-lock.yaml parses as pnpm', async () => {
