@@ -60,7 +60,12 @@ gates:
     enforce: false
     # Handed to this gate unchanged. Keys are its own long flags,
     # without the leading dashes. Example: fail-on: high
-    options: {}
+    options:
+      # No intent contract is frozen here yet, and intent-guard blocks on a
+      # missing contract by default. This reaches the gate as
+      # --no-require-frozen, the same thing conductor init writes for a
+      # repository with no contract. Remove it once a contract is frozen.
+      require-frozen: false
 
 report:
   format: text

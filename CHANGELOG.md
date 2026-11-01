@@ -10,6 +10,18 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Changed
+
+- The release workflow now sets `permissions: contents: read` at the top
+  level. `prepare` and `release` already declared their own grants;
+  `smoke-published`, which had no block, is now limited to read.
+- This repository's own `.guardrails.yaml` passes `require-frozen: false` to
+  the intent gate, since no intent contract is frozen here yet. The gate
+  stays enabled.
+- A uv source-precedence test now matches the tamper signal exactly rather
+  than by substring, and the PyPI validation bench counts npm requests by
+  parsed hostname. Neither changes the scanner.
+
 ## [0.18.0] - 2026-10-28
 
 This is a security release: it closes lockfile name-check bypasses found in
