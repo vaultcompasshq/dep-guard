@@ -10,6 +10,12 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-01
+
+This is a security release: it closes lockfile name-check bypasses found in
+the 2026-11-01 cohesion audit. Every lockfile entry new at its path is now
+name-checked, and bundled and git-sourced entries no longer exempt a name.
+
 ### Security
 
 - **A lockfile entry at a new path is name-checked, whatever other paths
