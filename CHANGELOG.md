@@ -10,6 +10,20 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Security
+
+- A dependency build script runs only when that package is named in
+  `pnpm.onlyBuiltDependencies`. Nothing is named there. The native
+  dependencies ship an optional platform package, and the suite passes
+  without running their install scripts.
+- The supported-versions table names the latest published minor.
+- Workflow wiring tests now fail a top-level permission grant past
+  `contents: read` (a workflow that uploads SARIF may also grant
+  `security-events: write`), a publish job that is not in the
+  `npm-publish` environment, an action reference that is not a
+  40-character commit SHA, or a checkout that does not set
+  `persist-credentials: false`.
+
 ## [0.18.1] - 2026-11-01
 
 This is a security release: it closes lockfile name-check bypasses found in
@@ -68,20 +82,6 @@ name-checked, and bundled and git-sourced entries no longer exempt a name.
 - A uv source-precedence test now matches the tamper signal exactly rather
   than by substring, and the PyPI validation bench counts npm requests by
   parsed hostname. Neither changes the scanner.
-
-### Security
-
-- A dependency build script runs only when that package is named in
-  `pnpm.onlyBuiltDependencies`. Nothing is named there. The native
-  dependencies ship an optional platform package, and the suite passes
-  without running their install scripts.
-- The supported-versions table names the latest published minor.
-- Workflow wiring tests now fail a top-level permission grant past
-  `contents: read` (a workflow that uploads SARIF may also grant
-  `security-events: write`), a publish job that is not in the
-  `npm-publish` environment, an action reference that is not a
-  40-character commit SHA, or a checkout that does not set
-  `persist-credentials: false`.
 
 ## [0.18.0] - 2026-10-28
 
