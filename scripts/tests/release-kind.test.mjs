@@ -20,7 +20,7 @@
 // answer.
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -878,6 +878,143 @@ describe('.github/workflows/release.yml wiring', () => {
     // and stays outside the package-release branch: it applies to both
     // kinds of tag.
     expect(workflow).toContain('git merge-base --is-ancestor');
+  });
+});
+
+// The 2026-10-28 workflow hardening. The release-kind checks above read
+// step names, so they stay green if the token, the publish environment,
+// an action pin, or checkout credentials change. These assertions read
+// the workflow files themselves.
+describe('.github/workflows hardening', () => {
+  const workflowDir = path.join(ROOT, '.github', 'workflows');
+
+  function workflowNames() {
+    return readdirSync(workflowDir)
+      .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+      .sort();
+  }
+
+  function readWorkflow(name) {
+    return readFileSync(path.join(workflowDir, name), 'utf8');
+  }
+
+  // The first column-0 permissions key. Job blocks are indented, so they
+  // are not part of this list.
+  function topLevelPermissions(text) {
+    const match = /^permissions:[ \t]*(.*)$/m.exec(text);
+    if (match === null) return null;
+    const inline = match[1].trim();
+    if (inline !== '') return [inline];
+    const grants = [];
+    const lines = text.slice(match.index + match[0].length).split('\n').slice(1);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed === '' || trimmed.startsWith('#')) continue;
+      if (!/^ {2}\S/.test(line)) break;
+      grants.push(trimmed);
+    }
+    return grants;
+  }
+
+  function disallowedGrants(text) {
+    const grants = topLevelPermissions(text);
+    if (grants === null) return ['missing top-level permissions'];
+    const allowed = new Set(['contents: read']);
+    // security-events: write is the SARIF upload grant. It is allowed at
+    // the top only in a workflow that uploads a SARIF log.
+    if (text.includes('upload-sarif')) allowed.add('security-events: write');
+    return grants.filter((grant) => !allowed.has(grant));
+  }
+
+  function jobSections(text) {
+    const jobsAt = text.search(/^jobs:[ \t]*$/m);
+    if (jobsAt === -1) return [];
+    const body = text.slice(jobsAt);
+    const starts = [];
+    const re = /^ {2}[A-Za-z0-9_-]+:[ \t]*$/gm;
+    let match;
+    while ((match = re.exec(body)) !== null) starts.push(match.index);
+    return starts.map((start, index) => body.slice(start, starts[index + 1]));
+  }
+
+  // The value of a uses key, with a trailing version comment removed.
+  function usesRefs(text) {
+    const refs = [];
+    const re = /^[ \t]*(?:-[ \t]+)?uses:[ \t]*(.*)$/gm;
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      let value = match[1].trim();
+      const commentAt = value.search(/\s+#/);
+      if (commentAt !== -1) value = value.slice(0, commentAt).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      refs.push(value);
+    }
+    return refs;
+  }
+
+  function isFullShaPin(ref) {
+    const at = ref.lastIndexOf('@');
+    if (at <= 0) return false;
+    return /^[0-9a-f]{40}$/.test(ref.slice(at + 1));
+  }
+
+  function checkoutStepsMissingCredentialsOff(text) {
+    const lines = text.split('\n');
+    const starts = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      if (/^[ \t]*- (?:name:|uses:)/.test(lines[i])) starts.push(i);
+    }
+    const missing = [];
+    for (let s = 0; s < starts.length; s += 1) {
+      const block = lines.slice(starts[s], starts[s + 1]).join('\n');
+      if (!/uses:[ \t]*['"]?actions\/checkout@/.test(block)) continue;
+      if (!/^.*persist-credentials:[ \t]*false[ \t]*(?:#.*)?$/m.test(block)) {
+        missing.push(lines[starts[s]].trim());
+      }
+    }
+    return missing;
+  }
+
+  it('keeps top-level permissions to contents read, plus security-events write only where SARIF is uploaded', () => {
+    for (const name of ['ci.yml', 'release.yml']) {
+      const extra = disallowedGrants(readWorkflow(name));
+      expect({ name, extra }).toEqual({ name, extra: [] });
+    }
+  });
+
+  it('puts the job that publishes inside the npm-publish environment', () => {
+    const publishers = jobSections(readWorkflow('release.yml')).filter((job) =>
+      /\n[ \t]*npm publish\s/.test(job)
+    );
+    expect(publishers.length).toBeGreaterThan(0);
+    for (const job of publishers) {
+      expect(job).toMatch(/^ {4}environment:[ \t]*npm-publish[ \t]*$/m);
+    }
+  });
+
+  it('pins every action in every workflow to a 40-character commit SHA', () => {
+    const names = workflowNames();
+    expect(names).toEqual(expect.arrayContaining(['ci.yml', 'release.yml']));
+    for (const name of names) {
+      const bad = usesRefs(readWorkflow(name)).filter((ref) => !isFullShaPin(ref));
+      expect({ name, bad }).toEqual({ name, bad: [] });
+    }
+  });
+
+  it('sets persist-credentials false on every checkout', () => {
+    let total = 0;
+    for (const name of workflowNames()) {
+      const missing = checkoutStepsMissingCredentialsOff(readWorkflow(name));
+      const present = (readWorkflow(name).match(/actions\/checkout@/g) ?? []).length;
+      total += present;
+      expect({ name, missing }).toEqual({ name, missing: [] });
+    }
+    expect(total).toBeGreaterThan(0);
   });
 });
 
