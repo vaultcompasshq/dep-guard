@@ -10,6 +10,10 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Changed
+
+- The CI conductor action pin and the @vaultcompass/conductor devDependency move to 0.17.0.
+
 ### Security
 
 - A dependency build script runs only when that package is named in
