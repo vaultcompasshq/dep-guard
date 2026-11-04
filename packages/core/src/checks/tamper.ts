@@ -1,5 +1,5 @@
 import { acceptedTransitiveAliasTarget, type DepChange, type LockEntryChange } from '../delta.js';
-import type { LockEntry } from '../lockfiles/types.js';
+import type { LockEntry, UnreadLocationField } from '../lockfiles/types.js';
 import type { Resolution } from '../resolution.js';
 import {
   registryTarballIdentity,
@@ -48,6 +48,13 @@ import type { Check } from './types.js';
 // know about this package"; where the bytes are fetched from is not a
 // property of the package, and a resolution swap under an allowed name is
 // exactly the attack an allow entry must not buy.
+
+// How a finding names an unread location field, never its value.
+const UNREAD_LOCATION_WORDS: Record<UnreadLocationField, string> = {
+  _resolved: 'a "_resolved" field',
+  resolved: 'a "resolved" that is not a URL or a link path',
+  version: 'no "resolved" and a "version" that is not a plain semver version',
+};
 
 // An integrity value is not one opaque string: it names the algorithm that
 // produced the digest ("sha512-<base64>"), and comparing two of them
@@ -1642,6 +1649,77 @@ export const tamperCheck: Check = (ctx) => {
         report(finding, entryChange.lockfilePath);
       }
     }
+  }
+
+  // Lockfile shapes npm would act on with no hasInstallScript flag in sight.
+  // Neither is a comparison of resolutions, so neither sits behind the gate
+  // above: an npm file beside a primary lockfile of another format is still
+  // one an install may honour. Reported here rather than under install-script
+  // because a command written into the lockfile is a fact about the lockfile,
+  // not about a package, and allow does not cover lockfile-tamper.
+  for (const { lockfilePath, entryPath, name, valueHash } of delta.lockfileScriptKeys ?? []) {
+    report(
+      {
+        ruleId: 'lockfile-tamper',
+        severity: 'critical',
+        packageName: name,
+        message:
+          `"${entryPath}" in ${lockfilePath} carries its own "scripts" key. npm never writes that key and ` +
+          'runs lifecycle scripts from it at install, so the commands come from whoever edited this ' +
+          'lockfile, not from the package, and the entry\'s integrity hash does not cover them.',
+        manifestPath: lockfilePath,
+        details: {
+          // Per path: two copies of one name are two edits. Per value, by
+          // hash: a baseline accepts these commands, not whatever replaces them.
+          signal: `lockfile-scripts-key:${entryPath}:${valueHash}`,
+          kind: (delta.hasComparisonBase ? 'changed' : 'present') satisfies ReportedKind,
+          lockfileEntry: entryPath,
+        },
+      },
+      lockfilePath
+    );
+  }
+  for (const { lockfilePath, entryPath, name, valueHash, fields } of delta.lockfileUnreadLocations ?? []) {
+    report(
+      {
+        ruleId: 'lockfile-tamper',
+        severity: 'critical',
+        packageName: name,
+        message:
+          `"${entryPath}" in ${lockfilePath} states where it installs from in a form dep-guard cannot judge ` +
+          `(${fields.map((field) => UNREAD_LOCATION_WORDS[field]).join('; ')}), so its source was not checked. ` +
+          'Regenerate the lockfile with npm.',
+        manifestPath: lockfilePath,
+        details: {
+          signal: `lockfile-location-shape:${entryPath}:${valueHash}`,
+          kind: (delta.hasComparisonBase ? 'changed' : 'present') satisfies ReportedKind,
+          lockfileEntry: entryPath,
+          fields,
+        },
+      },
+      lockfilePath
+    );
+  }
+  for (const { lockfilePath, lockfileVersion } of delta.lockfileVersionMismatches ?? []) {
+    report(
+      {
+        ruleId: 'lockfile-tamper',
+        severity: 'high',
+        packageName: lockfilePath,
+        message:
+          `${lockfilePath} has a "packages" map beside lockfileVersion ${lockfileVersion}. npm writes that ` +
+          'map only at version 2 or above, and below that it reads every package\'s own scripts at install, ' +
+          'so any package here may run one whatever its hasInstallScript flag says. Regenerate the ' +
+          'lockfile with npm.',
+        manifestPath: lockfilePath,
+        details: {
+          signal: 'lockfile-version-mismatch',
+          kind: (delta.hasComparisonBase ? 'changed' : 'present') satisfies ReportedKind,
+          lockfileVersion,
+        },
+      },
+      lockfilePath
+    );
   }
 
   return findings;

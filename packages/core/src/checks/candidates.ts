@@ -194,10 +194,11 @@ function acceptedAliasTargets(ctx: CheckContext): DepChange[] {
 // tarball-identity rule holds to the key; by name and version when there
 // is not, audit 2026-10-28, B2). The name field is checked IN ADDITION to
 // the key, never instead of it, unless an alias edge or an alias
-// declaration says the key is only a folder name. Checking a name is
-// additive: it can raise a finding and never clear one, so a field the
-// lockfile author writes is safe here and still never becomes identity
-// (delta.ts, LockEntryChange).
+// declaration says the key is only a folder name and the entry's tarball, if
+// it has one, vouches for the field (lockEntryNames). A field the lockfile
+// author writes never becomes identity (delta.ts, LockEntryChange), and on an
+// entry with a resolved URL it can only add a name to check, never take the
+// key off the list.
 //
 // No manifest line exempts an entry, whether or not some manifest declares
 // its name. Every attempt to say which declaration "already judged" the
@@ -274,14 +275,15 @@ function earlierAtSameInstall(entryChange: LockEntryChange): LockEntry[] {
 // package. Not a registry install: a bundled entry (it ships inside its
 // parent's tarball, with no resolved URL, and was never fetched by name;
 // review of the 2026-11-01 fix, B1), a pnpm local-directory version, a
-// git, file, directory or other non-registry resolution, and a
+// git, file, directory or other non-registry resolution, an entry whose
+// location could not be read (LockEntry.unreadLocation), and a
 // registry-kind URL whose path does not name the package. The key rule
 // asks this for the key (so an alias, whose name field names its target,
 // installed something else under the key), and the name-field rule asks it
 // for the field (so a git entry that carried the same field installed it
 // from git, review B2). The two rules use one test.
 function installedFromRegistry(entry: LockEntry, key: string, name: string): boolean {
-  if ((entry.nameField ?? key) !== name || entry.inBundle === true) {
+  if ((entry.nameField ?? key) !== name || entry.inBundle === true || entry.unreadLocation === true) {
     return false;
   }
   if (entry.resolvedUrl === undefined) {
@@ -337,9 +339,20 @@ function lockEntryNames(ctx: CheckContext): DepChange[] {
     const { key, field } = installedNames(entryChange, format);
     // The key is only a folder name when the lockfile's own alias edge, or
     // a manifest alias line under this key (its registry name is then the
-    // entry's packageName, delta.ts), asks for the name field.
+    // entry's packageName, delta.ts), asks for the name field, AND what
+    // installs is that field: the entry has no resolved URL (npm fetches the
+    // field by name), or its tarball vouches for the field (lookupName). An
+    // edge and a field are both lines in the same file, and with a resolved
+    // URL npm installs what the URL says, so a tarball of any other package
+    // leaves the key to be judged.
+    // An entry whose location could not be read (LockEntry.unreadLocation) is
+    // never one with no location.
+    const installsField =
+      entryChange.after.unreadLocation !== true && (url === undefined || entryChange.after.lookupName === field);
     const keyIsFolder =
-      field !== null && ((entryChange.aliasTargets ?? []).includes(field) || entryChange.packageName === field);
+      field !== null &&
+      installsField &&
+      ((entryChange.aliasTargets ?? []).includes(field) || entryChange.packageName === field);
     const earlier = earlierAtSameInstall(entryChange);
     const keyIsNew = !earlier.some((before) => installedFromRegistry(before, key, key));
     // installedFromRegistry asks for the field as the installed name, so it
