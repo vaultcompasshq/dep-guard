@@ -10,6 +10,10 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Changed
+
+- The CI gate pin and the devDependency move to dep-guard 0.18.2, and the CI conductor action pin and the @vaultcompass/conductor devDependency move to 0.18.0.
+
 ## [0.18.2] - 2026-11-04
 
 ### Changed
