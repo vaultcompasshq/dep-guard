@@ -10,6 +10,8 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-11-04
+
 ### Changed
 
 - The CI conductor action pin and the @vaultcompass/conductor devDependency move to 0.17.0.
