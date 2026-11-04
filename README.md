@@ -1,6 +1,6 @@
 # dep-guard
 
-Blocks risky dependencies at the moment they are added -- before install,
+Blocks risky dependencies at the moment they are added: before install,
 before commit, before CI.
 
 ```bash
@@ -37,8 +37,8 @@ an attacker can register it in advance and wait for it to be installed. The
 attack is often called slopsquatting.
 
 The tools that gate installs sit after the point where this lands. dep-guard
-reads the dependency diff -- or answers a single proposed addition with
-`dep-guard check <name>` -- and scores it before anything is fetched.
+reads the dependency diff, or answers a single proposed addition with
+`dep-guard check <name>`, and scores it before anything is fetched.
 dep-guard ships no MCP server; an agent integration calls the CLI or the
 core library's `checkSingle`.
 
@@ -48,11 +48,11 @@ name does not exist on npm
 and a pull request that turns off its own checks first
 ([#7](https://github.com/vaultcompasshq/conductor-proof/pull/7)).
 
-Each release is also scanned against a pinned public bench corpus: 17
-public repositories, each pinned to an exact commit
+Before a release, the maintainers scan a pinned public bench corpus
+(`pnpm bench`): 19 public repositories, each pinned to an exact commit
 ([bench/repos.public.json](bench/repos.public.json)), with the result
 recorded in [bench/baseline.public.json](bench/baseline.public.json). Three
-of the 17 baseline entries stop with exit 2 on purpose: each of those
+of the 19 baseline entries stop with exit 2 on purpose: each of those
 repositories carries a fixture or template file the parsers cannot read (two
 unparseable lockfiles, one unparseable `pyproject.toml`), and a gate that
 cannot read its inputs is meant to fail closed rather than report clean. The
@@ -61,14 +61,14 @@ regression check, not an accuracy score.
 
 ## What it checks
 
-Six rules, all offline and deterministic (plus five optional online checks
--- see below):
+Six rules, all offline and deterministic (plus five optional online checks,
+see below):
 
-- **Unknown package** -- for npm, a new name absent from a corpus of real
+- **Unknown package**: for npm, a new name absent from a corpus of real
   npm package names. The hallucination signal. For Python, no PyPI corpus
   ships, so a Python name is checked for existence only with `--online`,
   against PyPI itself (see "Online checks").
-- **Typosquat** -- for npm, edit distance against a popularity list, plus
+- **Typosquat**: for npm, edit distance against a popularity list, plus
   transform rules that catch what distance misses: separator swaps, scope
   flattening (`babel-core` against `@babel/core`), repeated and omitted
   characters, keyboard adjacency, and a curated list of known confusion
@@ -79,7 +79,7 @@ Six rules, all offline and deterministic (plus five optional online checks
   existence check, and only when the typo is not a registered project.
   A resemblance needs a target of at least three characters (`cn` is not
   reported against `co`); the curated confusion pairs are exempt.
-- **Install script** -- a dependency that gains the ability to run install
+- **Install script**: a dependency that gains the ability to run install
   scripts. Acquisition only: a version bump of a package that already ran
   them is not a finding, or every `npm update` would be noise. A change that
   adds the npm lockfile, or replaces it with one sharing no entry, makes
@@ -88,7 +88,7 @@ Six rules, all offline and deterministic (plus five optional online checks
   remedy for the ones you have reviewed. The severity and the exit are the
   same as for one package, and `ignorePaths` and the baseline apply to the
   per-package findings first.
-- **Lockfile tamper** -- resolutions moving to another host, integrity
+- **Lockfile tamper**: resolutions moving to another host, integrity
   hashes removed, forged, or downgraded to a weaker algorithm, and tarballs
   repointed within the same host. It also reads the declared specifier, so a
   dependency pointed at a git or url source instead of the registry is
@@ -109,13 +109,13 @@ Six rules, all offline and deterministic (plus five optional online checks
   blocking it would refuse the first commit of every repository that has
   one. A mutable ref still blocks even in that mode, since what it installs
   can change without your manifest changing.
-- **Version hygiene** -- wildcard and `latest` specifiers on new
+- **Version hygiene**: wildcard and `latest` specifiers on new
   dependencies. Demoted rather than exempted on `@types/*` packages: a
   DefinitelyTyped package ships no runtime code, so an unpinned range on one
   cannot hand an attacker code that executes, but it stays visible and
   `install-script` still covers the residual risk of its own install
   scripts.
-- **Dependency confusion** -- a scope pinned to a private registry that
+- **Dependency confusion**: a scope pinned to a private registry that
   resolves from the public one, and internal names arriving from outside.
 
 Findings carry a severity and a stable fingerprint. A fingerprint survives
@@ -125,8 +125,8 @@ working tomorrow.
 **A known limitation in this release:** typosquat's curated confusion pairs
 (the 48 documented registry incidents, plus anything you add via
 `extraAliases`) block at the default threshold, as they always have.
-Everything else the check reports -- separator swaps, scope flattening,
-repeated or transposed characters, keyboard adjacency, and edit distance --
+Everything else the check reports (separator swaps, scope flattening,
+repeated or transposed characters, keyboard adjacency, and edit distance)
 is resemblance rather than a known confusion, and measuring it against nine
 well maintained public repositories found three findings, all of them false
 positives, and zero true positives. So for now those matches report at
@@ -135,7 +135,7 @@ Lowering your own threshold to `low` or below re-enables them as blocking.
 This is exactly what `--online` now addresses: turned on, a non-alias-list
 match escalates from `low` to `high` once the candidate's own weekly
 downloads confirm it is genuinely unpopular, not merely smaller than an
-extremely popular target -- see [Online checks](docs/online-checks.md).
+extremely popular target; see [Online checks](docs/online-checks.md).
 
 ## Online checks (`--online`)
 
@@ -154,7 +154,7 @@ dep-guard init --dry-run              # print what would be written
 
 The hook runs `dep-guard scan --staged` on every commit. It is safe to
 re-run: a second `init` reports the hook is already installed and changes
-nothing. It never overwrites a hook it did not write -- if one is already
+nothing. It never overwrites a hook it did not write; if one is already
 there, init stops and tells you what to merge in by hand.
 
 A bare `dep-guard init` detects a husky-managed repository on its own: if
@@ -177,7 +177,7 @@ hook's exit code themselves. A non-zero dep-guard still blocks the commit,
 but the difference between its 1 and its 2 does not survive into the exit
 code the manager reports.
 
-**To uninstall,** delete the file init wrote -- the path is printed when
+**To uninstall,** delete the file init wrote; the path is printed when
 it installs, and `--dry-run` will tell you again. For `lefthook` and
 `pre-commit`, delete the file or just remove the `dep-guard` stanza if you
 have added your own hooks to it. There is no `init --revert`; one file is
@@ -227,7 +227,7 @@ permissions:
   security-events: write
 
 steps:
-  - uses: actions/checkout@v7
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     with:
       # Required on pull_request runs: pull-request mode reads the config
       # and the baseline from the base branch, which a shallow checkout
@@ -464,7 +464,7 @@ published core package, so nothing here is required for normal use --
 this section is for building your own, either to point `--corpus-dir` at
 something newer than the last release's walk or to work on the corpus
 machinery itself. `packages/core/fixtures/corpus` holds a small
-development corpus useful for tests and useless for real work -- it knows
+development corpus useful for tests and useless for real work: it knows
 fifty package names.
 
 The bundled corpus has a cadence, because it decays: every name published
