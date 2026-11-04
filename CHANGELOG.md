@@ -16,6 +16,7 @@ GitHub release notes, which are generated from the commit history.
 
 ### Security
 
+- A lockfile entry's key is left off the name checks only when an alias asks for its name field and nothing on the entry states a location that disagrees. An entry that states its location in a form dep-guard cannot judge, a `scripts` key on a lockfile entry and a `lockfileVersion` that is not 2 or more beside a `packages` map are each reported as `lockfile-tamper`. The install-script comparison pairs an entry with the earlier entry at its own path where that path existed, by the tarball's name where it has one.
 - A dependency build script runs only when that package is named in
   `pnpm.onlyBuiltDependencies`. Nothing is named there. The native
   dependencies ship an optional platform package, and the suite passes

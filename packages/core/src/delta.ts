@@ -1,4 +1,6 @@
-import type { LockEntry, LockfileFormat, ParsedLockfile } from './lockfiles/types.js';
+import { createHash } from 'node:crypto';
+import { installedNameFromKey } from './lockfiles/npm.js';
+import type { LockEntry, LockfileFormat, ParsedLockfile, UnreadLocationField } from './lockfiles/types.js';
 import type { DepType, ManifestDep, Protocol } from './manifest.js';
 import { computePythonDelta, type PythonDeltaFacts } from './python-delta.js';
 import { originOf } from './resolution.js';
@@ -120,8 +122,10 @@ export interface LockEntryChange {
   // (LockEntry.lockPath): the comparison side's entry at that same path,
   // or null when the comparison side had no entry there. `kind`, `before`
   // and `beforeCandidates` pair by installed name across every depth, which
-  // is right for the tamper and install-script comparisons (what did this
-  // name resolve to before) and wrong for the name checks: an entry at a
+  // is right for the tamper comparisons (what did this name resolve to
+  // before) and wrong for the name checks and for the install-script flag
+  // comparison where this path existed (checks/install-script.ts,
+  // flagComparisonEntries): an entry at a
   // path the base never had installs a package there for the first time,
   // whatever other paths carry the same name, and the earlier entry under
   // that name need not have installed that package at all (an npm alias
@@ -165,6 +169,32 @@ export function acceptedTransitiveAliasTarget(entryChange: LockEntryChange): str
   return (entryChange.aliasTargets ?? []).includes(target) ? target : null;
 }
 
+// A non-root packages entry with a "scripts" key that is new at its path, or
+// whose value moved there.
+export interface LockfileScriptKey {
+  lockfilePath: string;
+  // The packages-map key.
+  entryPath: string;
+  // The installed name, or the key itself for a workspace directory.
+  name: string;
+  // A short hash of the value, so a baseline accepts this value and not a later
+  // one (checks/tamper.ts). The value itself is never carried out of the delta.
+  valueHash: string;
+}
+
+// A non-root packages entry stating its location in a form the location checks
+// cannot read, new at its path or with a value that moved there.
+export interface LockfileUnreadLocation extends LockfileScriptKey {
+  fields: readonly UnreadLocationField[];
+}
+
+// A file with a packages map and a lockfileVersion npm reads as old metadata,
+// when its comparison side was not already in that state.
+export interface LockfileVersionMismatch {
+  lockfilePath: string;
+  lockfileVersion: string;
+}
+
 export interface DependencyDelta {
   changes: DepChange[];
   lockEntryChanges: LockEntryChange[];
@@ -194,6 +224,13 @@ export interface DependencyDelta {
   // registered-squat step does not send a lockfile-only name from one of
   // these (checks/candidates.ts, NewName.source).
   whollyNewLockfiles?: readonly string[];
+  // Facts about an npm lockfile on the judged side that the entry diff cannot
+  // carry, each new against that file's comparison side (all of them, with no
+  // comparison side). Absent on a delta built by hand. checks/tamper.ts reports
+  // them. See lockfileShapeFacts.
+  lockfileScriptKeys?: readonly LockfileScriptKey[];
+  lockfileUnreadLocations?: readonly LockfileUnreadLocation[];
+  lockfileVersionMismatches?: readonly LockfileVersionMismatch[];
   // Package names the AFTER side's lockfile records as workspace-local
   // (RepoState.workspaceLocalNames, itself a carry of
   // ParsedLockfile.workspaceLocalNames -- see lockfiles/types.ts). A
@@ -712,6 +749,47 @@ function diffLockEntries(
   }
 
   return { changes: entryChanges, diagnostics };
+}
+
+// What a file on the judged side says about install scripts outside the
+// entries' resolution, against its comparison side. Compared here, over the
+// raw packages-map paths, rather than by adding to resolutionIdentity: that
+// pairs by name, so a key copied from another path would still read as
+// unchanged, and it never sees a workspace directory or a link entry.
+function lockfileShapeFacts(
+  lockfiles: readonly ParsedLockfile[],
+  counterpartOf: (file: ParsedLockfile) => ParsedLockfile | null
+): {
+  scriptKeys: LockfileScriptKey[];
+  unreadLocations: LockfileUnreadLocation[];
+  versionMismatches: LockfileVersionMismatch[];
+} {
+  const scriptKeys: LockfileScriptKey[] = [];
+  const unreadLocations: LockfileUnreadLocation[] = [];
+  const versionMismatches: LockfileVersionMismatch[] = [];
+  const subject = (lockfilePath: string, entryPath: string, value: string): LockfileScriptKey => ({
+    lockfilePath,
+    entryPath,
+    name: installedNameFromKey(entryPath) ?? entryPath,
+    valueHash: createHash('sha256').update(value).digest('hex').slice(0, 12),
+  });
+  for (const file of lockfiles) {
+    const counterpart = counterpartOf(file);
+    for (const [entryPath, value] of file.scriptKeys ?? []) {
+      if (counterpart?.scriptKeys?.get(entryPath) !== value) {
+        scriptKeys.push(subject(file.path, entryPath, value));
+      }
+    }
+    for (const [entryPath, { fields, value }] of file.unreadLocations ?? []) {
+      if (counterpart?.unreadLocations?.get(entryPath)?.value !== value) {
+        unreadLocations.push({ ...subject(file.path, entryPath, value), fields });
+      }
+    }
+    if (file.packagesVersionMismatch !== undefined && counterpart?.packagesVersionMismatch === undefined) {
+      versionMismatches.push({ lockfilePath: file.path, lockfileVersion: file.packagesVersionMismatch });
+    }
+  }
+  return { scriptKeys, unreadLocations, versionMismatches };
 }
 
 // The comparison side's entries by packages-map path (npm), for
@@ -1630,9 +1708,13 @@ export function computeDelta(
 
   const python = computePythonDelta(before, after, comparisonSides);
   deltaDiagnostics.push(...python.diagnostics);
+  const shapeFacts = lockfileShapeFacts(comparedLockfiles, counterpartOf);
 
   return {
     changes,
+    lockfileScriptKeys: shapeFacts.scriptKeys,
+    lockfileUnreadLocations: shapeFacts.unreadLocations,
+    lockfileVersionMismatches: shapeFacts.versionMismatches,
     lockEntryChanges: lockEntries.changes,
     python: python.facts,
     go: { files: (after.goFiles ?? []).length },

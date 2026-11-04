@@ -396,7 +396,7 @@ in `computeDelta`, on a pure SELECTION guess -- a dependency's specifier
 matches more than one lock entry under its name and the code cannot tell
 which one it resolves to -- with no comparison involved at all. That guess
 is not reported unconditionally: computeDelta drops it when the specifier
-held and the selected before/after entries do not differ (delta.ts:576-587),
+held and the selected before/after entries do not differ (delta.ts:1518-1529),
 unless `ambiguity.material === true` -- a merely version-level ambiguity
 under a package nobody touched is noise, but one that could have decided
 whether a tampered entry or a clean one was compared has to survive the
@@ -410,9 +410,9 @@ made it simultaneously the only honesty channel covering this hole and the
 noisiest note in the set, since a nested duplicate of any bumped package
 produces an undecidable pairing on nearly every routine refresh. The third
 producer is `checks/install-script.ts`: it declares the same code
-(`AMBIGUOUS_LOCK_ENTRY_CODE`, install-script.ts:31) and raises it from
-`noteSuppressedByPairing` (install-script.ts:141), reached from
-`agreementAcrossCandidates` dropping a verdict (install-script.ts:258) --
+(`AMBIGUOUS_LOCK_ENTRY_CODE`, install-script.ts:33) and raises it from
+`noteSuppressedByPairing` (install-script.ts:177), reached from
+`agreementAcrossCandidates` dropping a verdict (install-script.ts:295) --
 the install-script rule's own suppressed-acquisition case, following the
 same follow-the-suppression rule as tamper's producer rather than the pure
 selection guess above.
@@ -937,7 +937,8 @@ downgrade rule, described in its own section below. Pinned by the tests named
 "3"`, `... is the number 1`, `... is null`, `... is deleted`, and `a base
 with a packages map whose head loses it (v1 shape) is not a clean pass`; the
 real-v1 control is `a real v1 lockfile on both sides keeps only the v1
-diagnostic`.
+diagnostic`. The version still decides what the install-script flags mean, and
+a mismatch is a finding of its own: see "Install scripts are not only a flag".
 
 **A pnpm entry with no tarball URL has an implied one.** pnpm records a
 registry resolution as `{integrity}` alone and writes `tarball` only when
@@ -2382,7 +2383,7 @@ exact case a minimum-publish-age policy exists to catch, and one
 `newRegistryNames` cannot see at all.
 
 The reason is worth stating precisely, because an earlier version of this
-paragraph got it backwards. `computeDelta` (`delta.ts:575-576`) does NOT
+paragraph got it backwards. `computeDelta` (`delta.ts:1514-1518`) does NOT
 skip a held specifier outright: `specifierHeld` only suppresses a change
 when the specifier held AND the selected before/after lock entries do
 NOT differ (`delta.ts`'s `!lockEntriesDiffer` clause). A held specifier
@@ -5076,28 +5077,29 @@ while `npm ci --ignore-scripts` installed the security holding package
 there.
 
 - **Every npm lock entry keeps its packages-map path.**
-  `entryFromPackageValue` (`lockfiles/npm.ts:95`) sets
+  `entryFromPackageValue` (`lockfiles/npm.ts:163`) sets
   `LockEntry.lockPath` to the packages-map key. It is never identity and
   is not part of `resolutionIdentity`, so an entry that only moved is
   still unchanged. pnpm entries carry none: a pnpm key is the registry
   name, and an alias lives in the dependent's own block.
-- **The name checks pair by path.** `diffLockEntries` (`delta.ts:663`,
-  `delta.ts:709`, `entriesByPath` at `delta.ts:720`) sets
+- **The name checks pair by path.** `diffLockEntries` (`delta.ts:700`,
+  `delta.ts:746`, `entriesByPath` at `delta.ts:798`) sets
   `LockEntryChange.atPathBefore` to the comparison side's entry at the
   same path, or null when that path is new. `kind`, `before` and
-  `beforeCandidates` still pair by name: they feed the tamper and
-  install-script comparisons, which ask what the name resolved to before
-  (so `host-changed` still fires for a new registry entry beside a base git
-  or `file:` entry of the name).
+  `beforeCandidates` still pair by name: they feed the tamper comparisons,
+  which ask what the name resolved to before (so `host-changed` still fires
+  for a new registry entry beside a base git or `file:` entry of the name).
+  The install-script comparison pairs by path where the path existed: see
+  "Install scripts are not only a flag" below.
 - **A bundled entry is its own resolution.** `resolutionIdentity`
-  (`delta.ts:435`) includes `inBundle`, so an unresolved entry fetched by
+  (`delta.ts:472`) includes `inBundle`, so an unresolved entry fetched by
   name is not dropped as unchanged against a bundled entry of the same
   version at another path (review of this fix, B1, fixture ib3: it was
   dropped before any check ran, `--online` included).
 - **A name is new unless the same install location installed it from a
-  registry.** `lockEntryNames` (`checks/candidates.ts:344` to `:348`)
-  asks `installedFromRegistry` (`checks/candidates.ts:283`) of every entry
-  from `earlierAtSameInstall` (`checks/candidates.ts:259`; for npm the
+  registry.** `lockEntryNames` (`checks/candidates.ts:357` to `:361`)
+  asks `installedFromRegistry` (`checks/candidates.ts:285`) of every entry
+  from `earlierAtSameInstall` (`checks/candidates.ts:260`; for npm the
   entry at the same path, for pnpm the earlier candidates under the key).
   An earlier entry installed a name from a registry when its name field,
   or its key when it has none, is that name; it is not bundled; and it has
@@ -5113,7 +5115,8 @@ there.
   a same-path entry whose base was an alias, bundled (review B1, fixture
   ib2), a name field with no resolved, a tarball of another package, or a
   git, file or directory source has its key checked. Accepted transitive
-  aliases and the alias-edge or alias-line folder-name rule are unchanged.
+  aliases are unchanged. For the alias-edge or alias-line folder-name rule, see
+  "When a lock entry's key is a folder name" below.
 - **Online cost.** A name at a new path goes to registered-squat like any
   added name (publish-age already looked up every added or changed
   entry). Measured with `--online`, published 0.18.0 against this rule,
@@ -5192,3 +5195,122 @@ host-changed finding; all exit 1. On the review's fixtures, `npm ci
 typosquat on package-lock.json (each exited 0 on the first version of this
 fix). `fl` again reports the high unknown-package for
 `corp-internal-utils-xyz` beside its two critical lockfile-tamper findings.
+
+## When a lock entry's key is a folder name (2026-11-04)
+
+The name checks judge an entry's key unless the key is only a folder name for
+a package the entry installs under another name. Neither an alias edge nor an
+alias line decides that alone.
+
+- **The key is a folder name only when the field is what installs.**
+  `lockEntryNames` (`checks/candidates.ts:350` to `:355`) requires an edge or a
+  line naming the field, and that nothing the entry states about its location
+  disagrees with the field (`LockEntry.lookupName`, `LockEntry.unreadLocation`).
+  Anything else keeps the key on the list. A registry whose tarball paths this
+  tool cannot read keeps the key on the list too, so a genuine alias there has
+  its key checked as well: a possible false positive, never a pass.
+- **Pinned by** `an added entry whose tarball names the key has the key
+  checked, whatever edge and field it carries`, `the same holds for a nested
+  entry`, `a base alias retargeted at the same path, field kept, has the key
+  checked` and `a key the corpus does not know is an unknown package, not
+  skipped`, with the controls `control: a genuine transitive alias, the tarball
+  naming the field, leaves the key alone` and `control: a manifest alias line,
+  the tarball naming the field, leaves the key alone`, all in
+  `packages/core/tests/audit-2026-11-04.test.ts`.
+
+## An entry's location has to be readable (2026-11-04)
+
+The location checks read a `resolved` that parses as a URL and a plain version.
+A `git+ssh` value npm-package-arg treats as scp-style is read by that test, not
+as a URL: `user@host:path` with no `@` or `:` in the path becomes the same address
+with a slash, so the checks read the host git would connect to
+(`readableResolved`, `lockfiles/npm.ts:109`), provided the rewritten URL parses to
+that host. Any other scp-style value counts as unread. Two spellings of one address
+compare equal, and a slash and a colon path can differ over ssh, so a change
+between them on an unpinned entry is not reported.
+`unreadLocationFields` (`lockfiles/npm.ts:131`) names what they cannot read: a
+`_resolved` field and a truthy `resolved` that is not a URL or a link entry's
+string path on any non-root entry, and, on a `node_modules` entry with no
+`resolved`, a `version` that is not plain semver. The rule fails closed and does
+not depend on what npm does with any of these. A `link: true` flag excuses only
+a string `resolved`; what npm does with a flagged entry's path is inferred, not
+measured. The compared value holds the fields and whether a `resolved` sits
+beside them as well as the values.
+
+- **It is `lockfile-tamper`, critical** (`checks/tamper.ts:1682`, signal
+  `lockfile-location-shape`). The finding names the fields, never their values.
+  The signal carries the path and a short hash of the values, so a baseline
+  accepts those values and not later ones.
+- **It compares as the `scripts` key does.** `lockfileShapeFacts` (`delta.ts:759`)
+  reports an entry new at its path or with changed values, over the raw
+  packages-map paths, so an entry the entry diff would drop as unchanged is still
+  read. A shape already present on the comparison side (the base ref, or HEAD on a
+  staged run) is quiet in delta modes and stated in audit mode.
+- **Such an entry never clears a name.** `LockEntry.unreadLocation` keeps the key
+  on the list (`checks/candidates.ts:350`) and stops an earlier entry counting as
+  a registry install (`checks/candidates.ts:286`).
+- **Real-repo measurement.** Offline, over the head lockfiles of the 16 public
+  repositories below: 52 npm lockfiles with a `packages` map, 34,646 non-root
+  entries of which 47 workspace directories, 47 links, 521 bundled and 1,188 under
+  `node_modules` with no `resolved`. None hits any of the three conditions. Head
+  checkouts only; history was not walked.
+- **Pinned by** the `describe` block `an entry that states its location in a form
+  the tool cannot judge is lockfile tampering` in
+  `packages/core/tests/audit-2026-11-04.test.ts`.
+
+## Install scripts are not only a flag (2026-11-04)
+
+The rule does not rely on `hasInstallScript` alone. `shrinkwrap.js`'s
+`pkgMetaKeys` in npm 10.9.9's arborist does not list `scripts`, so npm never
+writes that key. npm 11 was not read.
+
+- **A `scripts` key on a non-root packages entry is `lockfile-tamper`,
+  critical.** The parser records it for every key but the root, before any entry
+  is skipped, so a workspace directory or a link entry counts
+  (`lockfiles/npm.ts:315`). That workspace and link entries are honoured is
+  inferred from the code, not run; flagging them costs nothing, since npm writes
+  the key on no entry. `lockfileShapeFacts` (`delta.ts:759`) compares by
+  packages-map path, new at its path or a changed value, and is deliberately not
+  part of `resolutionIdentity`: that pairs by name, so a key copied from another
+  path would still read as unchanged. The finding is raised by `tamperCheck`
+  (`checks/tamper.ts:1660`), outside the primary-format gate, because `allow` does
+  not cover `lockfile-tamper` and a command in the lockfile is not a fact about a
+  package. Its signal carries the path, so two copies are two findings, and a
+  short hash of the value, so a baseline accepts that value and not a later one.
+  The command text is never printed.
+- **A `packages` map beside a version that is not 2 or more is `lockfile-tamper`,
+  high** (`checks/tamper.ts:1703`, `lockfiles/npm.ts:384`). A number below 2,
+  `null`, no field and any value that is neither a number nor a string of digits
+  all qualify, whatever npm would make of it. A string of digits reads as its
+  number. Audit mode states it; on a delta it is raised only when the comparison
+  side (the base ref, or HEAD on a staged run) was not already in that state.
+  One finding per file: it says the flags are no account of what runs, in place
+  of one finding per entry.
+- **The flag comparison pairs by path where the path existed.**
+  `flagComparisonEntries` (`checks/install-script.ts:121`) compares with the entry
+  at the same path and no other, so a flagged copy elsewhere does not count.
+  `installsSamePackage` (`checks/install-script.ts:106`) compares what each entry
+  installs, `installedPackage` (`checks/install-script.ts:98`): the tarball's name
+  where the URL has one, otherwise the name field or the key.
+- **A new path still pairs by name, on purpose.** A new nested copy of a package
+  that already ran scripts in the tree stays silent, as a bump of one does. This
+  is narrower than a pure path pairing, and the difference is measured: over 80
+  real commits that touch a lockfile (16 public repositories, 116 changed npm
+  lockfiles, 93,786 head entries read), a pure path pairing would have added 2
+  findings on one commit, and this rule adds none. The residual is that such a
+  copy at a new version is judged no harder than a bump of that package. The
+  manifest walk's `acquiredInstallScript` still pairs by the manifest's selected
+  entries; the lockfile walk covers what it would miss.
+- **Real-repo measurement.** Offline, shipped corpus, `--base` and `--trust-base`
+  on those 80 commits and audit mode at 16 heads: no finding differs from published
+  0.18.0, and no `scripts` key or mismatched version appears on the walked head
+  side. This is not `bench/baseline.public.json`, whose run clones over the network
+  and was not run for this change.
+- **Not covered.** With a primary pnpm lockfile, `delta.lockfileFormat` is `pnpm`
+  and the install-script check does not read the flags of an npm lockfile below
+  it; the two findings above are raised for that file regardless. Other entry keys
+  npm honours (`bin` links a file and runs nothing) are not judged.
+- **Pinned by** the three `describe` blocks `a scripts key on a lock entry is
+  lockfile tampering`, `a lockfileVersion that does not match a present packages
+  map is lockfile tampering` and `the install-script comparison pairs by path` in
+  `packages/core/tests/audit-2026-11-04.test.ts`.

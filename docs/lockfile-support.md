@@ -6,7 +6,21 @@ quiet:
 
 - `package-lock.json` and `npm-shrinkwrap.json` v2 and v3 -- full coverage.
   The `packages` map is read whenever it exists, whatever `lockfileVersion`
-  says (npm installs from it either way). A file with no `packages` map at
+  says (npm installs from it either way). npm writes the map only at 2 or
+  above, so a `packages` map beside a
+  `lockfileVersion` that is not a number of 2 or more, or a string of digits
+  reading as one, is a high `lockfile-tamper` finding
+  (`lockfile-version-mismatch`). That covers every other kind of value, such as
+  `"2.5"` or `[3]`, whatever npm would make of it. npm never writes a
+  `scripts` key on a lockfile entry, and a non-root entry with one, new at its path or with a changed value, is a critical
+  `lockfile-tamper` finding (`lockfile-scripts-key`). So is a non-root entry,
+  new at its path or with a changed value, that states its location in a form
+  dep-guard cannot judge (`lockfile-location-shape`): a `_resolved` field, a
+  `resolved` that is not a URL or a link path, or, on a `node_modules` entry with no
+  `resolved`, a `version` that is not plain semver. A shape already present on
+  the comparison side (the base ref, or HEAD on a staged run) is quiet in delta
+  modes and stated in audit mode, for all three findings. A file with no
+  `packages` map at
   all is a real v1 lockfile: it gets a diagnostic and no entries; a
   `lockfileVersion` of 2 or 3, written as a number or as a string of digits,
   with no `packages` map is a parse error (exit 2, `lockfile-parse`; clear it

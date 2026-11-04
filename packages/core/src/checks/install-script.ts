@@ -1,4 +1,6 @@
-import type { DepChange } from '../delta.js';
+import type { DepChange, LockEntryChange } from '../delta.js';
+import type { LockEntry } from '../lockfiles/types.js';
+import { registryTarballPackageName } from '../resolution.js';
 import type { Finding } from '../types.js';
 import { agreementAcrossCandidates } from './agreement.js';
 import { allowClears } from './allow.js';
@@ -88,6 +90,40 @@ function acquiredInstallScript(change: DepChange): boolean {
   // Otherwise this is a changed dependency: only report a flag turning
   // on, never a bump that leaves an already-true flag true.
   return change.before?.hasInstallScript !== true;
+}
+
+// The package an entry installs: its tarball's name where the URL has one,
+// since a name field is one line in the lockfile, and otherwise the name field
+// or the key.
+function installedPackage(entry: LockEntry, key: string): string {
+  const tarballName = entry.resolvedUrl === undefined ? null : registryTarballPackageName(entry.resolvedUrl);
+  return tarballName ?? entry.nameField ?? key;
+}
+
+// Whether an earlier entry installed what this one installs: an npm alias
+// runs another package under the key, so a flag on it says nothing about the
+// key's own package.
+function installsSamePackage(earlier: LockEntry, entryChange: LockEntryChange): boolean {
+  return installedPackage(earlier, entryChange.name) === installedPackage(entryChange.after, entryChange.name);
+}
+
+// The earlier entries a flagged entry is compared with. Where the comparison
+// side had an entry at this path (LockEntryChange.atPathBefore), that one and
+// no other: a flagged copy at another path does not stop an acquisition here.
+//
+// At a path that is new, and for an entry with no recorded path (pnpm, a
+// change built by hand), the delta's pairing by name stands. So a new nested
+// copy of a package that already ran scripts in this tree stays silent, for
+// the same reason a bump of one does: moving a scripted package between paths
+// is what a refresh does, and reporting it would file a finding on every one.
+// The comparison itself still asks installsSamePackage of each entry, so an
+// alias of the key does not count.
+function flagComparisonEntries(entryChange: LockEntryChange): LockEntry[] {
+  const { atPathBefore } = entryChange;
+  if (atPathBefore !== undefined && atPathBefore !== null) {
+    return [atPathBefore];
+  }
+  return entryChange.beforeCandidates ?? (entryChange.before === undefined ? [] : [entryChange.before]);
 }
 
 // What this check can honestly say about a flagged entry, given whether
@@ -241,16 +277,17 @@ export const installScriptCheck: Check = (ctx) => {
       // there was no acquisition and the scan CAN say so. A bump of a
       // scripted package beside a flagged nested duplicate is routine, so
       // that would fire on nearly every refresh.
-      const candidates =
-        entryChange.beforeCandidates ??
-        (entryChange.before === undefined ? [] : [entryChange.before]);
+      const candidates = flagComparisonEntries(entryChange);
       if (entryChange.kind === 'changed') {
         const { agreed, dropped } = agreementAcrossCandidates(
           candidates,
           // The whole comparison this rule makes, per candidate: an entry
           // that already ran scripts yields no acquisition, one that did not
           // yields one.
-          (candidate) => (candidate.hasInstallScript === true ? [] : [ACQUISITION_SIGNAL]),
+          (candidate) =>
+            candidate.hasInstallScript === true && installsSamePackage(candidate, entryChange)
+              ? []
+              : [ACQUISITION_SIGNAL],
           (signal) => signal
         );
         if (dropped.length > 0) {

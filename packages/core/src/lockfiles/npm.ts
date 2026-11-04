@@ -1,7 +1,7 @@
 import { DepGuardError, type Diagnostic } from '../types.js';
-import { registryTarballPackageName } from '../resolution.js';
+import { registryTarballPackageName, resolutionOf } from '../resolution.js';
 import { withoutByteOrderMark } from '../text.js';
-import type { LockEntry, ParsedLockfile } from './types.js';
+import type { LockEntry, ParsedLockfile, UnreadLocation, UnreadLocationField } from './types.js';
 
 const NODE_MODULES_SEGMENT = 'node_modules/';
 
@@ -18,7 +18,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 // directories like "packages/app", or the root "" entry describing the
 // project itself -- are not installed dependencies and return undefined so
 // the caller skips them.
-function installedNameFromKey(key: string): string | undefined {
+export function installedNameFromKey(key: string): string | undefined {
   const idx = key.lastIndexOf(NODE_MODULES_SEGMENT);
   if (idx === -1) {
     return undefined;
@@ -84,6 +84,74 @@ function recordAliasEdges(value: unknown, aliasEdges: Map<string, Set<string>>):
 // this side was not" apart from "neither side ever had a packages map".
 export const NPM_LOCKFILE_V1_CODE = 'npm-lockfile-v1';
 
+const PLAIN_SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+// npm-package-arg's own test for a git+ssh value it hands to git as an scp-style
+// address instead of parsing it as a URL: a colon before any "#", unless what
+// follows the colon reads as a port. A URL parser can read a different host from
+// the same text, so this decides what such a value means, not new URL.
+const NPM_SCP_SPEC = /^git\+ssh:\/\/([^:#]+):([^#]+)(#.*)?$/;
+const NPM_PORT_NUMBER = /:[0-9]+(\/|$)/;
+const USER_AT_HOST = /^[^@\s/]+@([^@\s/]+)$/;
+const PLAIN_SCP_PATH = /^[^@:\s]+$/;
+
+function npmScpSpec(resolved: string): RegExpExecArray | null {
+  const scp = NPM_SCP_SPEC.exec(resolved);
+  return scp !== null && !NPM_PORT_NUMBER.test(`${scp[1]}:${scp[2]}`) ? scp : null;
+}
+
+// The location a string "resolved" states, in the form every check parses: a
+// plain scp-style user@host:path becomes the same address with a slash, so the
+// checks read the host git would connect to. Anything else stays as written.
+// An "@" or ":" in the path is reported. The host is compared after the
+// rewrite, so a URL parser's reading of the text can never stand in for the
+// scp host.
+function readableResolved(resolved: string): string {
+  const scp = npmScpSpec(resolved);
+  const scpHost = scp === null ? undefined : USER_AT_HOST.exec(scp[1])?.[1];
+  if (scp === null || scpHost === undefined || !PLAIN_SCP_PATH.test(scp[2])) {
+    return resolved;
+  }
+  const rewritten = `git+ssh://${scp[1]}/${scp[2]}${scp[3] ?? ''}`;
+  return resolutionOf(rewritten)?.host.toLowerCase() === scpHost.toLowerCase() ? rewritten : resolved;
+}
+
+// A string "resolved" the checks cannot hold to the place it names: it does not
+// parse, or it is scp-style in a shape that has no host to rewrite to.
+function isUnreadResolved(resolved: string): boolean {
+  const readable = readableResolved(resolved);
+  return resolutionOf(readable) === null || (readable === resolved && npmScpSpec(resolved) !== null);
+}
+
+// The fields of a packages entry that state where it installs from in a form
+// the location checks cannot read: they read a "resolved" that parses as a URL
+// and a plain version. An empty result is the ordinary case. A false or null
+// "resolved" is no location at all, and so is a null or absent version. A link
+// entry's "resolved" is a path by design, but only a string one.
+function unreadLocationFields(key: string, value: Record<string, unknown>): UnreadLocationField[] {
+  const fields: UnreadLocationField[] = [];
+  if (Object.hasOwn(value, '_resolved')) {
+    fields.push('_resolved');
+  }
+  if (
+    value.resolved &&
+    (typeof value.resolved !== 'string' || (value.link !== true && isUnreadResolved(value.resolved)))
+  ) {
+    fields.push('resolved');
+  }
+  const { version } = value;
+  if (
+    installedNameFromKey(key) !== undefined &&
+    !value.resolved &&
+    version !== undefined &&
+    version !== null &&
+    (typeof version !== 'string' || !PLAIN_SEMVER.test(version))
+  ) {
+    fields.push('version');
+  }
+  return fields;
+}
+
 function entryFromPackageValue(
   path: string,
   key: string,
@@ -97,10 +165,13 @@ function entryFromPackageValue(
     entry.version = value.version;
   }
   if (typeof value.resolved === 'string') {
-    entry.resolvedUrl = value.resolved;
+    entry.resolvedUrl = readableResolved(value.resolved);
   }
   if (typeof value.integrity === 'string') {
     entry.integrity = value.integrity;
+  }
+  if (unreadLocationFields(key, value).length > 0) {
+    entry.unreadLocation = true;
   }
   if (value.hasInstallScript === true) {
     entry.hasInstallScript = true;
@@ -233,8 +304,27 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
   // map keys like "node_modules/constructor" or "node_modules/__proto__"
   // (both legal npm package names) are handled like any other entry
   // instead of colliding with inherited Object.prototype members.
+  const scriptKeys = new Map<string, string>();
+  const unreadLocations = new Map<string, UnreadLocation>();
   for (const [key, value] of Object.entries(packages)) {
     recordAliasEdges(value, aliasEdges);
+    // Read before any entry is skipped, so a workspace directory or a link
+    // entry is not a place to put one. The root entry is the project itself.
+    if (key !== '' && isPlainObject(value)) {
+      if (Object.hasOwn(value, 'scripts')) {
+        scriptKeys.set(key, JSON.stringify(value.scripts));
+      }
+      const fields = unreadLocationFields(key, value);
+      if (fields.length > 0) {
+        // Which fields, and whether a "resolved" sits beside them, count as
+        // well as the values: the same text moved to another field, or an
+        // unchanged "_resolved" left alone by a dropped "resolved", is a change.
+        unreadLocations.set(key, {
+          fields,
+          value: JSON.stringify([fields, fields.map((field) => value[field]), Boolean(value.resolved)]),
+        });
+      }
+    }
     const name = installedNameFromKey(key);
     if (name === undefined) {
       continue; // workspace-local package directory, or the root "" entry
@@ -283,5 +373,26 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
     }
   }
 
-  return { format: 'npm', path, entries, diagnostics, workspaceLocalNames, workspaceLinks, aliasEdges };
+  // The map is read whatever the version says (above), but the version still
+  // decides what the hasInstallScript flags mean. npm treats a lockfile as old
+  // metadata unless its version compares at 2 or above, and for old metadata
+  // it reads each package's own scripts at install whatever the flag says
+  // (arborist's rebuild.js, #oldMeta). npm only writes a packages map at 2 or
+  // above, so the two together mean an edited file whose flags are no account
+  // of what runs. A string of digits compares as its number there, as it is
+  // read here.
+  const packagesVersionMismatch = versionNumber === undefined || versionNumber < 2;
+
+  return {
+    format: 'npm',
+    path,
+    entries,
+    diagnostics,
+    workspaceLocalNames,
+    workspaceLinks,
+    aliasEdges,
+    ...(scriptKeys.size > 0 ? { scriptKeys } : {}),
+    ...(unreadLocations.size > 0 ? { unreadLocations } : {}),
+    ...(packagesVersionMismatch ? { packagesVersionMismatch: versionLabel } : {}),
+  };
 }

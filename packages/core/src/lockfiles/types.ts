@@ -87,9 +87,26 @@ export interface LockEntry {
   // installedFromRegistry never counts a bundled earlier entry as a
   // registry install of its key.
   inBundle?: true;
+  // npm only: the entry states a location in a form the location checks cannot
+  // read (ParsedLockfile.unreadLocations), so a missing resolvedUrl here does
+  // not mean it has no location. checks/candidates.ts then never treats the key
+  // as a folder name, or the entry as an earlier registry install.
+  unreadLocation?: true;
 }
 
 export type LockfileFormat = 'npm' | 'pnpm' | 'yarn' | 'bun' | 'none';
+
+// The packages-entry field an unread location was stated in: a "_resolved"
+// field, a "resolved" that is truthy and not a string, or, with no "resolved"
+// under a node_modules key, a "version" that is not plain semver.
+export type UnreadLocationField = '_resolved' | 'resolved' | 'version';
+
+export interface UnreadLocation {
+  fields: readonly UnreadLocationField[];
+  // Those fields' values as JSON. Only compared between sides and hashed, never
+  // printed.
+  value: string;
+}
 
 export interface ParsedLockfile {
   format: LockfileFormat;
@@ -159,6 +176,20 @@ export interface ParsedLockfile {
   // what the tarball-identity rule requires beside a vouched lookupName
   // before an added transitive alias is accepted.
   aliasEdges?: Map<string, Set<string>>;
+  // npm only: every packages-map key other than the root that carries its
+  // own "scripts" key, whatever kind of entry it is, with that value as JSON.
+  // npm never writes this key and runs lifecycle scripts from it, so the
+  // tamper check reports it. The value is only compared between sides, and
+  // is never printed.
+  scriptKeys?: Map<string, string>;
+  // npm only: every packages-map key other than the root whose entry states a
+  // location in a form the location checks cannot read. Reported by the tamper
+  // check; see lockfiles/npm.ts#unreadLocationFields.
+  unreadLocations?: Map<string, UnreadLocation>;
+  // npm only: lockfileVersion as written, set when the file has a packages
+  // map and a version npm does not read as 2 or above. See
+  // lockfiles/npm.ts#parseNpmLockfile.
+  packagesVersionMismatch?: string;
   // For a pnpm lockfile of several YAML documents with at least one that is
   // not shaped like a lockfile: the file's bytes outside every document
   // that was read (the unread documents in order, with their directives
