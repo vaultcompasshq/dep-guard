@@ -193,6 +193,9 @@ function gitOutput(cwd: string, args: string[]): string | null {
   try {
     return execFileSync('git', args, {
       cwd,
+      // The same setting core uses for its own git (git-env.ts): read the
+      // objects refs name, never a refs/replace substitute.
+      env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' },
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();

@@ -396,7 +396,7 @@ in `computeDelta`, on a pure SELECTION guess -- a dependency's specifier
 matches more than one lock entry under its name and the code cannot tell
 which one it resolves to -- with no comparison involved at all. That guess
 is not reported unconditionally: computeDelta drops it when the specifier
-held and the selected before/after entries do not differ (delta.ts:1518-1529),
+held and the selected before/after entries do not differ (delta.ts:1594-1605),
 unless `ambiguity.material === true` -- a merely version-level ambiguity
 under a package nobody touched is noise, but one that could have decided
 whether a tampered entry or a clean one was compared has to survive the
@@ -410,9 +410,9 @@ made it simultaneously the only honesty channel covering this hole and the
 noisiest note in the set, since a nested duplicate of any bumped package
 produces an undecidable pairing on nearly every routine refresh. The third
 producer is `checks/install-script.ts`: it declares the same code
-(`AMBIGUOUS_LOCK_ENTRY_CODE`, install-script.ts:33) and raises it from
-`noteSuppressedByPairing` (install-script.ts:177), reached from
-`agreementAcrossCandidates` dropping a verdict (install-script.ts:295) --
+(`AMBIGUOUS_LOCK_ENTRY_CODE`, install-script.ts:34) and raises it from
+`noteSuppressedByPairing` (install-script.ts:213), reached from
+`agreementAcrossCandidates` dropping a verdict (install-script.ts:345) --
 the install-script rule's own suppressed-acquisition case, following the
 same follow-the-suppression rule as tamper's producer rather than the pure
 selection guess above.
@@ -2383,7 +2383,7 @@ exact case a minimum-publish-age policy exists to catch, and one
 `newRegistryNames` cannot see at all.
 
 The reason is worth stating precisely, because an earlier version of this
-paragraph got it backwards. `computeDelta` (`delta.ts:1514-1518`) does NOT
+paragraph got it backwards. `computeDelta` (`delta.ts:1590-1594`) does NOT
 skip a held specifier outright: `specifierHeld` only suppresses a change
 when the specifier held AND the selected before/after lock entries do
 NOT differ (`delta.ts`'s `!lockEntriesDiffer` clause). A held specifier
@@ -3717,7 +3717,9 @@ together.
   entry's vouched `lookupName`, and only when some entry in the same
   lockfile also records an `npm:<lookupName>@` alias edge for that key
   (`acceptedTransitiveAliasTarget` in `delta.ts`). A manifest-declared
-  entry and a changed entry never get the `lookupName` excuse. Otherwise
+  entry never gets the `lookupName` excuse, and a changed entry gets it only
+  when every earlier entry it is compared with is unknown (see "An earlier
+  entry with no resolution metadata is unknown, not a baseline"). Otherwise
   `tarball-name-mismatch:<package>`, critical.
 - An accepted alias target is name-checked: `checks/candidates.ts` adds it
   to the names unknown-package and typosquat judge, anchored where the lock
@@ -5077,13 +5079,13 @@ while `npm ci --ignore-scripts` installed the security holding package
 there.
 
 - **Every npm lock entry keeps its packages-map path.**
-  `entryFromPackageValue` (`lockfiles/npm.ts:163`) sets
+  `entryFromPackageValue` (`lockfiles/npm.ts:174`) sets
   `LockEntry.lockPath` to the packages-map key. It is never identity and
   is not part of `resolutionIdentity`, so an entry that only moved is
   still unchanged. pnpm entries carry none: a pnpm key is the registry
   name, and an alias lives in the dependent's own block.
-- **The name checks pair by path.** `diffLockEntries` (`delta.ts:700`,
-  `delta.ts:746`, `entriesByPath` at `delta.ts:798`) sets
+- **The name checks pair by path.** `diffLockEntries` (`delta.ts:769`,
+  `delta.ts:815`, `entriesByPath` at `delta.ts:874`) sets
   `LockEntryChange.atPathBefore` to the comparison side's entry at the
   same path, or null when that path is new. `kind`, `before` and
   `beforeCandidates` still pair by name: they feed the tamper comparisons,
@@ -5092,7 +5094,7 @@ there.
   The install-script comparison pairs by path where the path existed: see
   "Install scripts are not only a flag" below.
 - **A bundled entry is its own resolution.** `resolutionIdentity`
-  (`delta.ts:472`) includes `inBundle`, so an unresolved entry fetched by
+  (`delta.ts:541`) includes `inBundle`, so an unresolved entry fetched by
   name is not dropped as unchanged against a bundled entry of the same
   version at another path (review of this fix, B1, fixture ib3: it was
   dropped before any check ran, `--online` included).
@@ -5237,11 +5239,11 @@ a string `resolved`; what npm does with a flagged entry's path is inferred, not
 measured. The compared value holds the fields and whether a `resolved` sits
 beside them as well as the values.
 
-- **It is `lockfile-tamper`, critical** (`checks/tamper.ts:1682`, signal
+- **It is `lockfile-tamper`, critical** (`checks/tamper.ts:1744`, signal
   `lockfile-location-shape`). The finding names the fields, never their values.
   The signal carries the path and a short hash of the values, so a baseline
   accepts those values and not later ones.
-- **It compares as the `scripts` key does.** `lockfileShapeFacts` (`delta.ts:759`)
+- **It compares as the `scripts` key does.** `lockfileShapeFacts` (`delta.ts:828`)
   reports an entry new at its path or with changed values, over the raw
   packages-map paths, so an entry the entry diff would drop as unchanged is still
   read. A shape already present on the comparison side (the base ref, or HEAD on a
@@ -5267,30 +5269,46 @@ writes that key. npm 11 was not read.
 - **A `scripts` key on a non-root packages entry is `lockfile-tamper`,
   critical.** The parser records it for every key but the root, before any entry
   is skipped, so a workspace directory or a link entry counts
-  (`lockfiles/npm.ts:315`). That workspace and link entries are honoured is
+  (`lockfiles/npm.ts:327`). That workspace and link entries are honoured is
   inferred from the code, not run; flagging them costs nothing, since npm writes
-  the key on no entry. `lockfileShapeFacts` (`delta.ts:759`) compares by
+  the key on no entry. `lockfileShapeFacts` (`delta.ts:828`) compares by
   packages-map path, new at its path or a changed value, and is deliberately not
   part of `resolutionIdentity`: that pairs by name, so a key copied from another
   path would still read as unchanged. The finding is raised by `tamperCheck`
-  (`checks/tamper.ts:1660`), outside the primary-format gate, because `allow` does
+  (`checks/tamper.ts:1696`), outside the primary-format gate, because `allow` does
   not cover `lockfile-tamper` and a command in the lockfile is not a fact about a
   package. Its signal carries the path, so two copies are two findings, and a
   short hash of the value, so a baseline accepts that value and not a later one.
   The command text is never printed.
 - **A `packages` map beside a version that is not 2 or more is `lockfile-tamper`,
-  high** (`checks/tamper.ts:1703`, `lockfiles/npm.ts:384`). A number below 2,
+  high** (`checks/tamper.ts:1765`, `lockfiles/npm.ts:399`). A number below 2,
   `null`, no field and any value that is neither a number nor a string of digits
   all qualify, whatever npm would make of it. A string of digits reads as its
   number. Audit mode states it; on a delta it is raised only when the comparison
   side (the base ref, or HEAD on a staged run) was not already in that state.
   One finding per file: it says the flags are no account of what runs, in place
   of one finding per entry.
+- **The flag is read as npm reads it, by truthiness (2026-11-08).**
+  `installFlagSet` in `lockfiles/npm.ts` sets `LockEntry.hasInstallScript` for
+  any truthy value, so `"true"`, `"false"`, `1` and `"yes"` are judged by the
+  install-script rule as `true` is, on both sides of a comparison. A falsy value
+  that is not a boolean (`0`, `null`, `""`) runs nothing in npm and is not read
+  as set. npm writes only `true` or no field, so every present value that is not
+  a boolean, truthy or falsy, is also `lockfile-tamper`, critical (signal
+  `lockfile-install-flag-shape`, raised by `tamperCheck` in `checks/tamper.ts`
+  from `ParsedLockfile.installFlagShapes`). It compares as the `scripts` key
+  does (`lockfileShapeFacts`), and its signal carries the path and a short hash
+  of the value; `allow` does not clear it. Census at the 16 real heads: 52 npm
+  lockfiles, 34,646 non-root entries, 176 flags, all `true`, 0 values that are
+  not a boolean (audit census, re-run on the same clones for this change).
+  Pinned by the `describe` block `an install-script flag that is not a boolean
+  is read as set, and is lockfile tampering` in
+  `packages/core/tests/audit-2026-11-08.test.ts`.
 - **The flag comparison pairs by path where the path existed.**
-  `flagComparisonEntries` (`checks/install-script.ts:121`) compares with the entry
+  `flagComparisonEntries` (`checks/install-script.ts:157`) compares with the entry
   at the same path and no other, so a flagged copy elsewhere does not count.
-  `installsSamePackage` (`checks/install-script.ts:106`) compares what each entry
-  installs, `installedPackage` (`checks/install-script.ts:98`): the tarball's name
+  `installsSamePackage` (`checks/install-script.ts:142`) compares what each entry
+  installs, `installedPackage` (`checks/install-script.ts:134`): the tarball's name
   where the URL has one, otherwise the name field or the key.
 - **A new path still pairs by name, on purpose.** A new nested copy of a package
   that already ran scripts in the tree stays silent, as a bump of one does. This
@@ -5306,11 +5324,100 @@ writes that key. npm 11 was not read.
   0.18.0, and no `scripts` key or mismatched version appears on the walked head
   side. This is not `bench/baseline.public.json`, whose run clones over the network
   and was not run for this change.
-- **Not covered.** With a primary pnpm lockfile, `delta.lockfileFormat` is `pnpm`
-  and the install-script check does not read the flags of an npm lockfile below
-  it; the two findings above are raised for that file regardless. Other entry keys
-  npm honours (`bin` links a file and runs nothing) are not judged.
+- **Not covered.** Offline, the boolean flag is this rule's only account of
+  install scripts: dep-guard reads the lockfile and never a tarball. npm builds a
+  package whose unpacked tarball contains a `binding.gyp` (it adds `node-gyp
+  rebuild` as the install script unless the entry says `gypfile: false`) without
+  consulting the flag, so such a package with the flag left off is not reported,
+  with or without `--online` (measured on 0.18.2 by the 2026-11-08 audit). `npm
+  ci --ignore-scripts` blocks both. With a primary pnpm lockfile,
+  `delta.lockfileFormat` is `pnpm` and the install-script check does not read the
+  flags of an npm lockfile below it; the tamper findings above are raised for that
+  file regardless. Other entry keys npm honours (`bin` links a file and runs
+  nothing) are not judged.
+- **Not covered, pnpm and Yarn.** A pnpm v9 lockfile records no per-package
+  build flag (`requiresBuild` exists only in older lockfiles), so the rule
+  reports additions to `onlyBuiltDependencies` and cannot say from the
+  lockfile whether a package will build. A `yarn.lock` and a `bun.lock` record
+  no install-script field and are not parsed, so neither has install-script
+  coverage.
 - **Pinned by** the three `describe` blocks `a scripts key on a lock entry is
   lockfile tampering`, `a lockfileVersion that does not match a present packages
   map is lockfile tampering` and `the install-script comparison pairs by path` in
   `packages/core/tests/audit-2026-11-04.test.ts`.
+
+## An earlier entry with no resolution metadata is unknown, not a baseline (2026-11-08)
+
+npm writes an entry with no `resolved`, no `integrity` and no
+`hasInstallScript` when it did not fetch it: an optional platform package on
+another platform, or a file from a client that left resolution metadata out.
+Such an entry says what was asked for, not what was fetched, so the two
+comparisons that read the earlier entry stand down against it and the later
+entry is judged on its own. Each stand-down is a `delta-unknown-earlier-entry`
+note (`UNKNOWN_EARLIER_ENTRY_CODE` in `delta.ts`), never a finding.
+
+- **What counts as unknown.** `earlierEntryUnknown` in `delta.ts`: an npm
+  entry (it has a `lockPath`) with none of the three fields, not bundled, and
+  not an unread location. `comparedOnlyWithUnknown` asks that every earlier
+  candidate of a changed entry is unknown; one known candidate keeps the old
+  comparison. The bundled and unread-location exclusions are pinned by the
+  two `control: %s is a baseline, and its flag acquisition is reported` cases.
+- **Unknown is about where, not what.** With no `resolved`, npm fetched the
+  earlier entry by its name field and version from the configured registry,
+  so the earlier entry still says which package was installed. Both
+  stand-downs below require the later entry to be that same package.
+- **Source.** `tamperCheck` in `checks/tamper.ts` runs the added entry's
+  `lockEntrySource` check on a changed entry compared only with unknown
+  entries, so a later entry on a git source, a URL or a host the project does
+  not name is reported as `git-source` or `url-source`, flag or not.
+- **Tarball identity.** `acceptedTransitiveAliasTarget` in `delta.ts` gives a
+  changed entry compared only with unknown entries the alias excuse an added
+  transitive entry gets (the tarball must vouch for the entry's name field and
+  an `npm:` alias edge in the same lockfile must ask for it) only when every
+  earlier entry's name field already named that package. An edge retargeted to
+  another package swaps what code requiring the key loads, which an added key
+  does not, and stays `tarball-name-mismatch`, critical. Because the same
+  function feeds `acceptedAliasTargets` in `checks/candidates.ts`, an excused
+  target is name-checked as an added alias.
+- **Install-script flag.** In `checks/install-script.ts`, when every compared
+  candidate is unknown, `sameInstallUnknown` stands the acquisition down only
+  for an earlier entry of the same version that installs the same package
+  (`installedPackage`), and only when the later entry is fetched from a
+  registry the project names (`resolvesFromNamedRegistry` in
+  `checks/tamper.ts`: no `resolved`, or a registry URL on a host
+  `registryHostsOf` returns). A published version's scripts do not change; a
+  tarball on another host is another install. A version bump, a tarball of
+  another package or another host is still `flag-acquired`, high. The manifest
+  walk's `acquiredInstallScript` applies the same test to a declared
+  dependency.
+- **Measured.** 667 of 34,646 real head entries under `node_modules` have this
+  shape (2026-11-08 audit census). On the mediawiki regeneration
+  `ccf227eca` (first walked by that audit), 3 critical `tarball-name-mismatch`
+  and 1 high `flag-acquired` became 0 findings and 4 notes. The real-repo walk
+  for this change is in the change's report.
+- **Pinned by** the `describe` block `an earlier entry with no resolved, no
+  integrity and no flag is unknown, not a baseline` in
+  `packages/core/tests/audit-2026-11-08.test.ts`.
+
+## dep-guard's git reads the objects refs name, never a replacement (2026-11-08)
+
+Every git process dep-guard starts runs with `GIT_NO_REPLACE_OBJECTS=1`:
+`gitEnv` in `packages/core/src/git-env.ts`, passed by `runGit` and
+`catFileBatch` in `git-source.ts` and by `git` in `trust-base.ts`; the CLI's
+`gitOutput` in `packages/cli/src/init.ts` sets the same variable. A
+`refs/replace` ref would otherwise make git return another object whenever the
+replaced one is read, so a ref planted for the trust base's commit made
+`--trust-base` read another tree's config while the base still named the real
+commit (2026-11-08 audit, measured: exit 0 with the ref, exit 1 without it or
+with the variable set). A default clone does not fetch replace refs, so the
+case is a local repository. Pinned by `the trust base reads the real base
+commit, not the object a replace ref swaps in for it` (trust-base.ts),
+`--base reads the real base commit, not a commit a replace ref swaps in for
+it` (runGit) and `--base reads the real base files, not blobs a replace ref
+swaps in for them` (catFileBatch), all in
+`packages/core/tests/audit-2026-11-08.test.ts`.
+
+- **A no-resolved version is plain semver to its end.** `PLAIN_SEMVER` in
+  `lockfiles/npm.ts` is anchored at both ends, so `1.2.3x` and `1.2.3 || 2` are
+  unread locations. Pinned by the `describe` block `a version with no resolved
+  must be plain semver to its end` in the same file.

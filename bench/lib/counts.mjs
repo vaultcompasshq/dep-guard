@@ -49,6 +49,7 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   'classification-input-unread',
   'delta-ambiguous-lock-entry',
   'delta-new-lock-entries',
+  'delta-unknown-earlier-entry',
   'ignore-path-dropped',
   'ignore-path-project-kept',
   'ignore-path-unmatched',

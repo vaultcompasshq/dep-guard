@@ -3,6 +3,7 @@ import { lstat, readFile, readdir, readlink, realpath, stat } from 'node:fs/prom
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
+import { gitEnv } from './git-env.js';
 import { MissingPackagesMapError, parseNpmLockfile } from './lockfiles/npm.js';
 import { parseOnlyBuilt, parsePnpmLockfile } from './lockfiles/pnpm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
@@ -397,6 +398,7 @@ async function runGit(cwd: string, args: string[]): Promise<GitRun> {
   try {
     const { stdout } = await execFileAsync('git', args, {
       cwd,
+      env: gitEnv(),
       encoding: 'utf8',
       maxBuffer: MAX_GIT_OUTPUT_BYTES,
       windowsHide: true,
@@ -424,7 +426,7 @@ function catFileBatch(root: string, blobIds: string[]): Promise<Map<string, stri
     const result = new Map<string, string>();
     let child;
     try {
-      child = spawn('git', ['cat-file', '--batch'], { cwd: root, windowsHide: true });
+      child = spawn('git', ['cat-file', '--batch'], { cwd: root, env: gitEnv(), windowsHide: true });
     } catch {
       resolve(result);
       return;

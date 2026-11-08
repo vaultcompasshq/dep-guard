@@ -119,19 +119,23 @@ run in that state, derived from what each check reads rather than guessed:
 
 \* Lockfile tamper's resolved-URL, integrity, and source-host comparison
 signals need a lockfile entry on both sides of the change, so they are
-skipped with no earlier revision (`packages/core/src/delta.ts`, the
-`AUDIT_NO_TAMPER_COMPARISON` diagnostic around line 620). Its specifier-based
+skipped with no earlier revision (`packages/core/src/delta.ts`,
+`computeDelta`, which raises the `AUDIT_NO_TAMPER_COMPARISON` diagnostic
+for the primary lockfile and for each extra lockfile with no comparison
+side). Its specifier-based
 git-source and url-source signals read the current manifest specifier only,
 not a comparison, and iterate `delta.changes`
-(`packages/core/src/checks/tamper.ts`, around line 911): with no earlier
+(`packages/core/src/checks/tamper.ts`, the `for (const change of
+delta.changes)` loop in `tamperCheck`): with no earlier
 revision every dependency reads as a change, so they run over every
 dependency; with a `--base`, `computeDelta` skips a dependency whose
 specifier held and whose lock entry did not differ
-(`packages/core/src/delta.ts`, around lines 567-578), so they run only over
+(`packages/core/src/delta.ts`, the `specifierHeld` test in `computeDelta`,
+with `lockEntriesDiffer`), so they run only over
 added or changed dependencies there. A git source pinned to a full commit
 is reported at `low` rather than `critical` when there is no earlier
 revision, since the pin cannot be told apart from one that was already
-present (`sourceSwapReport`, around line 225).
+present (`sourceSwapReport` in `packages/core/src/checks/tamper.ts`).
 
 Install script is downgraded rather than skipped: with no earlier
 revision, `hasComparisonBase` is false, so a dependency that already runs
@@ -139,8 +143,11 @@ install scripts cannot be told apart from one that just gained the
 ability. `present` is a *signal*, not a severity: the finding's severity
 drops from `high` to `low`, and the signal reported is `present` instead
 of `added` or `flag-acquired` (`packages/core/src/checks/install-script.ts`,
-`presenceReport` around line 109 and its callers around lines 200 and 267).
-The pnpm `onlyBuiltDependencies` branch (around line 300) makes the same
+`presenceReport`, and its two callers in `installScriptCheck`: the
+`delta.changes` loop over manifest dependencies and the
+`delta.lockEntryChanges` loop over lock entries).
+The pnpm `onlyBuiltDependencies` branch of `installScriptCheck` (the
+`delta.lockfileFormat === 'pnpm'` block) makes the same
 severity drop on its own allowlist entries, reporting signal
 `only-built-added` as `present` instead. This is separate from pnpm's own
 install-script gap: `pnpm-lock.yaml` records no per-entry install-script

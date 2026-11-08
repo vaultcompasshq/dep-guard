@@ -154,19 +154,85 @@ function newlyRegistryLine(previous: ManifestDep, dep: ManifestDep): boolean {
 // target, vouched by its tarball URL (LockEntry.lookupName), and as an
 // "npm:<target>@" edge in its dependent's dependency map. Both have to be
 // there: a name field alone is one line any pull request can add to make a
-// tarball of another package look like an alias. A changed entry never
-// qualifies (its earlier tarball already says what it was), and a declared
-// one never does (its manifest has said what installs).
+// tarball of another package look like an alias. A changed entry qualifies
+// only when every earlier entry it is compared with is unknown
+// (earlierEntryUnknown): an earlier tarball otherwise already says what it
+// was. A declared entry never does (its manifest has said what installs).
 //
 // The single definition both readers use: checks/tamper.ts accepts the
 // target as the package the tarball may name, and checks/candidates.ts runs
 // the name checks over exactly that target.
 export function acceptedTransitiveAliasTarget(entryChange: LockEntryChange): string | null {
   const target = entryChange.after.lookupName;
-  if (entryChange.kind !== 'added' || entryChange.declared === true || target === undefined) {
+  if (entryChange.declared === true || target === undefined) {
+    return null;
+  }
+  if (entryChange.kind !== 'added' && !comparedOnlyWithUnknown(entryChange)) {
+    return null;
+  }
+  // A changed entry keeps its excuse only when every earlier entry named the
+  // same package: with no resolved URL npm fetched the earlier entry by its
+  // name field, so an edge retargeted to another package swaps what code
+  // already requiring this key loads, which an added key does not.
+  if (entryChange.kind !== 'added' && !earlierCandidates(entryChange).every((earlier) => earlier.nameField === target)) {
     return null;
   }
   return (entryChange.aliasTargets ?? []).includes(target) ? target : null;
+}
+
+// An npm entry the comparison side recorded with no "resolved", no
+// "integrity" and no install-script flag: npm writes an entry this way when it
+// did not fetch it (an optional package for another platform, or a file from
+// a client that left resolution metadata out). It says what was asked for and
+// nothing about what was fetched, so it is no baseline for a comparison of
+// what the tarball names or whether scripts ran: such a comparison stands
+// down and the later entry is judged on its own, as an added entry is. A
+// bundled entry, an entry whose location could not be read and a pnpm entry
+// (no lockPath) are not unknown in this sense.
+export function earlierEntryUnknown(entry: LockEntry): boolean {
+  return (
+    entry.lockPath !== undefined &&
+    entry.resolvedUrl === undefined &&
+    entry.integrity === undefined &&
+    entry.hasInstallScript !== true &&
+    entry.inBundle !== true &&
+    entry.unreadLocation !== true
+  );
+}
+
+// Whether a changed entry has earlier entries to compare with and every one of
+// them is unknown (earlierEntryUnknown).
+export function comparedOnlyWithUnknown(entryChange: LockEntryChange): boolean {
+  const candidates = earlierCandidates(entryChange);
+  return entryChange.kind === 'changed' && candidates.length > 0 && candidates.every(earlierEntryUnknown);
+}
+
+function earlierCandidates(entryChange: LockEntryChange): LockEntry[] {
+  return entryChange.beforeCandidates !== undefined && entryChange.beforeCandidates.length > 0
+    ? entryChange.beforeCandidates
+    : entryChange.before === undefined
+      ? []
+      : [entryChange.before];
+}
+
+// The note for a comparison that stood down against an unknown earlier entry.
+// A note, never a finding: what the later entry is judged on alone still is.
+export const UNKNOWN_EARLIER_ENTRY_CODE = 'delta-unknown-earlier-entry';
+
+export function unknownEarlierEntryNote(
+  name: string,
+  after: LockEntry,
+  lockfilePath: string | undefined,
+  outcome: string
+): Diagnostic {
+  const at = after.lockPath ?? name;
+  return {
+    code: UNKNOWN_EARLIER_ENTRY_CODE,
+    message:
+      `"${name}" (${at}${lockfilePath === undefined ? '' : ` in ${lockfilePath}`}): the comparison side recorded this entry ` +
+      'with no resolved URL, no integrity hash and no install-script flag, so it is no account of what was ' +
+      `installed there; ${outcome}`,
+  };
 }
 
 // A non-root packages entry with a "scripts" key that is new at its path, or
@@ -229,6 +295,9 @@ export interface DependencyDelta {
   // comparison side). Absent on a delta built by hand. checks/tamper.ts reports
   // them. See lockfileShapeFacts.
   lockfileScriptKeys?: readonly LockfileScriptKey[];
+  // Entries whose hasInstallScript value is not a boolean, new at their path or
+  // with a value that moved there (ParsedLockfile.installFlagShapes).
+  lockfileInstallFlagShapes?: readonly LockfileScriptKey[];
   lockfileUnreadLocations?: readonly LockfileUnreadLocation[];
   lockfileVersionMismatches?: readonly LockfileVersionMismatch[];
   // Package names the AFTER side's lockfile records as workspace-local
@@ -761,10 +830,12 @@ function lockfileShapeFacts(
   counterpartOf: (file: ParsedLockfile) => ParsedLockfile | null
 ): {
   scriptKeys: LockfileScriptKey[];
+  installFlagShapes: LockfileScriptKey[];
   unreadLocations: LockfileUnreadLocation[];
   versionMismatches: LockfileVersionMismatch[];
 } {
   const scriptKeys: LockfileScriptKey[] = [];
+  const installFlagShapes: LockfileScriptKey[] = [];
   const unreadLocations: LockfileUnreadLocation[] = [];
   const versionMismatches: LockfileVersionMismatch[] = [];
   const subject = (lockfilePath: string, entryPath: string, value: string): LockfileScriptKey => ({
@@ -780,6 +851,11 @@ function lockfileShapeFacts(
         scriptKeys.push(subject(file.path, entryPath, value));
       }
     }
+    for (const [entryPath, value] of file.installFlagShapes ?? []) {
+      if (counterpart?.installFlagShapes?.get(entryPath) !== value) {
+        installFlagShapes.push(subject(file.path, entryPath, value));
+      }
+    }
     for (const [entryPath, { fields, value }] of file.unreadLocations ?? []) {
       if (counterpart?.unreadLocations?.get(entryPath)?.value !== value) {
         unreadLocations.push({ ...subject(file.path, entryPath, value), fields });
@@ -789,7 +865,7 @@ function lockfileShapeFacts(
       versionMismatches.push({ lockfilePath: file.path, lockfileVersion: file.packagesVersionMismatch });
     }
   }
-  return { scriptKeys, unreadLocations, versionMismatches };
+  return { scriptKeys, installFlagShapes, unreadLocations, versionMismatches };
 }
 
 // The comparison side's entries by packages-map path (npm), for
@@ -1713,6 +1789,7 @@ export function computeDelta(
   return {
     changes,
     lockfileScriptKeys: shapeFacts.scriptKeys,
+    lockfileInstallFlagShapes: shapeFacts.installFlagShapes,
     lockfileUnreadLocations: shapeFacts.unreadLocations,
     lockfileVersionMismatches: shapeFacts.versionMismatches,
     lockEntryChanges: lockEntries.changes,

@@ -4,8 +4,14 @@ Coverage is honest per format rather than uniform. Where a format cannot
 answer a question, the scan says so in a diagnostic instead of staying
 quiet:
 
-- `package-lock.json` and `npm-shrinkwrap.json` v2 and v3 -- full coverage.
-  The `packages` map is read whenever it exists, whatever `lockfileVersion`
+- `package-lock.json` and `npm-shrinkwrap.json` v2 and v3 -- every entry in
+  the `packages` map is read, but the lockfile is all dep-guard reads: it
+  does not download or unpack tarballs. For install scripts that means the
+  per-entry `hasInstallScript` flag is the only account it has, and npm
+  builds a package whose tarball contains a `binding.gyp` (running
+  `node-gyp rebuild`) whether or not the flag is set, so such a package with
+  the flag left off is not reported. `npm ci --ignore-scripts` blocks both
+  the flagged scripts and that build. The `packages` map is read whenever it exists, whatever `lockfileVersion`
   says (npm installs from it either way). npm writes the map only at 2 or
   above, so a `packages` map beside a
   `lockfileVersion` that is not a number of 2 or more, or a string of digits
@@ -13,7 +19,12 @@ quiet:
   (`lockfile-version-mismatch`). That covers every other kind of value, such as
   `"2.5"` or `[3]`, whatever npm would make of it. npm never writes a
   `scripts` key on a lockfile entry, and a non-root entry with one, new at its path or with a changed value, is a critical
-  `lockfile-tamper` finding (`lockfile-scripts-key`). So is a non-root entry,
+  `lockfile-tamper` finding (`lockfile-scripts-key`). npm reads an entry's
+  `hasInstallScript` by truthiness and only ever writes `true` or leaves it
+  out, so a truthy value of any type (`"true"`, `"false"`, `1`) is read as set,
+  and a present value that is not a boolean, new at its path or with a changed
+  value, is a critical `lockfile-tamper` finding as well
+  (`lockfile-install-flag-shape`). So is a non-root entry,
   new at its path or with a changed value, that states its location in a form
   dep-guard cannot judge (`lockfile-location-shape`): a `_resolved` field, a
   `resolved` that is not a URL or a link path, or, on a `node_modules` entry with no
@@ -46,8 +57,15 @@ quiet:
 - `pnpm-lock.yaml` -- host, integrity, tarball and git-source checks for
   every `lockfileVersion` from 5.x on (the slash-separated 5.x keys, the
   6.x keys and the v9 keys). Install scripts are read from `requiresBuild`
-  in lockfiles older than v9; v9 stopped recording them, so for v9
-  additions to `onlyBuiltDependencies` are used instead. A file holding more
+  in lockfiles older than v9, the only lockfiles pnpm wrote it in; v9
+  records no per-package build flag, so for v9 additions to
+  `onlyBuiltDependencies` are reported instead. That allowlist is not an
+  account of what runs: which builds pnpm runs is decided from the fetched
+  packages and its own settings, not from the lockfile (pnpm 9 runs
+  dependency build scripts unless they are restricted; pnpm 10 blocks
+  builds that were not approved by default, per the pnpm 10.0.0 release
+  notes, not measured here), so a v9 lockfile alone cannot show whether a package
+  will run an install script. A file holding more
   than one YAML document is read whole: the project document is what the
   manifest walk reads, and every other document shaped like a pnpm lockfile
   (pnpm writes one for its own managed version) is read and checked as a
@@ -232,7 +250,9 @@ quiet:
   are reported like any other; an `ignorePaths` entry on the base branch
   clears them.
 - `yarn.lock`, `bun.lock` -- manifest-level checks only. Neither records
-  install scripts, and yarn berry records no resolved URL. A transitive
+  install scripts (a Yarn Berry `yarn.lock` has no install-script field at
+  all), so dep-guard has no install-script coverage for either, and yarn
+  berry records no resolved URL. A transitive
   alias in either format is therefore invisible the same way every other
   transitive fact is: no lockfile entry is read at all for it, so nothing
   is ever sent to an online check under the wrong name.

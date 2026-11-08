@@ -29,11 +29,18 @@ fix and disclosure timeline with you.
 ## Scope
 
 In scope: a dependency change that should block and does not (a typosquat,
-a tampered lockfile entry, a newly acquired install script, or a
-hallucinated package name that passes); any way a pull request can change
+a tampered lockfile entry, a newly acquired install script that the
+lockfile records, or a hallucinated package name that passes); any way a pull request can change
 the rules or baseline it is judged by on a pull-request run; shell or
 argument injection through the Action's inputs; supply-chain issues in the
 published packages.
+
+What the lockfile records is the limit of the install-script rule. dep-guard
+does not download or unpack tarballs, so for npm the per-entry
+`hasInstallScript` flag is its only account of install scripts. npm builds a
+package whose tarball contains a `binding.gyp` whether or not that flag is
+set, and that build is not something dep-guard can see; `npm ci
+--ignore-scripts` blocks both.
 
 Out of scope: a single false positive on a legitimate package (report it as
 a normal issue unless it causes a security boundary failure); registry
