@@ -43,9 +43,10 @@ concurrency:
   cancel-in-progress: false
 
 # Least privilege by default. A job that needs more says so itself: prepare
-# reads (contents: read), release creates the GitHub Release and publishes
-# over OIDC (contents: write, id-token: write). smoke-published has no
-# checkout and only reads the public npm registry, so it takes this default.
+# reads (contents: read), release publishes over OIDC (contents: read,
+# id-token: write), and github-release creates the GitHub Release
+# (contents: write and nothing else). smoke-published has no checkout and
+# only reads the public npm registry, so it takes this default.
 permissions:
   contents: read
 
@@ -489,6 +490,12 @@ jobs:
   # prepare packed and does not install this repository's dependencies.
   # npm CLI >= 11.5.1 is required for OIDC; Node 22.14 does not ship it.
   # Pin major 11: npm@12 needs a newer Node than this job runs.
+  #
+  # Nothing in this job writes to the repository, so it reads only. The
+  # GitHub Release is cut by github-release below, in a job of its own that
+  # never sees the OIDC token. A re-run here does not fail at the publish,
+  # which skips a version already on the registry; it fails at the artifact
+  # download once the packed tarballs' one-day retention has passed.
   release:
     needs: prepare
     runs-on: ubuntu-latest
@@ -496,7 +503,7 @@ jobs:
     # repository settings and the npm trusted publisher is bound to it.
     environment: npm-publish
     permissions:
-      contents: write
+      contents: read
       id-token: write
     outputs:
       tag: ${{ needs.prepare.outputs.tag }}
@@ -558,6 +565,21 @@ jobs:
           publish_one packages/core pack-out/core
           publish_one packages/cli pack-out/cli
 
+  # Cuts the GitHub Release once release has finished, on both kinds of
+  # release: on an action-only tag the release job runs with every publish
+  # step skipped and still succeeds, so this job still runs. It holds
+  # contents: write and nothing else: no id-token, no environment, no
+  # checkout and no install, since the release action works through the API
+  # and both bodies are written inline here. No job-level "if:", so it takes
+  # the default success() and never cuts a Release after a failed publish.
+  # The classifier outputs come straight from prepare through needs, so the
+  # gates below read the same values the publish job did.
+  github-release:
+    needs: [prepare, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
       # Two Release steps, one per release kind, rather than one step with a
       # computed body. The body is the only difference between them, and it
       # is the part that must not be wrong: "Published ... to npm" appears

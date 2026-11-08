@@ -152,6 +152,17 @@ function unreadLocationFields(key: string, value: Record<string, unknown>): Unre
   return fields;
 }
 
+// Whether an entry's hasInstallScript field counts as set. npm reads the field
+// by truthiness (arborist's rebuild.js), so a truthy value of any type counts:
+// the string "true", the string "false", the number 1. A falsy value that is
+// not a boolean (0, null, the empty string) runs nothing in npm and is not read
+// as set here either. npm itself only ever writes true or leaves the field
+// out, so every value that is not a boolean, truthy or falsy, is also reported
+// as lockfile tampering (ParsedLockfile.installFlagShapes).
+export function installFlagSet(value: Record<string, unknown>): boolean {
+  return Boolean(value.hasInstallScript);
+}
+
 function entryFromPackageValue(
   path: string,
   key: string,
@@ -173,7 +184,7 @@ function entryFromPackageValue(
   if (unreadLocationFields(key, value).length > 0) {
     entry.unreadLocation = true;
   }
-  if (value.hasInstallScript === true) {
+  if (installFlagSet(value)) {
     entry.hasInstallScript = true;
   }
   if (value.inBundle === true) {
@@ -305,6 +316,7 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
   // (both legal npm package names) are handled like any other entry
   // instead of colliding with inherited Object.prototype members.
   const scriptKeys = new Map<string, string>();
+  const installFlagShapes = new Map<string, string>();
   const unreadLocations = new Map<string, UnreadLocation>();
   for (const [key, value] of Object.entries(packages)) {
     recordAliasEdges(value, aliasEdges);
@@ -313,6 +325,9 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
     if (key !== '' && isPlainObject(value)) {
       if (Object.hasOwn(value, 'scripts')) {
         scriptKeys.set(key, JSON.stringify(value.scripts));
+      }
+      if (Object.hasOwn(value, 'hasInstallScript') && typeof value.hasInstallScript !== 'boolean') {
+        installFlagShapes.set(key, JSON.stringify(value.hasInstallScript));
       }
       const fields = unreadLocationFields(key, value);
       if (fields.length > 0) {
@@ -392,6 +407,7 @@ export function parseNpmLockfile(path: string, content: string): ParsedLockfile 
     workspaceLinks,
     aliasEdges,
     ...(scriptKeys.size > 0 ? { scriptKeys } : {}),
+    ...(installFlagShapes.size > 0 ? { installFlagShapes } : {}),
     ...(unreadLocations.size > 0 ? { unreadLocations } : {}),
     ...(packagesVersionMismatch ? { packagesVersionMismatch: versionLabel } : {}),
   };

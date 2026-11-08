@@ -1,9 +1,10 @@
-import type { DepChange, LockEntryChange } from '../delta.js';
+import { earlierEntryUnknown, unknownEarlierEntryNote, type DepChange, type LockEntryChange } from '../delta.js';
 import type { LockEntry } from '../lockfiles/types.js';
 import { registryTarballPackageName } from '../resolution.js';
 import type { Finding } from '../types.js';
 import { agreementAcrossCandidates } from './agreement.js';
 import { allowClears } from './allow.js';
+import { registryHostsOf, resolvesFromNamedRegistry } from './tamper.js';
 import type { Check, CheckContext } from './types.js';
 
 // Install-script escalation: a dependency that now runs an npm lifecycle
@@ -76,7 +77,7 @@ function specifierDetail(change: DepChange): { specifier: string } | { host: str
   return { specifier: change.specifier };
 }
 
-function acquiredInstallScript(change: DepChange): boolean {
+function acquiredInstallScript(change: DepChange, ctx: CheckContext): boolean {
   if (change.after?.hasInstallScript !== true) {
     return false;
   }
@@ -88,8 +89,43 @@ function acquiredInstallScript(change: DepChange): boolean {
     return true;
   }
   // Otherwise this is a changed dependency: only report a flag turning
-  // on, never a bump that leaves an already-true flag true.
+  // on, never a bump that leaves an already-true flag true. An unknown
+  // earlier entry of the same package and version stands down, as in the
+  // lockfile walk below.
+  if (change.before !== undefined && earlierEntryUnknown(change.before) && sameInstallUnknown(change.before, change.after, change.name, ctx)) {
+    noteUnknownEarlier(ctx, change.name, change.after, ctx.delta.lockfilePath);
+    return false;
+  }
   return change.before?.hasInstallScript !== true;
+}
+
+// Whether an unknown earlier entry (delta.ts earlierEntryUnknown) is the same
+// install as the later one: the same package at the same version, and the
+// later entry fetched from a registry this project names. The earlier entry
+// was fetched from the configured registry by name and version, so a later
+// tarball on any other host is another install, whatever its path says.
+function sameInstallUnknown(earlier: LockEntry, after: LockEntry, key: string, ctx: CheckContext): boolean {
+  return (
+    earlier.version !== undefined &&
+    earlier.version === after.version &&
+    installedPackage(earlier, key) === installedPackage(after, key) &&
+    resolvesFromNamedRegistry(after, registryHostsOf(ctx.npmrcRegistryPins, ctx.npmrcDefaultRegistry))
+  );
+}
+
+function noteUnknownEarlier(ctx: CheckContext, name: string, after: LockEntry, lockfilePath: string | undefined): void {
+  const diagnostic = unknownEarlierEntryNote(
+    name,
+    after,
+    lockfilePath,
+    'its install-script flag now set, at the same package and version, was not reported as an acquisition'
+  );
+  for (const existing of ctx.diagnostics) {
+    if (existing.code === diagnostic.code && existing.message === diagnostic.message) {
+      return;
+    }
+  }
+  ctx.diagnostics.push(diagnostic);
 }
 
 // The package an entry installs: its tarball's name where the URL has one,
@@ -226,7 +262,7 @@ export const installScriptCheck: Check = (ctx) => {
     };
 
     for (const change of delta.changes) {
-      if (!acquiredInstallScript(change) || allowClears(ctx, change.registryName)) {
+      if (!acquiredInstallScript(change, ctx) || allowClears(ctx, change.registryName)) {
         continue;
       }
       // 'added' and 'flag-acquired' are genuinely different signals
@@ -279,15 +315,29 @@ export const installScriptCheck: Check = (ctx) => {
       // that would fire on nearly every refresh.
       const candidates = flagComparisonEntries(entryChange);
       if (entryChange.kind === 'changed') {
+        // Every candidate unknown (earlierEntryUnknown): none of them says
+        // whether scripts ran, so the comparison stands down for a candidate
+        // that installed this same package at this same version from a
+        // registry the project names, a published version whose scripts
+        // cannot have changed. A bump, another package or another host is
+        // still judged as an acquisition.
+        const allUnknown = candidates.length > 0 && candidates.every(earlierEntryUnknown);
+        let stoodDown = false;
         const { agreed, dropped } = agreementAcrossCandidates(
           candidates,
           // The whole comparison this rule makes, per candidate: an entry
           // that already ran scripts yields no acquisition, one that did not
           // yields one.
-          (candidate) =>
-            candidate.hasInstallScript === true && installsSamePackage(candidate, entryChange)
-              ? []
-              : [ACQUISITION_SIGNAL],
+          (candidate) => {
+            if (candidate.hasInstallScript === true && installsSamePackage(candidate, entryChange)) {
+              return [];
+            }
+            if (allUnknown && sameInstallUnknown(candidate, entryChange.after, entryChange.name, ctx)) {
+              stoodDown = true;
+              return [];
+            }
+            return [ACQUISITION_SIGNAL];
+          },
           (signal) => signal
         );
         if (dropped.length > 0) {
@@ -295,6 +345,9 @@ export const installScriptCheck: Check = (ctx) => {
           noteSuppressedByPairing(ctx, entryChange.packageName, candidates.length);
         }
         if (agreed.length === 0) {
+          if (stoodDown && dropped.length === 0) {
+            noteUnknownEarlier(ctx, entryChange.name, entryChange.after, entryChange.lockfilePath);
+          }
           continue;
         }
       }

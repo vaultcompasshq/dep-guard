@@ -54,6 +54,7 @@ import { promisify } from 'node:util';
 import { BASELINE_FILE, parseBaseline } from './baseline.js';
 import type { ResolvedConfig } from './checks/types.js';
 import { CONFIG_FILE, LOCAL_CONFIG_FILE, loadConfigFromTexts } from './config.js';
+import { gitEnv } from './git-env.js';
 import { NPMRC, isUsableRef } from './git-source.js';
 import { parseNpmrcDefaultRegistry, parseNpmrcPins } from './state.js';
 import { withoutByteOrderMark } from './text.js';
@@ -180,6 +181,7 @@ async function git(root: string, args: string[]): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync('git', args, {
       cwd: root,
+      env: gitEnv(),
       encoding: 'utf8',
       maxBuffer: MAX_GIT_OUTPUT_BYTES,
       windowsHide: true,

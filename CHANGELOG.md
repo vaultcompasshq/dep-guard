@@ -14,6 +14,22 @@ GitHub release notes, which are generated from the commit history.
 
 - The CI gate pin and the devDependency move to dep-guard 0.18.2, and the CI conductor action pin and the @vaultcompass/conductor devDependency move to 0.18.0.
 
+### Security
+
+- A `hasInstallScript` value on an npm lockfile entry is read by truthiness, as npm reads it, so the install-script rule judges a value such as `"true"`, `"false"` or `1` as it judges `true`. Any present value that is not a boolean is also reported as `lockfile-tamper` (`lockfile-install-flag-shape`, critical), which `allow` does not clear.
+- Every git process dep-guard starts runs with `GIT_NO_REPLACE_OBJECTS=1`, so a local `refs/replace` ref cannot change what `--trust-base`, `--base` or `--staged` read.
+- The README, SECURITY.md, the lockfile support page and the invariants now say what the install-script rule cannot see: offline, the lockfile flag is its only account of install scripts, npm builds a package whose tarball contains a `binding.gyp` whether or not that flag is set, and `npm ci --ignore-scripts` blocks both. The lockfile support page no longer calls npm v2 and v3 coverage full, and says that a pnpm v9 lockfile cannot show whether a package will build and that yarn.lock and bun.lock have no install-script coverage.
+
+### Changed
+
+- docs/pull-request-mode.md cites code by function and constant name instead of by line number, and `pnpm lint` now fails when that file cites a line again (`scripts/check-doc-citations.mjs`).
+- The release workflow creates the GitHub Release in its own job, which holds `contents: write` and nothing else, after the publish job. The publish job keeps the `npm-publish` environment and the OIDC token and now reads the repository only. The release wiring test pins both jobs' permissions and that the Release job has no job-level condition.
+- A test pins that a lockfile entry with no `resolved` must carry a plain semver version to its end.
+
+### Fixed
+
+- An earlier npm lockfile entry with no `resolved`, no `integrity` and no `hasInstallScript` is treated as unknown rather than as a baseline. A regeneration that fills in a genuine alias's tarball, or sets the flag on the same package at the same version, is now a `delta-unknown-earlier-entry` note instead of a critical `tarball-name-mismatch` or a high `flag-acquired`. The later entry is still judged on its own, as an added entry is: a source on a git host, a URL or a registry host the project does not name, a tarball no alias edge asks for, an alias edge retargeted to a package the earlier entry did not name, a version bump that gains the flag and an alias to a squatted name are still reported.
+
 ## [0.18.2] - 2026-11-04
 
 ### Changed

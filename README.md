@@ -87,7 +87,13 @@ see below):
   high finding that names the count and the packages, with `allow` as the
   remedy for the ones you have reviewed. The severity and the exit are the
   same as for one package, and `ignorePaths` and the baseline apply to the
-  per-package findings first.
+  per-package findings first. What this rule can see is the lockfile: for npm
+  the per-entry `hasInstallScript` flag is its only account of install
+  scripts, since dep-guard does not download or unpack tarballs. npm builds a
+  package whose tarball contains a `binding.gyp` (it runs `node-gyp rebuild`)
+  whether or not that flag is set, so a lockfile that leaves the flag off
+  such a package is not caught by this rule. `npm ci --ignore-scripts` blocks
+  both the flagged scripts and that build.
 - **Lockfile tamper**: resolutions moving to another host, integrity
   hashes removed, forged, or downgraded to a weaker algorithm, and tarballs
   repointed within the same host. It also reads the declared specifier, so a

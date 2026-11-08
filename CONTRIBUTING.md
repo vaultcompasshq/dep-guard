@@ -69,7 +69,9 @@ pnpm lint
 
 `pnpm lint` runs the public-repo hygiene guard above; it fails on the first
 blocked token, internal path, or non-ASCII dash it finds, naming the file
-and line.
+and line. It also runs `scripts/check-doc-citations.mjs`, which fails when a
+doc that cites code by symbol (docs/pull-request-mode.md) cites a line
+number instead. It does not check that a cited symbol exists.
 
 ## Findings log
 

@@ -49,7 +49,9 @@ export interface LockEntry {
   //     packageName, with the looked-up name carried in `details` when the
   //     two differ;
   //   - checks/tamper.ts's tarball-identity rule, which accepts it as the
-  //     package an ADDED, undeclared entry's tarball may name, and only when
+  //     package an ADDED, undeclared entry's tarball may name (or a changed
+  //     one whose every earlier entry is unknown, delta.ts
+  //     earlierEntryUnknown), and only when
   //     the lockfile also records an "npm:<lookupName>@" alias edge for the
   //     entry's key (ParsedLockfile.aliasEdges). It excuses that one
   //     mismatch and decides nothing else;
@@ -182,6 +184,13 @@ export interface ParsedLockfile {
   // tamper check reports it. The value is only compared between sides, and
   // is never printed.
   scriptKeys?: Map<string, string>;
+  // npm only: every packages-map key other than the root whose
+  // "hasInstallScript" field is present and not a boolean, with that value as
+  // JSON. npm reads the field by truthiness and only ever writes true, so the
+  // entry is read as flagged unless the value is false (lockfiles/npm.ts
+  // installFlagSet) and the tamper check reports the value. Only compared
+  // between sides and hashed, never printed.
+  installFlagShapes?: Map<string, string>;
   // npm only: every packages-map key other than the root whose entry states a
   // location in a form the location checks cannot read. Reported by the tamper
   // check; see lockfiles/npm.ts#unreadLocationFields.

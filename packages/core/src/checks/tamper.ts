@@ -1,4 +1,10 @@
-import { acceptedTransitiveAliasTarget, type DepChange, type LockEntryChange } from '../delta.js';
+import {
+  acceptedTransitiveAliasTarget,
+  comparedOnlyWithUnknown,
+  unknownEarlierEntryNote,
+  type DepChange,
+  type LockEntryChange,
+} from '../delta.js';
 import type { LockEntry, UnreadLocationField } from '../lockfiles/types.js';
 import type { Resolution } from '../resolution.js';
 import {
@@ -419,7 +425,7 @@ function impliedRegistryEntry(
 // The hosts a project legitimately fetches registry tarballs from: the two
 // public registries, plus every host named by a scope pin or the default
 // registry in the project .npmrc.
-function registryHostsOf(
+export function registryHostsOf(
   pins: Map<string, string>,
   defaultRegistry: string | null | undefined
 ): ReadonlySet<string> {
@@ -583,6 +589,18 @@ function lockEntrySource(
     };
   }
   return null;
+}
+
+// Whether an entry is fetched from a registry this project names: no
+// resolved URL (npm fetches the name and version from the configured
+// registry) or a registry-shaped URL on one of `registryHosts`. A git, url,
+// local or off-host source is not.
+export function resolvesFromNamedRegistry(entry: LockEntry, registryHosts: ReadonlySet<string>): boolean {
+  if (entry.resolvedUrl === undefined) {
+    return true;
+  }
+  const resolution = resolutionOf(entry.resolvedUrl);
+  return resolution !== null && resolutionKindOf(resolution) === 'registry' && registryHosts.has(resolution.host);
 }
 
 function subjectOfChange(change: DepChange, pnpmEntries: boolean): ComparisonSubject | null {
@@ -839,6 +857,10 @@ export const tamperCheck: Check = (ctx) => {
       }
     }
     ctx.diagnostics.push(diagnostic);
+  };
+
+  const noteUnknownEarlier = (entryChange: LockEntryChange, outcome: string): void => {
+    note(unknownEarlierEntryNote(entryChange.name, entryChange.after, entryChange.lockfilePath, outcome));
   };
 
   const noteUnreadableResolution = (packageName: string): void => {
@@ -1418,8 +1440,9 @@ export const tamperCheck: Check = (ctx) => {
   //     ("string-width-cjs" installed from string-width), and an added
   //     transitive entry's name is checked by nothing else either. A
   //     declared entry never gets this, because there the manifest has
-  //     said what installs, and a changed entry never gets it, because its
-  //     earlier tarball already says what it was.
+  //     said what installs, and a changed entry gets it only when every
+  //     earlier entry is unknown (delta.ts comparedOnlyWithUnknown, with a
+  //     note), because otherwise its earlier tarball already says what it was.
   // A path on a trusted registry host that names no package is reported at
   // medium, never passed: a URL this rule cannot read is not one it
   // approved. pnpm entries with no tarball URL are the implied registry
@@ -1466,6 +1489,14 @@ export const tamperCheck: Check = (ctx) => {
     }
     const aliasTarget = acceptedTransitiveAliasTarget(entryChange);
     if (aliasTarget !== null) {
+      if (entryChange.kind === 'changed' && !expected.has(aliasTarget) && identity.name === aliasTarget) {
+        // Accepted only because the earlier entry was unknown
+        // (comparedOnlyWithUnknown): say the comparison stood down.
+        noteUnknownEarlier(
+          entryChange,
+          `its tarball names "${aliasTarget}", which an alias edge asks for, and was judged as an added alias`
+        );
+      }
       expected.add(aliasTarget);
     }
     if (!expected.has(identity.name)) {
@@ -1578,11 +1609,14 @@ export const tamperCheck: Check = (ctx) => {
         report(unvouched, entryChange.lockfilePath);
       }
       const candidates = candidatesOfLockEntry(entryChange);
-      if (candidates.length === 0) {
+      // A changed entry whose earlier entries are all unknown (no resolved,
+      // no integrity, no flag) has no host to compare against either, so it
+      // gets the added entry's source check as well as the comparisons.
+      if (candidates.length === 0 || comparedOnlyWithUnknown(entryChange)) {
         // An added entry has nothing to compare against, but where it
         // comes from is still a fact about it. A changed entry that moved
         // to a git or non-registry source is caught by the comparisons
-        // above (host-changed and friends); an ADDED one, most often a
+        // below (host-changed and friends); an ADDED one, most often a
         // transitive dependency nobody declared, was reported by nothing.
         const source = lockEntrySource(entryChange.after, registryHosts);
         const declaredKey = JSON.stringify([entryChange.manifestPath, entryChange.packageName]);
@@ -1634,7 +1668,9 @@ export const tamperCheck: Check = (ctx) => {
             entryChange.lockfilePath
           );
         }
-        continue;
+        if (candidates.length === 0) {
+          continue;
+        }
       }
       const certain = certainFindings(candidates, {
         packageName: entryChange.packageName,
@@ -1672,6 +1708,32 @@ export const tamperCheck: Check = (ctx) => {
           // Per path: two copies of one name are two edits. Per value, by
           // hash: a baseline accepts these commands, not whatever replaces them.
           signal: `lockfile-scripts-key:${entryPath}:${valueHash}`,
+          kind: (delta.hasComparisonBase ? 'changed' : 'present') satisfies ReportedKind,
+          lockfileEntry: entryPath,
+        },
+      },
+      lockfilePath
+    );
+  }
+  // A hasInstallScript value npm would not write: a forged field, critical as
+  // the location shape below is. A truthy one is already read as flagged
+  // (lockfiles/npm.ts installFlagSet), so the install-script rule judges it as
+  // it would a true; this finding says the field itself was edited, whichever
+  // way npm reads it.
+  for (const { lockfilePath, entryPath, name, valueHash } of delta.lockfileInstallFlagShapes ?? []) {
+    report(
+      {
+        ruleId: 'lockfile-tamper',
+        severity: 'critical',
+        packageName: name,
+        message:
+          `"${entryPath}" in ${lockfilePath} carries a "hasInstallScript" value that is not a boolean. npm ` +
+          'only ever writes true there or leaves the field out, and reads the field by truthiness, so ' +
+          'whoever edited this lockfile decided whether this entry is treated as running an install ' +
+          'script. Regenerate the lockfile with npm.',
+        manifestPath: lockfilePath,
+        details: {
+          signal: `lockfile-install-flag-shape:${entryPath}:${valueHash}`,
           kind: (delta.hasComparisonBase ? 'changed' : 'present') satisfies ReportedKind,
           lockfileEntry: entryPath,
         },
