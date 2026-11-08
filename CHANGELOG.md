@@ -10,9 +10,16 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
-### Changed
+## [0.19.0] - 2026-11-09
 
-- The CI gate pin and the devDependency move to dep-guard 0.18.2, and the CI conductor action pin and the @vaultcompass/conductor devDependency move to 0.18.0.
+This is a minor release, not a patch, because it adds a signal
+(`lockfile-install-flag-shape`) and a diagnostic code
+(`delta-unknown-earlier-entry`) and changes verdicts in both directions: a
+lockfile the previous release passed can now fail, and a regeneration it
+failed is now a note. No fingerprint input changed, so no recorded baseline
+needs regenerating, and the JSON output shape gains no field; the new signal
+gets a new fingerprint under the existing `lockfile-tamper` rule, so it
+arrives visible and triageable.
 
 ### Security
 
@@ -22,6 +29,7 @@ GitHub release notes, which are generated from the commit history.
 
 ### Changed
 
+- The CI gate pin and the devDependency move to dep-guard 0.18.2, and the CI conductor action pin and the @vaultcompass/conductor devDependency move to 0.18.0.
 - docs/pull-request-mode.md cites code by function and constant name instead of by line number, and `pnpm lint` now fails when that file cites a line again (`scripts/check-doc-citations.mjs`).
 - The release workflow creates the GitHub Release in its own job, which holds `contents: write` and nothing else, after the publish job. The publish job keeps the `npm-publish` environment and the OIDC token and now reads the repository only. The release wiring test pins both jobs' permissions and that the Release job has no job-level condition.
 - A test pins that a lockfile entry with no `resolved` must carry a plain semver version to its end.
