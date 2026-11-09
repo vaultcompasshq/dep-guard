@@ -173,12 +173,72 @@ export const EMPTY_PROJECTS: ProjectClassification = {
 
 const SCOPE_PIN_SUFFIX = ':registry';
 
-function unquote(value: string): string {
+// A key or value as the ini parser npm and pnpm read .npmrc with decodes it
+// (ini 1.3.8, ini.js `unsafe`, reached through config-chain 1.1.13 and
+// @pnpm/npm-conf): trimmed; a value quoted in double or single quotes is
+// unquoted and JSON-decoded when it decodes; anything else ends at the first
+// unescaped ";" or "#", with "\;", "\#" and "\\" read as the character.
+function iniUnsafe(raw: string): string {
+  let value = raw.trim();
   const quoted =
-    value.length >= 2 &&
-    ((value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'")));
-  return quoted ? value.slice(1, -1) : value;
+    (value.charAt(0) === '"' && value.slice(-1) === '"') || (value.charAt(0) === "'" && value.slice(-1) === "'");
+  if (quoted) {
+    if (value.charAt(0) === "'") {
+      value = value.slice(1, -1);
+    }
+    try {
+      const decoded: unknown = JSON.parse(value);
+      return typeof decoded === 'string' ? decoded : String(decoded);
+    } catch {
+      return value;
+    }
+  }
+  let escaped = false;
+  let out = '';
+  for (const char of value) {
+    if (escaped) {
+      out += '\\;#'.includes(char) ? char : `\\${char}`;
+      escaped = false;
+    } else if (char === ';' || char === '#') {
+      break;
+    } else if (char === '\\') {
+      escaped = true;
+    } else {
+      out += char;
+    }
+  }
+  if (escaped) {
+    out += '\\';
+  }
+  return out.trim();
+}
+
+// The top-level key/value pairs of an .npmrc, in order, read the way ini
+// 1.3.8 `decode` reads them: lines split on any run of CR and LF, a line
+// whose first non-blank character is ";" or "#" is a comment, "key=value"
+// with the key up to the first "=", and both sides decoded by iniUnsafe. A
+// "[section]" line moves every key after it into that section, where npm and
+// pnpm do not read it as a top-level setting, so reading stops there. A key
+// with no "=" is the boolean true in ini and names no registry, so it is
+// left out.
+function npmrcTopLevelPairs(content: string): Array<[string, string]> {
+  const pairs: Array<[string, string]> = [];
+  // npm's ini parser honours the first line after a byte order mark, so
+  // the mark is dropped and that line read like any other.
+  for (const line of withoutByteOrderMark(content).split(/[\r\n]+/)) {
+    if (line === '' || /^\s*[;#]/.test(line)) {
+      continue;
+    }
+    if (/^\[[^\]]*\]$/.test(line)) {
+      break;
+    }
+    const match = /^([^=]+)=(.*)$/.exec(line);
+    if (match === null) {
+      continue;
+    }
+    pairs.push([iniUnsafe(match[1]), iniUnsafe(match[2])]);
+  }
+  return pairs;
 }
 
 // Matches a URL scheme prefix ("https:", but also "user:" -- any label-colon).
@@ -310,18 +370,7 @@ export function parseNpmrcPins(content: string | null): Map<string, string> {
   if (content === null) {
     return pins;
   }
-  // npm's ini parser honours the first line after a byte order mark, so
-  // the mark is dropped and that line read like any other.
-  for (const rawLine of withoutByteOrderMark(content).split('\n')) {
-    const line = rawLine.trim();
-    if (line === '' || line.startsWith('#') || line.startsWith(';')) {
-      continue;
-    }
-    const separator = line.indexOf('=');
-    if (separator === -1) {
-      continue;
-    }
-    const key = line.slice(0, separator).trim();
+  for (const [key, value] of npmrcTopLevelPairs(content)) {
     if (!key.startsWith('@') || !key.endsWith(SCOPE_PIN_SUFFIX)) {
       continue;
     }
@@ -329,7 +378,6 @@ export function parseNpmrcPins(content: string | null): Map<string, string> {
     if (scope.length < 2) {
       continue;
     }
-    const value = unquote(line.slice(separator + 1).trim());
     if (value === '') {
       continue;
     }
@@ -362,20 +410,10 @@ export function parseNpmrcDefaultRegistry(content: string | null): string | null
     return null;
   }
   let registry: string | null = null;
-  for (const rawLine of withoutByteOrderMark(content).split('\n')) {
-    const line = rawLine.trim();
-    if (line === '' || line.startsWith('#') || line.startsWith(';')) {
-      continue;
-    }
-    const separator = line.indexOf('=');
-    if (separator === -1) {
-      continue;
-    }
-    const key = line.slice(0, separator).trim();
+  for (const [key, value] of npmrcTopLevelPairs(content)) {
     if (key !== 'registry') {
       continue;
     }
-    const value = unquote(line.slice(separator + 1).trim());
     if (value === '') {
       continue;
     }

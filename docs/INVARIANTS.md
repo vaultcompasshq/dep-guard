@@ -5421,3 +5421,79 @@ swaps in for them` (catFileBatch), all in
   `lockfiles/npm.ts` is anchored at both ends, so `1.2.3x` and `1.2.3 || 2` are
   unread locations. Pinned by the `describe` block `a version with no resolved
   must be plain semver to its end` in the same file.
+
+## A pnpm entry pnpm can fetch is an entry, whatever its key or tarball spelling (2026-11-08)
+
+pnpm installs a packages entry from its resolution, and every spelling of
+that entry pnpm installs is read here and reaches the rules:
+
+- **A key that carries a registry host.** Below v9, pnpm 8 keeps the registry
+  host in front of a package from a registry other than the configured one
+  (`registry.npmjs.org/is-positive/3.1.0` in v5,
+  `registry.npmjs.org/is-positive@3.1.0` in v6). `parseHostPrefixedKey` in
+  `lockfiles/pnpm.ts` reads it as pnpm 8 does (the v6 `@` to `/` conversion in
+  `convertLockfileV6DepPathToV5DepPath`, then dependency-path `parse`: drop the
+  host segment, take the name and a semver-valid version, at 8.15.9), and the
+  entry is an ordinary registry entry of that name and version, judged as a
+  plain key is. A git key has no valid version there and is read as below.
+- **A key that names a source, not a package.** Lockfile versions before 9 key
+  a git or remote-tarball dependency by where it comes from
+  (`github.com/<owner>/<repo>/<commit>`, `@<host>/<path>`, or a git URL with its
+  scheme cut off), and record the package's name and version beside it.
+  `unsplitEntry` in `lockfiles/pnpm.ts` reads such an entry whenever its
+  resolution has a tarball or a git repository, under the entry's own `name`
+  field when that is a package name and under the key otherwise. The
+  `pnpm-lockfile-invalid-entry` note is for an entry with no readable location,
+  or a key that splits in none of these ways. The name is never what selects
+  the bytes: the resolution is, and `lockEntrySource` and the tarball-identity
+  rule in `checks/tamper.ts` read it as they read an npm entry's. As for an npm
+  entry, the name is author text: `allow` never clears `lockfile-tamper`, and the
+  name-based install-script allowlist applies to it as it does to an npm entry
+  keyed by folder name.
+- **A tarball written as a path.** pnpm resolves a `resolution.tarball` that is
+  not a full URL against the scope's registry, else the default registry, with a
+  `/` appended (`pkgSnapshotToResolution`, pnpm 8.15.9, 9.15.9 and 10.29.3).
+  `resolvePnpmRelativeTarballs` in `lockfiles/pnpm.ts` does the same, called
+  from `loadState` in `git-source.ts` with the `.npmrc` of the side the
+  lockfile was read from, so every later reader (the delta's pairing, the
+  source rules, the tarball-name rule, the confusion rule) sees the URL that
+  side would fetch. The host it lands on is then judged against the registries
+  the project names, which under `--trust-base` come from the trust base, so a
+  pull request that adds a `registry=` line and a path tarball is `url-source`.
+  A full URL is unchanged, as for pnpm; an empty value is left as written.
+  Below v9 the registry comes from the entry's own `name` field when it has
+  one (pnpm 8 `nameVerFromPkgSnapshot`), kept as `LockEntry.pnpmSnapshotName`,
+  which nothing else reads; from v9 on it comes from the key. That holds for
+  an entry with no tarball too: pnpm 8 builds its URL from the key's name and
+  version at the registry the name field picks (`getTarball` in
+  `pkgSnapshotToResolution`, via get-npm-tarball-url 2.1.0), so where that
+  registry differs from the one the key's name picks, the built URL is
+  recorded and judged by the source rules. Where both pick the same registry
+  the entry is the registry install it always was.
+- **`.npmrc` is read as ini reads it.** `parseNpmrcPins` and
+  `parseNpmrcDefaultRegistry` in `state.ts` decode keys and values with ini
+  1.3.8 `unsafe` (quotes stripped, inline `;` and `#` comments cut) and stop at
+  the first `[section]` line, after which ini nests every key (ini 1.3.8
+  `decode`, which pnpm reaches through config-chain and `@pnpm/npm-conf`). A
+  registry value with a `${VAR}` in its host, which pnpm expands from the
+  environment, is not expanded here: such a path tarball is left unresolved
+  and reads as no location.
+- **Pinned by** the `describe` blocks `pnpm packages keys that do not split
+  into a name and version`, `pnpm resolution.tarball written as a path`, `pnpm
+  keys below v9 that carry a registry host`, `.npmrc registries are read as ini
+  reads them`, `a tarball path below v9 is read against the registry of the
+  name field` and `an entry below v9 with no tarball is fetched from the
+  registry of its name field` in `packages/core/tests/pnpm-unsplit-keys.test.ts`.
+
+## A git entry from a repository no earlier entry of its name came from is a git source (2026-11-08)
+
+In `checks/tamper.ts`, a changed entry whose after side is a git source and
+whose every earlier candidate is a git source of another repository
+(`gitRepositoryMoved`) gets the added entry's source check, so it is a
+`git-source` finding. Repository identity is `canonicalRepo`, host and path
+without the commit, so a commit bump within one repository is not a move. This
+holds for an npm entry repointed to another owner on the same host, a pre-v9
+pnpm git key replaced, and a second git entry of the same name from another
+repository in v6 and v9. Pinned by the `describe` block `a git entry from
+another repository than every earlier entry of its name` in
+`packages/core/tests/pnpm-unsplit-keys.test.ts`.

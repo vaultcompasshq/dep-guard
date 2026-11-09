@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 import { gitEnv } from './git-env.js';
 import { MissingPackagesMapError, parseNpmLockfile } from './lockfiles/npm.js';
-import { parseOnlyBuilt, parsePnpmLockfile } from './lockfiles/pnpm.js';
+import { parseOnlyBuilt, parsePnpmLockfile, resolvePnpmRelativeTarballs } from './lockfiles/pnpm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
 import {
   isLocalPathSpecifier,
@@ -3708,6 +3708,13 @@ async function loadState(
   // and a source's read() is not assumed free of cost (a git source shells
   // out per read).
   const npmrcContent = await source.read(NPMRC);
+  const npmrcRegistryPins = parseNpmrcPins(npmrcContent);
+  const npmrcDefaultRegistry = parseNpmrcDefaultRegistry(npmrcContent);
+  // A pnpm tarball written as a path is fetched from this side's registry,
+  // so it is resolved against this side's .npmrc before any rule reads it.
+  for (const parsed of [...(lockfile === null ? [] : [lockfile]), ...extraLockfiles]) {
+    resolvePnpmRelativeTarballs(parsed, npmrcRegistryPins, npmrcDefaultRegistry);
+  }
   const workspaceLocalNamesByDir = confirmWorkspaceLocalNames(
     [...(lockfile === null ? [] : [lockfile]), ...extraLockfiles],
     listedLockfiles,
@@ -3726,8 +3733,8 @@ async function loadState(
     // check. Skipping it would leave that check permanently empty.
     onlyBuilt: parseOnlyBuilt(workspaceYamlContent, manifests),
     npmrcContent,
-    npmrcRegistryPins: parseNpmrcPins(npmrcContent),
-    npmrcDefaultRegistry: parseNpmrcDefaultRegistry(npmrcContent),
+    npmrcRegistryPins,
+    npmrcDefaultRegistry,
     // npm's "link": true entries, each confirmed against this side's own
     // manifests and the lockfile npm actually installs from in that
     // directory. A claim alone exempts nothing; see
