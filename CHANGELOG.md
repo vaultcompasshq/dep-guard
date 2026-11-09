@@ -10,6 +10,10 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Added
+
+- `sanitizeText` is now exported from `@vaultcompass/dep-guard-core`. It shipped in 0.20.0 and was not mentioned there.
+
 ## [0.20.0] - 2026-11-09
 
 This is a minor release, not a patch, because it adds config keys (`deny`,
