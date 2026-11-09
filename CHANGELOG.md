@@ -10,6 +10,21 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-09
+
+This is a minor release, not a patch, because it adds config keys (`deny`,
+`denyUnreadLockfiles`, `denyUnreadAcknowledged`), a rule id (`denied-package`)
+and diagnostic codes, and changes verdicts: a plain `--base` run now reads the
+`--base` ref's config, so a base config that does not validate is a
+could-not-run where it was ignored before, and a run with a deny list can exit
+2 on a lockfile it cannot read. No existing finding's fingerprint changed and
+no fingerprint input changed, so no recorded baseline needs regenerating; a
+`denied-package` finding is new and gets its own fingerprint under its own
+rule. The JSON output shape gains one optional field, `run.deny`
+(`{ "entries": N }`, present only when a non-empty deny list applied), plus the
+new rule id, the new diagnostic codes and a new `run.couldNotRun` reason
+(`deny-lockfile-unread`); no existing field changed.
+
 ### Added
 
 - A deny list in the config (`deny`). Name a package, a whole scope (`@scope/*`) or a Python project (`pypi:<name>`), optionally with exact versions, with a required reason and an optional review date. Every manifest line and every npm and pnpm lockfile entry in the tree is checked on every run, not only what a change adds, against the names and versions the lockfile records for what installs: the key, the name field, the tarball name, and for pnpm the entry's own name field and the key's version. A match is a critical `denied-package` finding that prints the reason. On a pull request the list comes from the base branch, and a plain `--base` or `--staged` run also keeps the comparison side's bans. `allow` and the baseline never clear a deny finding, and `ignorePaths` clears one only on a path nothing installs on either side: a lockfile entry counts as installed when the project beside its lockfile is a project on either side, whatever nested manifest also declares the name. A passed review date keeps the ban and says so on every run. `dep-guard check <name>` reports a denied name. See docs/deny-list.md, including what the list cannot see.

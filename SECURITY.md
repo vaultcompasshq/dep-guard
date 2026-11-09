@@ -4,8 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.19.x  | :white_check_mark: |
-| < 0.19  | :x:                |
+| 0.20.x  | :white_check_mark: |
+| < 0.20  | :x:                |
 
 dep-guard is pre-1.0. The latest published minor is supported; earlier
 minors are not patched.
