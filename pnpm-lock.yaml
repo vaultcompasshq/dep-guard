@@ -22,17 +22,17 @@ importers:
         specifier: ^22.19.0
         version: 22.20.1
       '@vaultcompass/conductor':
-        specifier: 0.18.0
-        version: 0.18.0
+        specifier: 0.18.1
+        version: 0.18.1
       '@vaultcompass/dep-guard':
-        specifier: 0.19.0
-        version: 0.19.0
+        specifier: 0.20.0
+        version: 0.20.0
       '@vaultcompass/intent-guard':
-        specifier: 1.10.4
-        version: 1.10.4
+        specifier: 1.10.6
+        version: 1.10.6
       '@vaultcompass/vault-guard':
-        specifier: 1.13.1
-        version: 1.13.1
+        specifier: 1.13.3
+        version: 1.13.3
       jest:
         specifier: ^30.5.2
         version: 30.5.2(@types/node@22.20.1)
@@ -623,44 +623,44 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@vaultcompass/conductor@0.18.0':
-    resolution: {integrity: sha512-Tg2a/2giRuAJhfjJNVL4SvpcIHVVLmAqoXY/IvtPWpxGhB2m1GdNCWcAO1wnTE3UmJJJbY9tr6rfD7uo7BOIaA==}
+  '@vaultcompass/conductor@0.18.1':
+    resolution: {integrity: sha512-7KFtcb1AzXFOYz1sMKLyd3aW3onMCmah8tiDBSdc29zyH+qjxeeXR2VBxnlFU7LRvlH7AuUimLKAVc3EZuNBMg==}
     engines: {node: '>=22'}
     hasBin: true
 
-  '@vaultcompass/dep-guard-core@0.19.0':
-    resolution: {integrity: sha512-2GsZq9RwX1C05crXKBl5Y25g7tf3I+qS9zJthSfXp/r9kmbATzbIuy9HEWvHnq4l3MRiV/Gx8+av49z30CHuXQ==}
+  '@vaultcompass/dep-guard-core@0.20.0':
+    resolution: {integrity: sha512-xrocKndbEFtMFZnbkz6e1D5VA5/zy4b931Uigfk2XBRDN705U/V4FsyenrfpXmF/h+UI08EEDlq3QHaguPMVtA==}
     engines: {node: '>=22'}
 
-  '@vaultcompass/dep-guard@0.19.0':
-    resolution: {integrity: sha512-9W4fzG6rLkLq4OSklt13njNGmbnVmugrllY9aUjtzaSrBq4XXJWEVRGojbk+/FYHEs1K/N61QWblzPciSeyOLg==}
+  '@vaultcompass/dep-guard@0.20.0':
+    resolution: {integrity: sha512-M12WYeXCZAxQHJoCKCkPS5tHuB/3diNc8kikCIlY2LWCIxs/ieMyDSpw4HtBNSpcY46dDA32Tj86+cOccdy8nw==}
     engines: {node: '>=22'}
     hasBin: true
 
-  '@vaultcompass/intent-guard-core@1.10.4':
-    resolution: {integrity: sha512-GbFdRmLNtESsJ89CCb9+11XaDO662b0wW1tnL1ybeH8S/TxgSRyAv//50vjFz0bBBiFXtgV4jY+z7MZZA/D2Ww==}
+  '@vaultcompass/intent-guard-core@1.10.6':
+    resolution: {integrity: sha512-eguY2kCBLZPscCYSfPLt4LN/FEYfRSQE4JiPYZ+IKCGtIvOsIEvKFjdmP/NMpTzxjpGCflBiW2U+a1W/Y2wSOA==}
 
-  '@vaultcompass/intent-guard-schema@1.10.4':
-    resolution: {integrity: sha512-/+jhh4/x3WAgXegIUy/9BzMVI7R25Xn6qkEOvB94oPTmxzto+NA6o88wWgONlqMGVoiPDsXzlClFWH2lxjWrfA==}
+  '@vaultcompass/intent-guard-schema@1.10.6':
+    resolution: {integrity: sha512-seyN68/jeuefVGuq+PsEYCvkx7RiG6l2RK15LeiGQ+KPN3XbC/TVpDZEyI09Y9Uyv9NLimvK8J6Z7qK631F+ZQ==}
 
-  '@vaultcompass/intent-guard-skill@1.10.4':
-    resolution: {integrity: sha512-OLZL4yqjbzyRZLrbJfRLZnum5F1GrNT9aseBKIuQrEsZ3wbfXMZEOr0DPLEZHwAOKeNnPQd68ge3KbogOOXu7A==}
+  '@vaultcompass/intent-guard-skill@1.10.6':
+    resolution: {integrity: sha512-0I0O4/YNyL7XAP/m2a09hCUeyZ18Zh5TEh6SUuIIHCSFk7IhEv+c3ol8WB08UXSRz2S0UR5QYXUJOTlrr7zlEA==}
     hasBin: true
 
-  '@vaultcompass/intent-guard@1.10.4':
-    resolution: {integrity: sha512-Q23cer4p0QSoWeGgvVveN9qqD99EsotFveB1Vzlh/SUloJaLdbgFaLwPHll27exM2jO+x1ZUkPHEuFO9/rPG+Q==}
+  '@vaultcompass/intent-guard@1.10.6':
+    resolution: {integrity: sha512-kCWV12fTct3ZKJJxECLV+OQ6QY/BlqbMvfycBSQ8Co+1wwa+fUWm3Tkl+vnMiEUn4fAFliieMN2EIphkHCdAAg==}
     hasBin: true
 
-  '@vaultcompass/vault-guard-core@1.13.1':
-    resolution: {integrity: sha512-9SVtqJ/7vfxOMRUNUtSilvYU7+0DzDevM5E9iUUPvxNgTVGLiHRK0XEyhwyaCNn1AKF3b5uNdCrkACzKrQyK8g==}
+  '@vaultcompass/vault-guard-core@1.13.3':
+    resolution: {integrity: sha512-u557a4vsEwy4hbTXKgYrLt0+15M4A85W77dwRFNBzR8gPhQsXt7d6icmtPaNtVZCvGXKY2gpk+1XHaEA/yeqrw==}
     engines: {node: '>=22.0.0', npm: '>=9.0.0', pnpm: '>=9.0.0'}
 
-  '@vaultcompass/vault-guard-telemetry@1.13.1':
-    resolution: {integrity: sha512-K0UwBYB0FyfChT2uIuM9mTW8xjpemnjsw1dE37rzIwN95hu6Yx7jsiNpegPhnWs4GH1eQNHYNbIDJ0jvuzmUsA==}
+  '@vaultcompass/vault-guard-telemetry@1.13.3':
+    resolution: {integrity: sha512-kIVX9gDXlBXXasLyZ36DnhbF6Fmm3NxVHGXP9KJu/0zftt3MQLbXc19u90gbmgobq3BkyKcoXUbeLAn7zHmVjA==}
     engines: {node: '>=22.0.0', npm: '>=9.0.0', pnpm: '>=9.0.0'}
 
-  '@vaultcompass/vault-guard@1.13.1':
-    resolution: {integrity: sha512-Ma7fv3JKnhavzzy2Nwf733CKGeloSqodDywLz2k5phvinQ7KeQk2BCHD74CbyBNFiqR43FIUWPRDMLETwHBmCQ==}
+  '@vaultcompass/vault-guard@1.13.3':
+    resolution: {integrity: sha512-GpZUcvYBmQsVsgdKKwTRXXmrFkGhWrWQk7fSDlFyK4hzoh5n46ouDpA5yTLeKQzesIpBSQ0sl7glBVSQJO3Dvg==}
     engines: {node: '>=22.0.0', npm: '>=9.0.0', pnpm: '>=9.0.0'}
     hasBin: true
 
@@ -978,8 +978,8 @@ packages:
     resolution: {integrity: sha512-B4FFZ6q/T2jhhksgkbEW3HBvWIfDW85snkQgawt07S7J5QXTk6BkNV+0yAeZrM5QpMAdYlocGoljn0sJ/WQkFw==}
     engines: {node: '>=10.17.0'}
 
-  ignore@5.3.2:
-    resolution: {integrity: sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==}
+  ignore@7.0.14:
+    resolution: {integrity: sha512-wCBiZ77u1tuWde6G/nfOtLaCTYcFDU5yCzARzK10y+rLhzYoL7a7yEemcopcc2Mzow7gZOIjnV2ym1NYmdiJOQ==}
     engines: {node: '>= 4'}
 
   import-local@3.2.0:
@@ -2251,56 +2251,56 @@ snapshots:
   '@unrs/resolver-binding-win32-x64-msvc@1.12.2':
     optional: true
 
-  '@vaultcompass/conductor@0.18.0':
+  '@vaultcompass/conductor@0.18.1':
     dependencies:
       ajv: 8.20.0
       commander: 12.1.0
       yaml: 2.9.1
 
-  '@vaultcompass/dep-guard-core@0.19.0':
+  '@vaultcompass/dep-guard-core@0.20.0':
     dependencies:
       smol-toml: 1.9.1
       yaml: 2.9.1
 
-  '@vaultcompass/dep-guard@0.19.0':
+  '@vaultcompass/dep-guard@0.20.0':
     dependencies:
-      '@vaultcompass/dep-guard-core': 0.19.0
+      '@vaultcompass/dep-guard-core': 0.20.0
       commander: 12.1.0
 
-  '@vaultcompass/intent-guard-core@1.10.4':
+  '@vaultcompass/intent-guard-core@1.10.6':
     dependencies:
-      '@vaultcompass/intent-guard-schema': 1.10.4
+      '@vaultcompass/intent-guard-schema': 1.10.6
       yaml: 2.9.1
 
-  '@vaultcompass/intent-guard-schema@1.10.4':
+  '@vaultcompass/intent-guard-schema@1.10.6':
     dependencies:
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
 
-  '@vaultcompass/intent-guard-skill@1.10.4':
+  '@vaultcompass/intent-guard-skill@1.10.6':
     dependencies:
-      '@vaultcompass/intent-guard-core': 1.10.4
-      '@vaultcompass/intent-guard-schema': 1.10.4
+      '@vaultcompass/intent-guard-core': 1.10.6
+      '@vaultcompass/intent-guard-schema': 1.10.6
       yaml: 2.9.1
 
-  '@vaultcompass/intent-guard@1.10.4':
+  '@vaultcompass/intent-guard@1.10.6':
     dependencies:
-      '@vaultcompass/intent-guard-skill': 1.10.4
+      '@vaultcompass/intent-guard-skill': 1.10.6
 
-  '@vaultcompass/vault-guard-core@1.13.1':
+  '@vaultcompass/vault-guard-core@1.13.3':
     dependencies:
-      ignore: 5.3.2
+      ignore: 7.0.14
 
-  '@vaultcompass/vault-guard-telemetry@1.13.1':
+  '@vaultcompass/vault-guard-telemetry@1.13.3':
     dependencies:
-      '@vaultcompass/vault-guard-core': 1.13.1
+      '@vaultcompass/vault-guard-core': 1.13.3
     optionalDependencies:
       better-sqlite3: 13.0.3
 
-  '@vaultcompass/vault-guard@1.13.1':
+  '@vaultcompass/vault-guard@1.13.3':
     dependencies:
-      '@vaultcompass/vault-guard-core': 1.13.1
-      '@vaultcompass/vault-guard-telemetry': 1.13.1
+      '@vaultcompass/vault-guard-core': 1.13.3
+      '@vaultcompass/vault-guard-telemetry': 1.13.3
       chalk: 4.1.2
       commander: 12.1.0
 
@@ -2602,7 +2602,7 @@ snapshots:
 
   human-signals@2.1.0: {}
 
-  ignore@5.3.2: {}
+  ignore@7.0.14: {}
 
   import-local@3.2.0:
     dependencies:
