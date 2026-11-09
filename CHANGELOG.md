@@ -19,6 +19,7 @@ GitHub release notes, which are generated from the commit history.
 
 ### Changed
 
+- The CI gate pin and the devDependency move to dep-guard 0.19.0.
 - A plain `--base` run now reads the `--base` ref's config on every run, so a base config that does not validate, or a base `.dep-guard.json` or `.dep-guard.local.json` that is a symlink rather than a regular file, is a could-not-run (`config-invalid`, exit 2) where it was ignored before. This verdict change applies to every adopter, with or without a deny list. A `--staged` run reads HEAD's deny list leniently instead, entry by entry, so a broken HEAD config does not block the commit that fixes it; what it could not read is named in a `deny-head-config-invalid` note.
 - On a `--trust-base` run the config proposal line names a deny ban the head would lift (`proposed: lift deny <name>`) and counts the bans it adds.
 - `lockfile-not-read` and `lockfile-outside-prefix` say what a non-empty deny list did not judge.
