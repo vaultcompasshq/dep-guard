@@ -10,6 +10,21 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-09
+
+This is a minor release, not a patch, because it adds config keys (`deny`,
+`denyUnreadLockfiles`, `denyUnreadAcknowledged`), a rule id (`denied-package`)
+and diagnostic codes, and changes verdicts: a plain `--base` run now reads the
+`--base` ref's config, so a base config that does not validate, or a symlinked
+one, is a could-not-run where it was ignored before, and a pull-request run
+with a deny list can exit 2 when it cannot read what a project installs. No existing finding's fingerprint changed and
+no fingerprint input changed, so no recorded baseline needs regenerating; a
+`denied-package` finding is new and gets its own fingerprint under its own
+rule. The JSON output shape gains one optional field, `run.deny`
+(`{ "entries": N }`, present only when a non-empty deny list applied), plus the
+new rule id, the new diagnostic codes and a new `run.couldNotRun` reason
+(`deny-lockfile-unread`); no existing field changed.
+
 ### Added
 
 - A deny list in the config (`deny`). Name a package, a whole scope (`@scope/*`) or a Python project (`pypi:<name>`), optionally with exact versions, with a required reason and an optional review date. Every manifest line and every npm and pnpm lockfile entry in the tree is checked on every run, not only what a change adds, against the names and versions the lockfile records for what installs: the key, the name field, the tarball name, and for pnpm the entry's own name field and the key's version. A match is a critical `denied-package` finding that prints the reason. On a pull request the list comes from the base branch, and a plain `--base` or `--staged` run also keeps the comparison side's bans. `allow` and the baseline never clear a deny finding, and `ignorePaths` clears one only on a path nothing installs on either side: a lockfile entry counts as installed when the project beside its lockfile is a project on either side, whatever nested manifest also declares the name. A passed review date keeps the ban and says so on every run. `dep-guard check <name>` reports a denied name. See docs/deny-list.md, including what the list cannot see.
@@ -19,6 +34,7 @@ GitHub release notes, which are generated from the commit history.
 
 ### Changed
 
+- The CI gate pin and the devDependency move to dep-guard 0.19.0.
 - A plain `--base` run now reads the `--base` ref's config on every run, so a base config that does not validate, or a base `.dep-guard.json` or `.dep-guard.local.json` that is a symlink rather than a regular file, is a could-not-run (`config-invalid`, exit 2) where it was ignored before. This verdict change applies to every adopter, with or without a deny list. A `--staged` run reads HEAD's deny list leniently instead, entry by entry, so a broken HEAD config does not block the commit that fixes it; what it could not read is named in a `deny-head-config-invalid` note.
 - On a `--trust-base` run the config proposal line names a deny ban the head would lift (`proposed: lift deny <name>`) and counts the bans it adds.
 - `lockfile-not-read` and `lockfile-outside-prefix` say what a non-empty deny list did not judge.
