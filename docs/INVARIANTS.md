@@ -3472,9 +3472,9 @@ else.
   below 0.6.0 is already broken on that event, because no scanner below 0.6.0
   knows `--trust-base` and the run step always passes it; the rule changes
   that failure from the scan to a named refusal at validate. A pin of 0.6.0
-  through 0.11.0 fails on version alone, since each knows `--trust-base` and
-  would otherwise run cleanly; 0.11.0 is the withdrawn release this tag
-  replaces. Pins at or above 0.20.0 are unaffected.
+  through 0.19.0 fails on version alone, since each knows `--trust-base` and
+  would otherwise run cleanly. Pins at or above 0.20.0, the scanner this
+  tag ships (`DG_TAG_SCANNER` in `action.yml`), are unaffected.
 
 **Enforced by:** the `pinning the scanner backward on a pull request` cases in
 `scripts/tests/action-run-script.test.mjs`. One case drives the SHIPPED,
