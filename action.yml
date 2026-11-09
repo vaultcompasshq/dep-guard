@@ -241,7 +241,8 @@ runs:
         # file from the HEAD, so the `version:` input is written by the pull
         # request being judged. The shape check above proves the input names a
         # version and says nothing about WHICH one: every published version
-        # clears it, and fifteen are published, 0.1.0 through 0.11.0.
+        # clears it. The scanner this tag ships, which is what an older pin is
+        # compared with below, is DG_TAG_SCANNER, the source of truth.
         #
         # WHAT ALREADY STOPS A BACKWARD PIN TODAY is not the shape check but a
         # FLAG. `--trust-base` arrived in the 0.6.0 scanner, the run step
