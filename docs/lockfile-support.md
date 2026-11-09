@@ -56,7 +56,17 @@ quiet:
   falls back to being looked up under its lockfile key like any other.
 - `pnpm-lock.yaml` -- host, integrity, tarball and git-source checks for
   every `lockfileVersion` from 5.x on (the slash-separated 5.x keys, the
-  6.x keys and the v9 keys). Install scripts are read from `requiresBuild`
+  6.x keys and the v9 keys). A key older lockfiles write for a git or
+  tarball dependency, which names where it comes from rather than a name
+  and version (`github.com/<owner>/<repo>/<commit>`, `@<host>/<path>`), is
+  read from its resolution under the name the entry records. A key that
+  carries a registry host in front of a name and version
+  (`registry.npmjs.org/is-positive@3.1.0`) is read as pnpm 8 reads it, as
+  that name and version. An entry with no readable location, or a key that
+  splits in none of these ways, is skipped with the
+  `pnpm-lockfile-invalid-entry` note. A `resolution.tarball` written as a
+  path is resolved as pnpm resolves it, against the scope's or the default
+  registry in `.npmrc`, before any check reads it. Install scripts are read from `requiresBuild`
   in lockfiles older than v9, the only lockfiles pnpm wrote it in; v9
   records no per-package build flag, so for v9 additions to
   `onlyBuiltDependencies` are reported instead. That allowlist is not an

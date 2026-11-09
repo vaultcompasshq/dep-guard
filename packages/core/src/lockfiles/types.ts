@@ -94,6 +94,13 @@ export interface LockEntry {
   // not mean it has no location. checks/candidates.ts then never treats the key
   // as a folder name, or the entry as an earlier registry install.
   unreadLocation?: true;
+  // pnpm only, lockfile versions below 9: the entry's own "name" field,
+  // verbatim, unless the resolution has a "type". pnpm 8 picks the registry
+  // it fetches from (a resolution.tarball path, or the URL it builds when
+  // there is no tarball) by this field when it is present. Read by exactly
+  // one consumer, lockfiles/pnpm.ts#resolvePnpmRelativeTarballs, for that choice;
+  // never identity and never a name any check judges.
+  pnpmSnapshotName?: string;
 }
 
 export type LockfileFormat = 'npm' | 'pnpm' | 'yarn' | 'bun' | 'none';

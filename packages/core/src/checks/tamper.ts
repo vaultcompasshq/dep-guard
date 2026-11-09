@@ -1609,16 +1609,34 @@ export const tamperCheck: Check = (ctx) => {
         report(unvouched, entryChange.lockfilePath);
       }
       const candidates = candidatesOfLockEntry(entryChange);
+      // A git entry whose every earlier candidate is a git source of another
+      // repository installs code from a repository this revision introduced,
+      // whatever host they share, so it gets the added entry's source check
+      // too. The identity is the host and repository path without the
+      // commit (canonicalRepo), so a commit bump of the same repository is
+      // not a move.
+      const afterSource = lockEntrySource(entryChange.after, registryHosts);
+      const gitRepositoryMoved =
+        afterSource !== null &&
+        afterSource.protocol === 'git' &&
+        afterSource.identity !== null &&
+        candidates.length > 0 &&
+        candidates.every((before) => {
+          const earlier = lockEntrySource(before, registryHosts);
+          return (
+            earlier !== null && earlier.protocol === 'git' && earlier.identity !== null && earlier.identity !== afterSource.identity
+          );
+        });
       // A changed entry whose earlier entries are all unknown (no resolved,
       // no integrity, no flag) has no host to compare against either, so it
       // gets the added entry's source check as well as the comparisons.
-      if (candidates.length === 0 || comparedOnlyWithUnknown(entryChange)) {
+      if (candidates.length === 0 || comparedOnlyWithUnknown(entryChange) || gitRepositoryMoved) {
         // An added entry has nothing to compare against, but where it
         // comes from is still a fact about it. A changed entry that moved
         // to a git or non-registry source is caught by the comparisons
         // below (host-changed and friends); an ADDED one, most often a
         // transitive dependency nobody declared, was reported by nothing.
-        const source = lockEntrySource(entryChange.after, registryHosts);
+        const source = afterSource;
         const declaredKey = JSON.stringify([entryChange.manifestPath, entryChange.packageName]);
         // Skipped only when the declaration's own reported source is THIS
         // source. Matching on the package name alone would let one declared

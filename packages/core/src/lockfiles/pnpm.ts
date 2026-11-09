@@ -241,7 +241,9 @@ function selectProjectDocument(
 // identity, so no further resolution is needed. delta.ts's delta step
 // attaches lock entries to a ManifestDep by trying ManifestDep.name
 // first, then registryName, precisely because npm and pnpm lockfiles key
-// their entries differently.
+// their entries differently. The one exception is a key that names no
+// package at all (a pre-v9 git or tarball key, see readPackages), which is
+// stored under the name its entry records.
 //
 // Splitting on the last "@" is unambiguous for
 // ordinary semver versions, but a git/URL-resolved dependency's key can
@@ -299,15 +301,86 @@ function parsePackageKey(key: string): { name: string; version: string } | undef
   return { name, version };
 }
 
+// semver's strict "valid" grammar (the FULL pattern), which pnpm 8's
+// dependency-path parse uses to decide whether a key carries a version.
+const SEMVER_VALID =
+  /^v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+// pnpm 8 dependency-path indexOfPeersSuffix: where a trailing "(...)" peer
+// suffix starts, or -1.
+function indexOfPeersSuffix(depPath: string): number {
+  if (!depPath.endsWith(')')) {
+    return -1;
+  }
+  let open = 1;
+  for (let i = depPath.length - 2; i >= 0; i -= 1) {
+    if (depPath[i] === '(') {
+      open -= 1;
+    } else if (depPath[i] === ')') {
+      open += 1;
+    } else if (open === 0) {
+      return i + 1;
+    }
+  }
+  return -1;
+}
+
+// A key below lockfile v9 that does not start with "/", read the way pnpm 8
+// reads it. pnpm 8 keeps the registry host in front of a package that came
+// from a registry other than the configured one ("registry.npmjs.org/
+// is-positive/3.1.0" in v5, "registry.npmjs.org/is-positive@3.1.0" in v6).
+// On reading a v6 lockfile it first turns "host/name@version" back into
+// "host/name/version" (lockfile/lockfile-file/src/experiments/
+// inlineSpecifiersLockfileConverters.ts, convertLockfileV6DepPathToV5DepPath),
+// then dependency-path parse drops the first segment as the host and takes
+// the name (one segment, or two for a scope) and a version that semver calls
+// valid, after a "(...)" or "_..." peer suffix (packages/dependency-path/
+// src/index.ts, parse; both at pnpm 8.15.9). Such an entry is a registry
+// install of that name and version: with no tarball, pnpm fetches it from
+// the configured registry by that name (pkgSnapshotToResolution, getTarball).
+// A git or tarball key ("github.com/<owner>/<repo>/<commit>") has no valid
+// version there and is undefined here too.
+function parseHostPrefixedKey(key: string, major: number): { name: string; version: string } | undefined {
+  if (key.startsWith('/') || key.startsWith('file:')) {
+    return undefined;
+  }
+  let depPath = key;
+  if (major === 6 && depPath.includes('@', 2)) {
+    const index = depPath.indexOf('@', depPath.indexOf('/@') + 2);
+    if (index === -1) {
+      return undefined;
+    }
+    if (!(depPath.includes('(') && index > indexOfPeersSuffix(depPath))) {
+      depPath = `${depPath.slice(0, index)}/${depPath.slice(index + 1)}`;
+    }
+  }
+  const parts = depPath.split('/');
+  parts.shift();
+  if (parts.length === 0 || parts[0] === '') {
+    return undefined;
+  }
+  const name = parts[0].startsWith('@') ? (parts.length > 1 ? `${parts.shift()}/${parts.shift()}` : undefined) : parts.shift();
+  let version = parts.join('/');
+  if (name === undefined || version === '') {
+    return undefined;
+  }
+  if (version.includes('(') && version.endsWith(')')) {
+    version = version.slice(0, version.indexOf('('));
+  } else if (version.includes('_')) {
+    version = version.slice(0, version.indexOf('_'));
+  }
+  return SEMVER_VALID.test(version) ? { name, version } : undefined;
+}
+
 // pnpm writes a real "version" field on the packages
 // entry itself for git/URL-resolved dependencies, where the key-derived
 // version (whatever followed the last "@") is actually a URL fragment,
 // not a version. A string-typed value.version is authoritative when
 // present; the key-derived version remains the fallback for entries that
 // don't carry one (the normal case).
-function entryFromPackageValue(value: Record<string, unknown>, keyVersion: string): LockEntry {
+function entryFromPackageValue(value: Record<string, unknown>, keyVersion: string | undefined): LockEntry {
   const version = typeof value.version === 'string' ? value.version : keyVersion;
-  const entry: LockEntry = { version };
+  const entry: LockEntry = version === undefined ? {} : { version };
   const resolution = value.resolution;
   if (isPlainObject(resolution)) {
     if (typeof resolution.tarball === 'string') {
@@ -361,7 +434,10 @@ function lockEntriesEqual(a: LockEntry, b: LockEntry): boolean {
     a.version === b.version &&
     a.resolvedUrl === b.resolvedUrl &&
     a.integrity === b.integrity &&
-    a.hasInstallScript === b.hasInstallScript
+    a.hasInstallScript === b.hasInstallScript &&
+    // Before v9 the name field picks the registry a tarball path is read
+    // against, so two entries that differ there are not one entry.
+    a.pnpmSnapshotName === b.pnpmSnapshotName
   );
 }
 
@@ -579,20 +655,61 @@ function readPackages(
   // keys named "constructor" or "__proto__" -- legal npm/pnpm package
   // names -- are handled like any other entry instead of colliding with
   // inherited Object.prototype members.
-  for (const [key, value] of Object.entries(packages)) {
-    const parsedKey = parsePackageKey(key);
-    if (parsedKey === undefined) {
-      diagnostics.push({
-        code: 'pnpm-lockfile-invalid-entry',
-        message: `${path}: packages key "${key}" could not be parsed into a name and version; skipped`,
-      });
-      continue;
+  const append = (name: string, entry: LockEntry): void => {
+    const existing = entries.get(name);
+    if (!existing) {
+      entries.set(name, [entry]);
+    } else if (!existing.some((e) => lockEntriesEqual(e, entry))) {
+      existing.push(entry);
     }
-    if (!PNPM_NAME_GRAMMAR.test(parsedKey.name)) {
-      diagnostics.push({
-        code: 'pnpm-lockfile-invalid-entry',
-        message: `${path}: packages key "${key}" did not split into a valid package name ("${parsedKey.name}"); skipped`,
-      });
+  };
+  const major = Number.parseInt(String(document.lockfileVersion ?? ''), 10);
+  const preV9 = Number.isInteger(major) && major < 9;
+  // Below v9 pnpm 8 picks the registry it fetches from by the entry's own
+  // name field when it has one (lockfile/lockfile-utils/src/
+  // nameVerFromPkgSnapshot.ts and pkgSnapshotToResolution.ts at 8.15.9),
+  // so that field is kept for resolvePnpmRelativeTarballs and for nothing
+  // else. A resolution with a "type" (git, directory) is returned unchanged
+  // there and picks no registry, so it keeps no such field.
+  const withSnapshotName = (entry: LockEntry, value: Record<string, unknown>): LockEntry =>
+    preV9 &&
+    typeof value.name === 'string' &&
+    value.name !== '' &&
+    !(isPlainObject(value.resolution) && value.resolution.type !== undefined)
+      ? { ...entry, pnpmSnapshotName: value.name }
+      : entry;
+  for (const [key, value] of Object.entries(packages)) {
+    let parsedKey = parsePackageKey(key);
+    if (preV9 && (parsedKey === undefined || !PNPM_NAME_GRAMMAR.test(parsedKey.name))) {
+      const hosted = parseHostPrefixedKey(key, major);
+      if (hosted !== undefined && PNPM_NAME_GRAMMAR.test(hosted.name)) {
+        parsedKey = hosted;
+      }
+    }
+    const unsplit =
+      parsedKey === undefined
+        ? `${path}: packages key "${key}" could not be parsed into a name and version; skipped`
+        : !PNPM_NAME_GRAMMAR.test(parsedKey.name)
+          ? `${path}: packages key "${key}" did not split into a valid package name ("${parsedKey.name}"); skipped`
+          : null;
+    if (unsplit !== null) {
+      // Lockfile versions before 9 key a git or remote-tarball dependency by
+      // where it comes from, not by name and version:
+      // "github.com/<owner>/<repo>/<commit>" for a hosted git repository,
+      // "@<host>/<path>" for a tarball URL, and the repository URL with its
+      // scheme cut off for any other git source (pnpm 8,
+      // resolving/git-resolver and resolving/tarball-resolver, the "id" each
+      // returns). pnpm installs such an entry from its resolution, and
+      // records the package's own name and version beside it. Such an entry
+      // is read from its resolution, under the name it records (the key when
+      // it records none); the skip note is for an entry nothing can be read
+      // from.
+      const carried = isPlainObject(value) ? unsplitEntry(key, value) : null;
+      if (carried === null) {
+        diagnostics.push({ code: 'pnpm-lockfile-invalid-entry', message: unsplit });
+        continue;
+      }
+      append(carried.name, withSnapshotName(carried.entry, value as Record<string, unknown>));
       continue;
     }
     if (!isPlainObject(value)) {
@@ -602,7 +719,7 @@ function readPackages(
       });
       continue;
     }
-    const { name, version } = parsedKey;
+    const { name, version } = parsedKey as { name: string; version: string };
     // Multiple packages keys can resolve to the same registry name, most
     // commonly two different versions of the same package installed for
     // different peer-dependency sets. Real lockfiles hit this often
@@ -612,15 +729,106 @@ function readPackages(
     // collision that resolves to an identical entry (see
     // lockEntriesEqual above) is a duplicate, not a second version, and
     // is not appended again.
-    const entry = entryFromPackageValue(value, version);
-    const existing = entries.get(name);
-    if (!existing) {
-      entries.set(name, [entry]);
-    } else if (!existing.some((e) => lockEntriesEqual(e, entry))) {
-      existing.push(entry);
-    }
+    append(name, withSnapshotName(entryFromPackageValue(value, version), value));
   }
   return entries;
+}
+
+// The entry for a packages key that does not split into a name and version
+// (see readPackages), or null when its value says nothing about where it
+// installs from. A resolution with a tarball or a git repository is what
+// pnpm fetches, so it is read; the name is the entry's own "name" field
+// when that is a package name, else the key itself, so the entry is judged
+// under some name rather than dropped. Neither name selects the bytes: the
+// resolution does, and every source rule reads it.
+function unsplitEntry(key: string, value: Record<string, unknown>): { name: string; entry: LockEntry } | null {
+  const entry = entryFromPackageValue(value, undefined);
+  if (entry.resolvedUrl === undefined) {
+    return null;
+  }
+  const field = value.name;
+  const name = typeof field === 'string' && PNPM_NAME_GRAMMAR.test(field) ? field : key;
+  return { name, entry };
+}
+
+const DEFAULT_REGISTRY = 'https://registry.npmjs.org/';
+
+// pnpm reads a resolution.tarball that is not a full URL against the
+// registry that serves the package: the scope's registry from .npmrc when
+// the name is scoped and has one, else the default registry, with a "/"
+// appended (lockfile/lockfile-utils/src/pkgSnapshotToResolution.ts at pnpm
+// 8.15.9, lockfile/utils/src/pkgSnapshotToResolution.ts at 9.15.9 and
+// 10.29.3: `new url.URL(tarball, registry)`). The name whose scope counts is
+// the entry's own name field below v9 (pnpm 8 nameVerFromPkgSnapshot) and
+// the key's name from v9 on; the scope is everything before the first "/"
+// of a name that starts with "@", as pnpm splits it. Each entry is resolved
+// that way here, against the .npmrc of the side it was read from, which is
+// what that side's install would use, so every rule reads the URL that side
+// fetches and the source rules judge its host against the registries the
+// project names. A full URL is unchanged, as it is for pnpm, and a value
+// that does not resolve is left as written.
+export function resolvePnpmRelativeTarballs(
+  lockfile: ParsedLockfile,
+  pins: Map<string, string>,
+  defaultRegistry: string | null
+): void {
+  if (lockfile.format !== 'pnpm') {
+    return;
+  }
+  // The registry pnpm picks for a name, with a "/" appended.
+  const registryFor = (scopeName: string): string => {
+    const scope = scopeName.startsWith('@') ? scopeName.split('/')[0] : null;
+    const registry = (scope === null ? undefined : pins.get(scope)) ?? defaultRegistry ?? DEFAULT_REGISTRY;
+    const full = registry.includes('://') ? registry : `https://${registry.replace(/^\/+/, '')}`;
+    return full.endsWith('/') ? full : `${full}/`;
+  };
+  for (const [name, list] of lockfile.entries) {
+    list.forEach((entry, index) => {
+      const tarball = entry.resolvedUrl;
+      if (tarball === undefined || tarball === '') {
+        // No tarball: pnpm builds the URL from the key's name and version at
+        // the registry it picked (getTarball in pkgSnapshotToResolution,
+        // which calls get-npm-tarball-url 2.1.0: registry + name + "/-/" +
+        // the name without its scope + "-" + the version without build
+        // metadata + ".tgz"). With the key's own name picking the registry,
+        // that is the registry install every rule already judges by name,
+        // and the entry is left as it is. Below v9 the name field picks it,
+        // and where that is another registry the URL pnpm fetches is
+        // recorded, so the source rules judge its host.
+        const snapshotName = entry.pnpmSnapshotName;
+        if (snapshotName === undefined || entry.version === undefined) {
+          return;
+        }
+        const registry = registryFor(snapshotName);
+        if (registry === registryFor(name)) {
+          return;
+        }
+        const scopeless = name.startsWith('@') ? (name.split('/')[1] ?? name) : name;
+        const version = entry.version.includes('+') ? entry.version.slice(0, entry.version.indexOf('+')) : entry.version;
+        list[index] = { ...entry, resolvedUrl: `${registry}${name}/-/${scopeless}-${version}.tgz` };
+        return;
+      }
+      if (isAbsoluteUrl(tarball)) {
+        return;
+      }
+      try {
+        const resolved = new URL(tarball, registryFor(entry.pnpmSnapshotName ?? name)).toString();
+        list[index] = { ...entry, resolvedUrl: resolved };
+      } catch {
+        // Not resolvable against this registry: left as written, which the
+        // rules read as no location.
+      }
+    });
+  }
+}
+
+function isAbsoluteUrl(value: string): boolean {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Merges the onlyBuiltDependencies allowlist from pnpm-workspace.yaml (the
