@@ -15,9 +15,9 @@ GitHub release notes, which are generated from the commit history.
 This is a minor release, not a patch, because it adds config keys (`deny`,
 `denyUnreadLockfiles`, `denyUnreadAcknowledged`), a rule id (`denied-package`)
 and diagnostic codes, and changes verdicts: a plain `--base` run now reads the
-`--base` ref's config, so a base config that does not validate is a
-could-not-run where it was ignored before, and a run with a deny list can exit
-2 on a lockfile it cannot read. No existing finding's fingerprint changed and
+`--base` ref's config, so a base config that does not validate, or a symlinked
+one, is a could-not-run where it was ignored before, and a pull-request run
+with a deny list can exit 2 when it cannot read what a project installs. No existing finding's fingerprint changed and
 no fingerprint input changed, so no recorded baseline needs regenerating; a
 `denied-package` finding is new and gets its own fingerprint under its own
 rule. The JSON output shape gains one optional field, `run.deny`
