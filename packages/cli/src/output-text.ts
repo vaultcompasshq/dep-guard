@@ -3,6 +3,7 @@
 // verbatim -- but cli.ts's stderr notes in JSON mode reuse
 // renderDiagnosticLine, so this module owns sanitization for both output
 // paths where free-text repository content reaches a terminal.
+import { sanitizeText } from '@vaultcompass/dep-guard-core';
 import type { Diagnostic, Finding, ScanResult, Severity } from '@vaultcompass/dep-guard-core';
 
 // Worst first, so a human scanning the report top-to-bottom sees the
@@ -24,14 +25,12 @@ const SEVERITY_DISPLAY_ORDER: Severity[] = ['critical', 'high', 'medium', 'low']
 // carrying a right-to-left override can make its own tail render
 // reversed in a terminal, the exact trojan-source trick this security
 // tool must not let its own report become a vector for.
-const CONTROL_CHARS = new RegExp(
-  '[\\u0000-\\u001F\\u007F-\\u009F\\u200B-\\u200F\\u202A-\\u202E\\u2066-\\u2069]',
-  'g'
-);
-
-export function sanitizeText(input: string): string {
-  return input.replace(/\r\n|\r|\n/g, ' ').replace(CONTROL_CHARS, '');
-}
+//
+// The set and the function live in core (text.ts), where config
+// validation refuses a deny reason carrying any of these characters, so
+// the renderer and the validator read one definition. Re-exported here for
+// the callers that already import it from this module.
+export { sanitizeText };
 
 function renderFinding(finding: Finding): string {
   // A finding anchored on its lockfile names it once (audit 2026-10-28, N-d).
@@ -179,6 +178,13 @@ export function renderCoverageLines(result: ScanResult): string[] {
 
   if (go.files > 0) {
     lines.push(`  go: not read. go.mod and go.sum are not read by dep-guard (${plural(go.files, 'file')} seen).`);
+  }
+
+  const denyEntries = result.run.deny?.entries ?? 0;
+  if (denyEntries > 0) {
+    lines.push(
+      `  deny list: ran denied-package (${plural(denyEntries, 'deny entry', 'deny entries')}) over every manifest and every lockfile dep-guard reads.`
+    );
   }
 
   return lines.length === 0 ? [] : ['coverage:', ...lines];

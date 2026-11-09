@@ -8,11 +8,26 @@ import { installScriptCheck } from './checks/install-script.js';
 import { tamperCheck } from './checks/tamper.js';
 import { typosquatCheck } from './checks/typosquat.js';
 import { existenceCheck } from './checks/existence.js';
-import type { Check, CheckContext, ResolvedConfig } from './checks/types.js';
-import { loadConfig } from './config.js';
+import {
+  DENY_HEAD_CONFIG_INVALID,
+  DENY_KEPT_OVER_BASELINE,
+  DENY_LOCKFILE_ACKNOWLEDGED,
+  DENY_LOCKFILE_UNREAD,
+  DENY_NOTHING_TO_JUDGE,
+  DENY_RULE,
+  denyCheck,
+  denyCoverage,
+  denyCheckSingle,
+  keptFromComparisonDiagnostic,
+  stricterDenyUnread,
+  unionDenyLists,
+  type DenyCoverage,
+} from './checks/deny.js';
+import type { Check, CheckContext, DenyEntry, JudgedSide, ResolvedConfig } from './checks/types.js';
+import { CONFIG_FILE, LOCAL_CONFIG_FILE, loadConfig, readDenyLeniently } from './config.js';
 import type { Corpus } from './corpus.js';
 import { loadCorpus } from './corpus.js';
-import { computeDelta } from './delta.js';
+import { computeDelta, lockfilesOf } from './delta.js';
 import type { DepChange, DependencyDelta } from './delta.js';
 import { fingerprintFinding } from './fingerprint.js';
 import { collapseInstallScriptFindings } from './install-script-collapse.js';
@@ -32,11 +47,17 @@ import {
 } from './git-source.js';
 import type { ScanMode } from './git-source.js';
 import { matchingIgnoreEntries, normalizeIgnorePattern } from './ignore-paths.js';
-import { assertBaseNotHeadUnderTrustBase, loadConfigAtRef, loadTrustedControls } from './trust-base.js';
+import {
+  assertBaseNotHeadUnderTrustBase,
+  loadConfigAtRef,
+  loadTrustedControls,
+  readControlFileAtRef,
+} from './trust-base.js';
 import type { ControlShapeChange, TrustedControls } from './trust-base.js';
 import {
   EMPTY_PROJECTS,
   isReadLockfile,
+  manifestTextDigest,
   projectReasonKey,
   type ProjectClassification,
   type ProjectReason,
@@ -99,9 +120,230 @@ const CHECKS: Check[] = [
   pythonTyposquatCheck,
   installScriptCheck,
   tamperCheck,
+  denyCheck,
   hygieneCheck,
   confusionCheck,
 ];
+
+// Which deny list a run without a trust base applies (docs/configuration.md,
+// "Where the deny list comes from"). A --trust-base run already has the
+// trust base's list and nothing here changes it. With --base, the union of
+// the base ref's list and the working tree's: the base ref's config is read
+// on every such run, so a base config that does not validate is
+// config-invalid (exit 2), which a plain --base run used to ignore. With
+// --staged, the union of HEAD's list and the working tree's, HEAD read
+// leniently so a broken HEAD config cannot block the commit that fixes it.
+// denyUnreadLockfiles takes the stricter of the two sides either way.
+async function applyComparisonDenyList(
+  root: string,
+  mode: ScanMode,
+  config: ResolvedConfig,
+  diagnostics: Diagnostic[]
+): Promise<ResolvedConfig> {
+  if (mode.kind === 'audit') {
+    return config;
+  }
+  let comparison: { deny?: DenyEntry[]; denyUnreadLockfiles?: 'fail' | 'note'; denyUnreadAcknowledged?: string[] };
+  let side: string;
+  if (mode.kind === 'base') {
+    comparison = await loadConfigAtRef(root, mode.ref);
+    side = `the --base ref "${mode.ref}"`;
+  } else {
+    const [base, local] = await Promise.all([
+      readControlFileAtRef(root, 'HEAD', CONFIG_FILE),
+      readControlFileAtRef(root, 'HEAD', LOCAL_CONFIG_FILE),
+    ]);
+    const problems: string[] = [];
+    const textOf = (file: typeof base): string | null => {
+      if (file === null) {
+        return null;
+      }
+      if (file.type !== 'blob' || file.mode === '120000') {
+        problems.push(`HEAD:${file.path} is not a regular file`);
+        return null;
+      }
+      return file.text;
+    };
+    const lenient = readDenyLeniently(textOf(base), textOf(local), 'HEAD');
+    problems.push(...lenient.problems);
+    if (problems.length > 0) {
+      diagnostics.push({
+        code: DENY_HEAD_CONFIG_INVALID,
+        message:
+          `HEAD's config could not be read in full, so its deny list was read entry by entry: ${problems.join('; ')}. ` +
+          'Every entry that validates still applies',
+      });
+    }
+    comparison = lenient;
+    side = 'HEAD';
+  }
+  const union = unionDenyLists(comparison.deny ?? [], config.deny ?? []);
+  const kept = keptFromComparisonDiagnostic(union.kept, side);
+  if (kept !== null) {
+    diagnostics.push(kept);
+  }
+  const unread = stricterDenyUnread(comparison.denyUnreadLockfiles, config.denyUnreadLockfiles);
+  // Acknowledgements are the comparison side's alone: the judged tree's own
+  // entries would let a change accept its own gap.
+  return {
+    ...config,
+    deny: union.deny,
+    ...(unread === undefined ? {} : { denyUnreadLockfiles: unread }),
+    denyUnreadAcknowledged: comparison.denyUnreadAcknowledged ?? [],
+  };
+}
+
+// What a deny list cannot read, settled into the run (design note section
+// 6). An install lockfile the list cannot read, or a project with declared
+// dependencies and no lockfile, means the list cannot say what that project
+// installs: on a pull-request run that is a could-not-run (exit 2) unless
+// denyUnreadLockfiles is "note"; otherwise, and always on audit and
+// --staged, a diagnostic. When the online could-not-run already holds the
+// run, it stays, and this one is said as a diagnostic. Also adds the deny
+// sentences to lockfile-not-read and lockfile-outside-prefix, and says when
+// a non-empty list had nothing at all to judge.
+// An acknowledged lockfile stays acknowledged only while every package.json
+// project that installs from it is the same path with the same bytes on the
+// judged side as on the comparison side the acknowledgement came from
+// (`comparisonRef`): a new member, a removed one, or a changed manifest
+// moves what the base accepted, so the lockfile is a gap again. Without a
+// comparison side (audit) there is nothing to hold it against.
+async function brokenAcknowledgement(
+  root: string,
+  comparisonRef: string | null,
+  judged: JudgedSide,
+  candidate: DenyCoverage['acknowledged'][number]
+): Promise<string[]> {
+  if (comparisonRef === null) {
+    return [];
+  }
+  const reference = new Set(candidate.referenceInstallers);
+  const judgedSet = new Set(candidate.judgedInstallers);
+  const changes: string[] = [];
+  for (const relPath of candidate.judgedInstallers) {
+    if (!reference.has(relPath)) {
+      changes.push(`${relPath} added`);
+      continue;
+    }
+    const file = await readControlFileAtRef(root, comparisonRef, relPath);
+    const before = file === null || file.type !== 'blob' || file.mode === '120000' ? null : manifestTextDigest(file.text);
+    const after = judged.manifestDigests?.get(relPath);
+    if (before === null || after === undefined || before !== after) {
+      changes.push(`${relPath} changed`);
+    }
+  }
+  for (const relPath of candidate.referenceInstallers) {
+    if (!judgedSet.has(relPath)) {
+      changes.push(`${relPath} removed`);
+    }
+  }
+  return changes;
+}
+
+async function settleDenyCoverage(args: {
+  root: string;
+  comparisonRef: string | null;
+  config: ResolvedConfig;
+  judged: JudgedSide;
+  reference: ProjectClassification | null;
+  isPullRequestRun: boolean;
+  couldNotRun: { code: string; message: string } | null;
+  diagnostics: Diagnostic[];
+}): Promise<{ code: string; message: string } | null> {
+  const deny = args.config.deny ?? [];
+  if (deny.length === 0) {
+    return args.couldNotRun;
+  }
+  for (const [index, diagnostic] of args.diagnostics.entries()) {
+    if (diagnostic.code === 'lockfile-not-read') {
+      args.diagnostics[index] = {
+        ...diagnostic,
+        message: `${diagnostic.message}; the deny list judged manifest names only for this lockfile`,
+      };
+    } else if (diagnostic.code === 'lockfile-outside-prefix') {
+      args.diagnostics[index] = {
+        ...diagnostic,
+        message: `${diagnostic.message}; the deny list did not judge that lockfile, so scan the repository root to apply it`,
+      };
+    }
+  }
+  const coverage = denyCoverage(deny, args.judged, args.reference, args.config.denyUnreadAcknowledged ?? []);
+  const held: string[] = [];
+  const broken: string[] = [];
+  for (const candidate of coverage.acknowledged) {
+    const changes = await brokenAcknowledgement(args.root, args.comparisonRef, args.judged, candidate);
+    if (changes.length === 0) {
+      held.push(candidate.lockfile);
+    } else {
+      coverage.unreadInstall.push(candidate.lockfile);
+      broken.push(`${candidate.lockfile} (${changes.join(', ')})`);
+    }
+  }
+  coverage.unreadInstall.sort();
+  if (held.length > 0) {
+    args.diagnostics.push({
+      code: DENY_LOCKFILE_ACKNOWLEDGED,
+      message:
+        `the deny list cannot read ${listIgnorePaths(held)}, and the comparison side's "denyUnreadAcknowledged" ` +
+        'accepts those exact bytes while every package.json that installs from them is unchanged, so what ' +
+        'installs from them is not judged',
+    });
+  }
+  if (coverage.nothingToJudge) {
+    args.diagnostics.push({
+      code: DENY_NOTHING_TO_JUDGE,
+      message: `the deny list has ${deny.length} entr${deny.length === 1 ? 'y' : 'ies'} and this tree has no manifest or lockfile to judge`,
+    });
+  }
+  const parts: string[] = [];
+  if (coverage.unreadInstall.length > 0) {
+    parts.push(`lockfiles it cannot read that a project installs from: ${listIgnorePaths(coverage.unreadInstall)}`);
+  }
+  if (broken.length > 0) {
+    parts.push(
+      `acknowledged lockfiles whose acknowledgement no longer holds, because what installs from them changed ` +
+        `against the comparison side: ${broken.join('; ')}`
+    );
+  }
+  if (coverage.noLockfile.length > 0) {
+    parts.push(`projects with declared dependencies and no lockfile it can read: ${listIgnorePaths(coverage.noLockfile)}`);
+  }
+  if (parts.length === 0) {
+    return args.couldNotRun;
+  }
+  const fails = args.isPullRequestRun && (args.config.denyUnreadLockfiles ?? 'fail') !== 'note';
+  const message =
+    `the deny list cannot say what these install: ${parts.join('; ')}. ` +
+    (fails
+      ? 'Commit a lockfile dep-guard reads (package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, or a Python lockfile), ' +
+        (coverage.acknowledgements.length > 0
+          ? `accept these exact lockfile bytes on the base branch with "denyUnreadAcknowledged": ${JSON.stringify(coverage.acknowledgements)}, `
+          : '') +
+        'or set "denyUnreadLockfiles": "note" on the base branch to accept every gap'
+      : 'The run does not fail on this here; a pull-request run does, unless the base branch accepts it' +
+        (coverage.acknowledgements.length > 0 ? ` ("denyUnreadAcknowledged": ${JSON.stringify(coverage.acknowledgements)})` : '') +
+        ' or sets "denyUnreadLockfiles" to "note"');
+  if (fails && args.couldNotRun === null) {
+    return { code: DENY_LOCKFILE_UNREAD, message };
+  }
+  args.diagnostics.push({ code: DENY_LOCKFILE_UNREAD, message });
+  return args.couldNotRun;
+}
+
+// How a deny finding kept under an ignorePaths entry is installed.
+const DENY_IGNORE_POSITION = 'a denied package on an installed path';
+
+// The whole side under judgment, for the deny list (checks/deny.ts).
+function judgedSideOf(state: RepoState): JudgedSide {
+  return {
+    manifests: state.manifests,
+    lockfiles: lockfilesOf(state),
+    pythonLockfiles: state.pythonLockfiles ?? [],
+    lockfileInventory: state.lockfileInventory ?? [],
+    ...(state.projects === undefined ? {} : { projects: state.projects }),
+    ...(state.manifestDigests === undefined ? {} : { manifestDigests: state.manifestDigests }),
+  };
+}
 
 // The real corpus is published data shipped alongside the compiled
 // package, not source; it lives beside src/ (or dist/ once built) rather
@@ -197,10 +439,15 @@ export interface ScanResult {
     // additive under the stability policy.
     ecosystems: EcosystemsSummary;
     // Set when this run scanned and still could not stand behind a clean
-    // verdict: today only online-names-unchecked, a --base or --trust-base
-    // run that left a candidate name unchecked online. The report is built
-    // in full and the exit is 2. Absent otherwise.
+    // verdict: online-names-unchecked, a --base or --trust-base run that
+    // left a candidate name unchecked online, or deny-lockfile-unread, a
+    // pull-request run with a deny list and an install the list could not
+    // read. The report is built in full and the exit is 2. Absent otherwise.
     couldNotRun?: { code: string; message: string };
+    // Present only when the run applied a non-empty deny list: how many
+    // entries it applied. Absent otherwise, so a run without a list
+    // serialises exactly as it did before the list existed.
+    deny?: { entries: number };
   };
   // 0 or 1 from the gate; 2 only for run.couldNotRun. Every other
   // could-not-run throws before a result exists.
@@ -250,7 +497,8 @@ function runChecks(
   npmrcRegistryPins: Map<string, string>,
   npmrcDefaultRegistry: string | null,
   npmrcChanged: boolean,
-  pythonIndex: PythonIndexRule | null = null
+  pythonIndex: PythonIndexRule | null = null,
+  judged: JudgedSide | null = null
 ): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
   const ctx: CheckContext = {
     corpus,
@@ -260,6 +508,7 @@ function runChecks(
     npmrcDefaultRegistry,
     npmrcChanged,
     ...(pythonIndex === null ? {} : { pythonIndex }),
+    ...(judged === null ? {} : { judged }),
     diagnostics: [],
     allowed: [],
   };
@@ -1117,6 +1366,7 @@ export function applyPathFilters(
   let suppressed = 0;
   let ignored = 0;
   let ignoreKept = 0;
+  let denyKeptOverBaseline = 0;
   const matchedEntries = new Set<string>(alreadyMatched);
   let droppedSeverity: Severity | null = null;
   const droppedOnProjects = new Set<string>();
@@ -1136,6 +1386,46 @@ export function applyPathFilters(
     judged !== undefined && judgedReasonsOf(judged, relPath).length > 0;
 
   for (const raw of rawFindings) {
+    // A deny finding (checks/deny.ts) has its own rule: ignorePaths drops it
+    // only where nothing installs on either side, and the baseline never
+    // drops it. Everything after the filters treats it like any finding.
+    if (raw.ruleId === DENY_RULE) {
+      const anchorPath = anchorOf(raw.manifestPath);
+      const matches = [
+        ...new Set([
+          ...matchingIgnoreEntries(raw.manifestPath, config.ignorePaths),
+          ...(raw.lockfilePath === undefined ? [] : matchingIgnoreEntries(raw.lockfilePath.split('#')[0], config.ignorePaths)),
+        ]),
+      ];
+      let keep: { position: string } | null = null;
+      if (matches.length > 0) {
+        for (const matched of matches) {
+          matchedEntries.add(matched);
+        }
+        // Installed when the finding's anchor is a project on either side, or
+        // when the project beside the lockfile the entry lives in is: a
+        // manifest that merely declares the name cannot move a lockfile
+        // entry its lockfile's project installs onto an ignored path.
+        const isProjectEitherSide = (relPath: string): boolean =>
+          isJudgedProject(relPath) || (sides.reference?.reasons.get(relPath) ?? []).length > 0;
+        const lockfileAnchor = raw.lockfilePath === undefined ? null : anchorOf(raw.lockfilePath.split('#')[0]);
+        const installed = isProjectEitherSide(anchorPath) || (lockfileAnchor !== null && isProjectEitherSide(lockfileAnchor));
+        if (!installed) {
+          ignored += 1;
+          if (droppedSeverity === null || severityAtLeast(raw.severity, droppedSeverity)) {
+            droppedSeverity = raw.severity;
+          }
+          continue;
+        }
+        keep = { position: DENY_IGNORE_POSITION };
+        ignoreKept += 1;
+      }
+      if (baseline.has(fingerprintFinding(raw))) {
+        denyKeptOverBaseline += 1;
+      }
+      survivors.push({ raw, keep, matches });
+      continue;
+    }
     let matchPath = raw.manifestPath;
     let anchor = anchorOf(matchPath);
     // A stray that declares a root-lockfile name cannot pull that lockfile's
@@ -1269,6 +1559,15 @@ export function applyPathFilters(
     }
   }
 
+  if (denyKeptOverBaseline > 0) {
+    diagnostics.push({
+      code: DENY_KEPT_OVER_BASELINE,
+      message:
+        `${denyKeptOverBaseline} denied-package finding(s) match a baseline entry and are kept: the baseline never ` +
+        'clears a deny finding; only an edit to the deny list does',
+    });
+  }
+
   // Name any configured entry that never matched a single finding's
   // manifestPath in this scan. The matcher itself is not changed -- its
   // whole-path precision is the point -- this only makes a silent no-op
@@ -1386,6 +1685,7 @@ function buildResult(
       online: info.online,
       ecosystems: info.ecosystems,
       ...(info.couldNotRun === undefined || info.couldNotRun === null ? {} : { couldNotRun: info.couldNotRun }),
+      ...((config.deny ?? []).length === 0 ? {} : { deny: { entries: (config.deny ?? []).length } }),
     },
     // evaluateGate stays 0 or 1; the one could-not-run that reaches a
     // built result widens the exit here.
@@ -1464,11 +1764,16 @@ export async function scan(opts: {
   if (controls !== null && opts.mode.kind === 'base') {
     await assertBaseNotHeadUnderTrustBase(root, opts.mode.ref);
   }
-  const config = applyFailOnOverride(controls?.config ?? loadConfig(root), opts.failOn);
+  const denyListDiagnostics: Diagnostic[] = [];
+  const config = applyFailOnOverride(
+    controls?.config ?? (await applyComparisonDenyList(root, opts.mode, loadConfig(root), denyListDiagnostics)),
+    opts.failOn
+  );
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const isIgnoredPath = (repoPath: string): boolean =>
     matchingIgnoreEntries(repoPath, config.ignorePaths).length > 0;
   const statePair = await loadStates(opts.repoRoot, opts.mode, { isIgnoredPath });
+  statePair.diagnostics.push(...denyListDiagnostics);
 
   // Ported from a sibling scanner's whole-tree "examined zero files is
   // could-not-run" invariant, adapted to dep-guard's own unit of work: a
@@ -1732,7 +2037,8 @@ export async function scan(opts: {
     [statePair.before, trustState].some(
       (side) => side !== null && (side.npmrcContent ?? null) !== (statePair.after.npmrcContent ?? null)
     ) || (controls?.npmrcChanged ?? false),
-    pythonIndex
+    pythonIndex,
+    judgedSideOf(statePair.after)
   );
   // A --base or --trust-base run is the pull-request/CI shape (issue #75):
   // never a commit hook, so the online budget's default is minutes rather
@@ -1771,6 +2077,21 @@ export async function scan(opts: {
   const ecosystems = summarizeEcosystems(ctx, statePair.after.manifests, pypiStats, statePair.after.notParsed ?? []);
 
   const diagnostics = [...statePair.diagnostics, ...delta.diagnostics, ...ctx.diagnostics];
+  // The ref the acknowledgements came from (applyComparisonDenyList, or
+  // the trust base's own config): what an acknowledged lockfile's
+  // installing manifests are held against.
+  const comparisonRef =
+    controls !== null ? controls.ref : opts.mode.kind === 'base' ? opts.mode.ref : opts.mode.kind === 'staged' ? 'HEAD' : null;
+  const couldNotRun = await settleDenyCoverage({
+    root,
+    comparisonRef,
+    config,
+    judged: judgedSideOf(statePair.after),
+    reference: referenceProjects,
+    isPullRequestRun,
+    couldNotRun: settledOnline.couldNotRun,
+    diagnostics,
+  });
   const lockfileByManifest = new Map<string, string>();
   for (const change of delta.changes) {
     if (change.lockfilePath !== undefined && !lockfileByManifest.has(change.manifestPath)) {
@@ -1817,7 +2138,7 @@ export async function scan(opts: {
       startedAt,
       online,
       ecosystems,
-      couldNotRun: settledOnline.couldNotRun,
+      couldNotRun,
     },
     controls,
     filtered
@@ -1952,6 +2273,9 @@ export async function checkSingle(opts: {
   const delta = syntheticDelta(opts.name);
 
   const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map(), null, false);
+  // The deny list judges the one name asked about. No version is given, so a
+  // versioned ban matches by name and says so (checks/deny.ts).
+  checkedFindings.push(...denyCheckSingle(opts.name, ctx));
   // checkSingle has no --base concept -- only --trust-base -- so the
   // pull-request/CI shape here is exactly "a trust base was given".
   const isPullRequestRun = controls !== null;

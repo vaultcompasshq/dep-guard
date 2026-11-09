@@ -679,8 +679,9 @@ function isPackageJson(filePath: string): boolean {
 // The lockfile that records this package.json: the one in the same
 // directory, else the nearest ancestor. A Python manifest is not covered
 // by an npm lockfile. A manifest that has its own lockfile is not covered
-// by an ancestor's.
-function lockfileForManifest(
+// by an ancestor's. Exported for checks/deny.ts, which anchors a lockfile
+// entry on the manifest this lockfile records.
+export function lockfileForManifest(
   manifestPath: string,
   lockfiles: readonly ParsedLockfile[]
 ): ParsedLockfile | null {
@@ -1495,7 +1496,11 @@ function checkNestedLockfiles(
   return diagnostics;
 }
 
-function lockfilesOf(state: RepoState): ParsedLockfile[] {
+// Every npm and pnpm lockfile a side holds: the primary, then the extras
+// (further root lockfiles, lockfiles below the root, and the further
+// documents of a multi-document pnpm lockfile). Exported for scan.ts, which
+// hands the judged side's set to checks/deny.ts.
+export function lockfilesOf(state: RepoState): ParsedLockfile[] {
   return [...(state.lockfile === null ? [] : [state.lockfile]), ...(state.extraLockfiles ?? [])];
 }
 

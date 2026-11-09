@@ -52,8 +52,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { BASELINE_FILE, parseBaseline } from './baseline.js';
-import type { ResolvedConfig } from './checks/types.js';
-import { CONFIG_FILE, LOCAL_CONFIG_FILE, loadConfigFromTexts } from './config.js';
+import type { DenyEntry, ResolvedConfig } from './checks/types.js';
+import { CONFIG_FILE, LOCAL_CONFIG_FILE, denyEntryKey, loadConfigFromTexts, normalizedDenyName } from './config.js';
 import { gitEnv } from './git-env.js';
 import { NPMRC, isUsableRef } from './git-source.js';
 import { parseNpmrcDefaultRegistry, parseNpmrcPins } from './state.js';
@@ -568,6 +568,70 @@ export const UNPARSEABLE_CONFIG_DETAIL = 'head config could not be parsed';
  * this line exists to remove, and the unparseable case below was the other
  * half of it.
  */
+// The deny list's part of a config change, in the reverse direction of
+// allow's: a ban the head would lift is NAMED, since that is what a reviewer
+// has to see, and a ban the head adds is COUNTED. A lift is a base entry the
+// head has no entry for under the same normalised name, or listed versions
+// the head's entries for that name no longer cover; a case-only rename of an
+// npm name is not one. A reason or reviewBy edit alone is said once.
+function describeDenyChange(base: ResolvedConfig, head: ResolvedConfig): string[] {
+  const baseDeny = base.deny ?? [];
+  const headDeny = head.deny ?? [];
+  const parts: string[] = [];
+  const headByName = new Map<string, DenyEntry[]>();
+  for (const entry of headDeny) {
+    const name = normalizedDenyName(entry.name);
+    headByName.set(name, [...(headByName.get(name) ?? []), entry]);
+  }
+  const lifts: string[] = [];
+  for (const entry of baseDeny) {
+    const same = headByName.get(normalizedDenyName(entry.name)) ?? [];
+    if (same.some((candidate) => candidate.versions === undefined)) {
+      continue;
+    }
+    if (entry.versions === undefined) {
+      lifts.push(same.length === 0 ? entry.name : `${entry.name} (every version the head does not list)`);
+      continue;
+    }
+    const covered = new Set(same.flatMap((candidate) => (candidate.versions ?? []).map((version) => version.trim())));
+    const dropped = entry.versions.map((version) => version.trim()).filter((version) => !covered.has(version));
+    if (dropped.length > 0) {
+      lifts.push(`${entry.name}@${dropped.join('|')}`);
+    }
+  }
+  if (lifts.length > 0) {
+    parts.push(`proposed: lift deny ${nameList(lifts)}`);
+  }
+  const baseKeys = new Map(baseDeny.map((entry) => [denyEntryKey(entry), entry]));
+  const added = headDeny.filter((entry) => !baseKeys.has(denyEntryKey(entry))).length;
+  if (added > 0) {
+    parts.push(`${added} deny entr${added === 1 ? 'y' : 'ies'} added`);
+  }
+  const reworded = headDeny.some((entry) => {
+    const earlier = baseKeys.get(denyEntryKey(entry));
+    return earlier !== undefined && (earlier.reason !== entry.reason || earlier.reviewBy !== entry.reviewBy);
+  });
+  if (reworded) {
+    parts.push('deny reasons changed');
+  }
+  if ((base.denyUnreadLockfiles ?? 'fail') !== (head.denyUnreadLockfiles ?? 'fail')) {
+    parts.push(`denyUnreadLockfiles set to ${head.denyUnreadLockfiles ?? 'fail'}`);
+  }
+  // An acknowledgement accepts a gap, so like a lift it is NAMED; one the
+  // head drops only tightens, so it is counted.
+  const baseAcks = new Set(base.denyUnreadAcknowledged ?? []);
+  const headAcks = new Set(head.denyUnreadAcknowledged ?? []);
+  const accepted = [...headAcks].filter((entry) => !baseAcks.has(entry)).sort();
+  if (accepted.length > 0) {
+    parts.push(`proposed: accept unread lockfile ${nameList(accepted)}`);
+  }
+  const withdrawn = [...baseAcks].filter((entry) => !headAcks.has(entry)).length;
+  if (withdrawn > 0) {
+    parts.push(`${withdrawn} unread lockfile acknowledgement${withdrawn === 1 ? '' : 's'} removed`);
+  }
+  return parts;
+}
+
 function describeConfigChange(base: ResolvedConfig, head: ResolvedConfig | null): string | null {
   // Null means the head config did not parse or did not validate. The run
   // used the base config regardless, so nothing about the verdict changes
@@ -639,6 +703,8 @@ function describeConfigChange(base: ResolvedConfig, head: ResolvedConfig | null)
   if (JSON.stringify(base.extraAliases) !== JSON.stringify(head.extraAliases)) {
     parts.push('extraAliases changed');
   }
+
+  parts.push(...describeDenyChange(base, head));
 
   // Removals, counted across the six list keys rather than named. A pull
   // request that only removes entries is TIGHTENING the gate, which is not

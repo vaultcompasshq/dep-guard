@@ -1,7 +1,7 @@
 import { parse as parseYaml, Composer, Parser, type Document } from 'yaml';
 import { withoutByteOrderMark } from '../text.js';
 import { DepGuardError, type Diagnostic } from '../types.js';
-import type { LockEntry, ParsedLockfile } from './types.js';
+import type { LockEntry, ParsedLockfile, PnpmSkippedEntry } from './types.js';
 import type { ParsedManifest } from '../manifest.js';
 
 const WORKSPACE_YAML_LABEL = 'pnpm-workspace.yaml';
@@ -381,6 +381,20 @@ function parseHostPrefixedKey(key: string, major: number): { name: string; versi
 function entryFromPackageValue(value: Record<string, unknown>, keyVersion: string | undefined): LockEntry {
   const version = typeof value.version === 'string' ? value.version : keyVersion;
   const entry: LockEntry = version === undefined ? {} : { version };
+  // The key's own version, when the entry records a different one. pnpm 8
+  // and 9 build the tarball URL of an entry with no tarball from the key, so
+  // that is the version they fetch (pkgSnapshotToResolution, getTarball);
+  // pnpm 10 fetches the recorded one. The deny list judges both.
+  if (keyVersion !== undefined && version !== keyVersion) {
+    entry.keyVersion = keyVersion;
+  }
+  // The entry's own "name" field, verbatim, at every lockfile version. Read
+  // by the deny list only, as one more name to match: it never decides what
+  // pnpm fetches, which is the key's name (pnpmSnapshotName below is the
+  // separate, narrower field that picks a registry before v9).
+  if (typeof value.name === 'string' && value.name !== '') {
+    entry.pnpmNameField = value.name;
+  }
   const resolution = value.resolution;
   if (isPlainObject(resolution)) {
     if (typeof resolution.tarball === 'string') {
@@ -437,7 +451,13 @@ function lockEntriesEqual(a: LockEntry, b: LockEntry): boolean {
     a.hasInstallScript === b.hasInstallScript &&
     // Before v9 the name field picks the registry a tarball path is read
     // against, so two entries that differ there are not one entry.
-    a.pnpmSnapshotName === b.pnpmSnapshotName
+    a.pnpmSnapshotName === b.pnpmSnapshotName &&
+    // Every name and version the deny list reads stays: dropping one of two
+    // entries that differ only there would drop a name or a version pnpm
+    // fetches.
+    a.pnpmNameField === b.pnpmNameField &&
+    a.keyVersion === b.keyVersion &&
+    a.pnpmRawKey === b.pnpmRawKey
   );
 }
 
@@ -482,7 +502,8 @@ export function parsePnpmLockfile(path: string, rawContent: string): ParsedLockf
     }
     const documentPath = `${path}#${label}`;
     const documentDiagnostics: Diagnostic[] = [];
-    const documentEntries = readPackages(documentPath, record, documentDiagnostics);
+    const documentSkipped: PnpmSkippedEntry[] = [];
+    const documentEntries = readPackages(documentPath, record, documentDiagnostics, documentSkipped);
     if (documentEntries === null) {
       return;
     }
@@ -494,6 +515,7 @@ export function parsePnpmLockfile(path: string, rawContent: string): ParsedLockf
       diagnostics: documentDiagnostics,
       workspaceLocalNames: new Set(),
       documentOf: path,
+      ...(documentSkipped.length > 0 ? { skippedEntries: documentSkipped } : {}),
     });
   });
   const unreadCount = documents.length - readIndexes.size;
@@ -560,7 +582,8 @@ export function parsePnpmLockfile(path: string, rawContent: string): ParsedLockf
         'covered by this scan',
     });
   }
-  const entries = readPackages(path, parsed, diagnostics);
+  const skippedEntries: PnpmSkippedEntry[] = [];
+  const entries = readPackages(path, parsed, diagnostics, skippedEntries);
   if (entries === null) {
     // A lockfile with a "packages" key that is present but not a mapping
     // -- including a dangling "packages:" line with no value, which YAML
@@ -570,7 +593,15 @@ export function parsePnpmLockfile(path: string, rawContent: string): ParsedLockf
     // instead.
     throw new DepGuardError(`${path}: "packages" is present but not a mapping`, 'lockfile-parse');
   }
-  return { format: 'pnpm', path, entries, diagnostics, workspaceLocalNames: new Set(), ...skippedField };
+  return {
+    format: 'pnpm',
+    path,
+    entries,
+    diagnostics,
+    workspaceLocalNames: new Set(),
+    ...skippedField,
+    ...(skippedEntries.length > 0 ? { skippedEntries } : {}),
+  };
 }
 
 // A document pnpm could have written as a lockfile: a lockfile version,
@@ -628,10 +659,26 @@ function recordsOnlyLinks(document: Record<string, unknown>): boolean {
 // is present but not a mapping. A missing "packages" is valid-empty:
 // unlike npm's flat map, pnpm omits the key when there are no external
 // dependencies at all.
+// A packages entry readPackages could not read, as written: the key, and the
+// entry's own name and version when it is a mapping that has them.
+function skippedEntryOf(key: string, value: unknown): PnpmSkippedEntry {
+  const skipped: PnpmSkippedEntry = { key };
+  if (isPlainObject(value)) {
+    if (typeof value.name === 'string' && value.name !== '') {
+      skipped.name = value.name;
+    }
+    if (typeof value.version === 'string') {
+      skipped.version = value.version;
+    }
+  }
+  return skipped;
+}
+
 function readPackages(
   path: string,
   document: Record<string, unknown>,
-  diagnostics: Diagnostic[]
+  diagnostics: Diagnostic[],
+  skipped: PnpmSkippedEntry[] = []
 ): Map<string, LockEntry[]> | null {
   const entries = new Map<string, LockEntry[]>();
   const packages = document.packages;
@@ -707,9 +754,13 @@ function readPackages(
       const carried = isPlainObject(value) ? unsplitEntry(key, value) : null;
       if (carried === null) {
         diagnostics.push({ code: 'pnpm-lockfile-invalid-entry', message: unsplit });
+        // Kept for the deny list, which matches what the raw entry says
+        // (its name field and the name-shaped parts of its key) even though
+        // no other rule can read it.
+        skipped.push(skippedEntryOf(key, value));
         continue;
       }
-      append(carried.name, withSnapshotName(carried.entry, value as Record<string, unknown>));
+      append(carried.name, { ...withSnapshotName(carried.entry, value as Record<string, unknown>), pnpmRawKey: key });
       continue;
     }
     if (!isPlainObject(value)) {
@@ -717,6 +768,7 @@ function readPackages(
         code: 'pnpm-lockfile-invalid-entry',
         message: `${path}: packages["${key}"] is not a mapping; skipped`,
       });
+      skipped.push({ key });
       continue;
     }
     const { name, version } = parsedKey as { name: string; version: string };

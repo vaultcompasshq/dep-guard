@@ -27,6 +27,8 @@ describe('loadConfig', () => {
       minAgeDays: 7,
       minAgeAllow: [],
       acknowledgedLockfiles: [],
+      deny: [],
+      denyUnreadAcknowledged: [],
     });
   });
 
@@ -69,6 +71,8 @@ describe('loadConfig', () => {
       minAgeDays: 7,
       minAgeAllow: [],
       acknowledgedLockfiles: [],
+      deny: [],
+      denyUnreadAcknowledged: [],
     });
   });
 
@@ -456,6 +460,8 @@ describe('loadConfig', () => {
       minAgeDays: 7,
       minAgeAllow: [],
       acknowledgedLockfiles: [],
+      deny: [],
+      denyUnreadAcknowledged: [],
     });
   });
 });
@@ -488,5 +494,146 @@ describe('loadConfig acknowledgedLockfiles', () => {
 
   test('the acknowledgeable names are exactly the lockfile names the loader inventories', () => {
     expect([...ACKNOWLEDGEABLE_LOCKFILE_NAMES].sort()).toEqual([...LOCKFILE_FILE_NAMES].sort());
+  });
+});
+
+describe('loadConfig deny', () => {
+  function denyConfig(deny: unknown, extra: Record<string, unknown> = {}): string {
+    return makeRepo({ '.dep-guard.json': JSON.stringify({ deny, ...extra }) });
+  }
+
+  function refusal(deny: unknown): string {
+    try {
+      loadConfig(denyConfig(deny));
+    } catch (error) {
+      expect(error).toEqual(expect.objectContaining({ code: 'config-invalid' }));
+      return (error as Error).message;
+    }
+    throw new Error('expected config-invalid');
+  }
+
+  test('deny entries load with name, reason, optional versions and reviewBy', () => {
+    const entries = [
+      { name: 'event-stream', reason: 'compromised in 2018 (flatmap-stream)' },
+      { name: 'ua-parser-js', versions: ['0.7.29', '0.8.0', '1.0.0'], reason: 'hijacked releases', reviewBy: '2027-06-30' },
+      { name: '@abandoned-scope/*', reason: 'unmaintained' },
+      { name: 'pypi:ctx', reason: 'account takeover, May 2022' },
+    ];
+    expect(loadConfig(denyConfig(entries)).deny).toEqual(entries);
+  });
+
+  test('a missing, empty or over-length reason is refused', () => {
+    expect(refusal([{ name: 'event-stream' }])).toMatch(/reason/);
+    expect(refusal([{ name: 'event-stream', reason: '   ' }])).toMatch(/reason/);
+    expect(refusal([{ name: 'event-stream', reason: 'x'.repeat(301) }])).toMatch(/reason/);
+    expect(refusal([{ name: 'event-stream', reason: 7 }])).toMatch(/reason/);
+    expect(loadConfig(denyConfig([{ name: 'event-stream', reason: 'x'.repeat(300) }])).deny).toHaveLength(1);
+  });
+
+  test('a reason with a control, bidi or zero-width character is refused', () => {
+    for (const bad of ['line\nbreak', 'esc\u001b[31m', 'c1\u0085', 'rtl‮', 'iso⁦', 'zw​']) {
+      expect(refusal([{ name: 'event-stream', reason: bad }])).toMatch(/reason/);
+    }
+  });
+
+  test('an unknown entry field is refused, including expires', () => {
+    expect(refusal([{ name: 'event-stream', reason: 'r', expires: '2027-01-01' }])).toMatch(/"expires"/);
+    expect(refusal([{ name: 'event-stream', reason: 'r', version: '1.0.0' }])).toMatch(/"version"/);
+  });
+
+  test('star, prefix glob, empty scope or invalid name refused', () => {
+    for (const name of ['*', 'foo*', '@*/x', '@/x', '@scope/', '', 'a/b', '@a/b/c', 'with space', 'x'.repeat(215), 'pypi:', 'pypi:-bad-']) {
+      expect(refusal([{ name, reason: 'r' }])).toMatch(/name/);
+    }
+    expect(refusal([{ reason: 'r' }])).toMatch(/name/);
+  });
+
+  test('a range or empty versions list refused', () => {
+    for (const versions of [[], ['^1.0.0'], ['1.x'], ['>=1.0.0'], ['1.0.0 - 2.0.0'], ['1.0'], 'v1', [7]]) {
+      expect(refusal([{ name: 'ua-parser-js', versions, reason: 'r' }])).toMatch(/versions/);
+    }
+  });
+
+  test('pypi with versions refused', () => {
+    expect(refusal([{ name: 'pypi:ctx', versions: ['0.1.2'], reason: 'r' }])).toMatch(/versions/);
+  });
+
+  test('reviewBy that is not a real calendar date refused', () => {
+    for (const reviewBy of ['2027-02-30', '2027-13-01', '2027-1-1', '27-01-01', 'tomorrow', 20270101, '2027-02-29']) {
+      expect(refusal([{ name: 'event-stream', reason: 'r', reviewBy }])).toMatch(/reviewBy/);
+    }
+    expect(loadConfig(denyConfig([{ name: 'event-stream', reason: 'r', reviewBy: '2028-02-29' }])).deny).toHaveLength(1);
+  });
+
+  test('plain string entry refused with the shape in the message', () => {
+    expect(refusal(['event-stream'])).toMatch(/\{ "name": .*"reason": .*\}/);
+    expect(refusal({ name: 'event-stream', reason: 'r' })).toMatch(/must be an array/);
+    expect(refusal([null])).toMatch(/object/);
+  });
+
+  test('exact duplicate entries refused, case-insensitively for npm', () => {
+    expect(refusal([
+      { name: 'event-stream', reason: 'one' },
+      { name: 'Event-Stream', reason: 'two' },
+    ])).toMatch(/duplicate/);
+    expect(refusal([
+      { name: 'ua-parser-js', versions: ['1.0.0', '0.7.29'], reason: 'one' },
+      { name: 'ua-parser-js', versions: ['0.7.29', '1.0.0'], reason: 'two' },
+    ])).toMatch(/duplicate/);
+    expect(refusal([
+      { name: 'pypi:Python_Dateutil', reason: 'one' },
+      { name: 'pypi:python-dateutil', reason: 'two' },
+    ])).toMatch(/duplicate/);
+    expect(loadConfig(denyConfig([
+      { name: 'ua-parser-js', versions: ['0.7.29'], reason: 'one' },
+      { name: 'ua-parser-js', versions: ['1.0.0'], reason: 'two' },
+      { name: 'ua-parser-js', reason: 'three' },
+    ])).deny).toHaveLength(3);
+  });
+
+  test('missing or empty deny list raises nothing', () => {
+    expect(loadConfig(makeRepo()).deny).toEqual([]);
+    expect(loadConfig(denyConfig([])).deny).toEqual([]);
+  });
+
+  test('denyUnreadLockfiles accepts fail and note only', () => {
+    expect(loadConfig(denyConfig([], { denyUnreadLockfiles: 'note' })).denyUnreadLockfiles).toBe('note');
+    expect(loadConfig(denyConfig([], { denyUnreadLockfiles: 'fail' })).denyUnreadLockfiles).toBe('fail');
+    expect(loadConfig(makeRepo()).denyUnreadLockfiles).toBeUndefined();
+    for (const value of ['warn', true, 1]) {
+      expect(() => loadConfig(denyConfig([], { denyUnreadLockfiles: value }))).toThrow(
+        expect.objectContaining({ code: 'config-invalid', message: expect.stringMatching(/denyUnreadLockfiles/) })
+      );
+    }
+  });
+
+  test('denyUnreadAcknowledged takes PATH:BLOBID entries on an npm-family lockfile path only', () => {
+    const blob = 'a'.repeat(40);
+    const good = [`test/fixtures/bun/bun.lock:${blob}`, `yarn.lock:${'b'.repeat(64)}`, `apps/web/package-lock.json:${blob}`];
+    expect(loadConfig(denyConfig([], { denyUnreadAcknowledged: good })).denyUnreadAcknowledged).toEqual(good);
+    expect(loadConfig(makeRepo()).denyUnreadAcknowledged).toEqual([]);
+    for (const value of [
+      'yarn.lock',
+      [`yarn.lock`],
+      [`apps/web/package.json:${blob}`],
+      [`../other/yarn.lock:${blob}`],
+      [`/abs/yarn.lock:${blob}`],
+      [`apps\\web\\yarn.lock:${blob}`],
+      [`apps/./web/yarn.lock:${blob}`],
+      [`yarn.lock:${'A'.repeat(40)}`],
+      [`yarn.lock:abc`],
+    ]) {
+      expect(() => loadConfig(denyConfig([], { denyUnreadAcknowledged: value }))).toThrow(
+        expect.objectContaining({ code: 'config-invalid', message: expect.stringMatching(/denyUnreadAcknowledged/) })
+      );
+    }
+  });
+
+  test('a local file deny list replaces the committed one, shallow like every key', () => {
+    const repoRoot = makeRepo({
+      '.dep-guard.json': JSON.stringify({ deny: [{ name: 'event-stream', reason: 'r' }] }),
+      '.dep-guard.local.json': JSON.stringify({ deny: [] }),
+    });
+    expect(loadConfig(repoRoot).deny).toEqual([]);
   });
 });

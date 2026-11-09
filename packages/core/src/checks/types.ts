@@ -1,7 +1,25 @@
 import type { Corpus } from '../corpus.js';
 import type { DependencyDelta } from '../delta.js';
+import type { ParsedLockfile } from '../lockfiles/types.js';
+import type { ParsedManifest } from '../manifest.js';
 import type { PythonIndexRule } from '../python-sources.js';
+import type { PythonLockfile } from '../python-types.js';
+import type { LockfileInventoryEntry, ProjectClassification } from '../state.js';
 import type { Diagnostic, FailOn, Finding } from '../types.js';
+
+// One side of a scan in full: every manifest, every npm and pnpm lockfile
+// (extras and further documents included), every Python lockfile, every
+// file with a lockfile name whether read or not, and which manifests are
+// projects.
+export interface JudgedSide {
+  manifests: readonly ParsedManifest[];
+  lockfiles: readonly ParsedLockfile[];
+  pythonLockfiles: readonly PythonLockfile[];
+  lockfileInventory: readonly LockfileInventoryEntry[];
+  projects?: ProjectClassification;
+  // RepoState.manifestDigests of this side; absent reads as unknown.
+  manifestDigests?: ReadonlyMap<string, string>;
+}
 
 // The resolved user configuration every check reads.
 //
@@ -53,6 +71,32 @@ export interface ResolvedConfig {
   // delta.ts). Read from the comparison side's config only. Optional so a
   // hand-built config in a test need not name it; loadConfig always sets it.
   acknowledgedLockfiles?: string[];
+  // Packages this repository refuses, by name, scope or exact version
+  // (checks/deny.ts). Optional so a hand-built config in a test need not
+  // name it; loadConfig always sets it, to [] when absent. Which side's
+  // list a run applies is decided in scan.ts (docs/configuration.md).
+  deny?: DenyEntry[];
+  // "fail" (the default when absent) or "note": whether a pull-request run
+  // with a non-empty deny list exits 2 when an install lockfile cannot be
+  // read, or a project with declared dependencies has no read lockfile.
+  denyUnreadLockfiles?: 'fail' | 'note';
+  // "PATH:BLOBID" entries, each accepting one exact set of bytes of one
+  // lockfile the deny list cannot read, so that lockfile alone is a note
+  // rather than a could-not-run. Read from the comparison side only (the
+  // trust base, else the --base ref, else HEAD for --staged), never from
+  // the tree being judged. Optional so a hand-built config need not name it.
+  denyUnreadAcknowledged?: string[];
+}
+
+// One deny entry as validated by config.ts. `name` is an exact npm name, an
+// "@scope/*" wildcard, or "pypi:<name>". `versions`, npm only, lists exact
+// versions; absent means every version. `reviewBy` asks for a review on that
+// date and never lifts the ban.
+export interface DenyEntry {
+  name: string;
+  reason: string;
+  versions?: string[];
+  reviewBy?: string;
 }
 
 // Everything a check may read, plus one thing it may write.
@@ -89,6 +133,11 @@ export interface CheckContext {
   // --trust-base run, the judged side's otherwise. Absent on a hand-built
   // context, which then skips no Python name.
   pythonIndex?: PythonIndexRule;
+  // The whole judged side, for the one check that judges every entry rather
+  // than what the change moved: the deny list (checks/deny.ts). Set by
+  // scan.ts from the side under judgment; absent on a hand-built context,
+  // and the deny check then reports nothing.
+  judged?: JudgedSide;
   diagnostics: Diagnostic[];
   // A second write-only sink, alongside `diagnostics`. A check that drops a
   // would-be finding because an `allow` entry covers the package pushes the

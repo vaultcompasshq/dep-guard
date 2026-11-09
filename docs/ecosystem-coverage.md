@@ -78,3 +78,14 @@ that name exists. A `git` or `url` source
 makes the dependency a tamper subject. Even a confirmed exemption covers uv
 only: `pip install .`, `uv build --no-sources` and every consumer of a
 published package resolve the name from PyPI.
+
+The deny list (see [Deny list](deny-list.md)) covers both ecosystems: a
+bare entry is an npm name, and a `pypi:` entry a Python name in PEP 503
+form, matched in every Python manifest and lockfile dep-guard reads and
+against the distribution name a wheel or sdist file name carries. Python
+entries are by name only; a `pypi:` entry takes no `versions`. A Python
+manifest with requirements and no Python lockfile in its directory or above
+counts as an install the list cannot read when the list has a `pypi:` entry
+(`deny-lockfile-unread`, exit 2 on every pull-request run unless
+`denyUnreadLockfiles` is `"note"`), and that includes a `requirements.txt`
+pinned with hashes, which is not read as a lockfile. Go modules are not read.

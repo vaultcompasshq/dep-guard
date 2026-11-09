@@ -1,8 +1,15 @@
+import { createHash } from 'node:crypto';
 import { NPM_LOCKFILE_V1_CODE } from './lockfiles/npm.js';
 import type { ParsedLockfile } from './lockfiles/types.js';
 import type { ParsedManifest } from './manifest.js';
 import type { PythonLockfile } from './python-types.js';
 import { withoutByteOrderMark } from './text.js';
+
+// The digest RepoState.manifestDigests records: the SHA-256 of the text
+// exactly as read, so two sides agree only on identical bytes.
+export function manifestTextDigest(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
 
 // A lockfile whose entries this tool parses, at the root or below it: npm
 // with a "packages" map, or pnpm. Everything else (a v1 npm file, yarn,
@@ -59,6 +66,12 @@ export interface RepoState {
   // or not (see LockfileInventoryEntry). Absent on a state built by hand,
   // which then reads as an empty inventory.
   lockfileInventory?: LockfileInventoryEntry[];
+  // The SHA-256 of each parsed package.json's text on this side, by path:
+  // what a deny-list acknowledgement of an unread lockfile compares with
+  // the comparison side, so a changed installing manifest breaks it.
+  // Absent on a state built by hand, which then reads as every manifest
+  // unknown (and so changed).
+  manifestDigests?: ReadonlyMap<string, string>;
   onlyBuilt: string[];
   // The raw project .npmrc on this side, or null when there is none. Only
   // compared for equality between sides, never parsed from here. Absent on

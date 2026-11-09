@@ -1,0 +1,32 @@
+{
+  "description": "Real-repository baseline for the deny list (issue 137). 16 public repositories at pinned heads: an audit, and the latest lockfile-touching first-parent commits (up to 6 each) judged against their parent the way the Action runs them, with the deny list on a trust-base commit (the parent tree plus .dep-guard.json) passed as both --base and --trust-base. Each point ran the same source build with no list and with the list; the finding diff is denied-package findings only. The npm corpus is dep-guard-core 0.18.2 data/corpus (--corpus-dir). Diff the next run against this file.",
+  "date": "2026-11-08",
+  "depGuard": "feat/137-denylist branch (package version still reads 0.19.0)",
+  "denyList": [
+    "event-stream", "flatmap-stream", "ua-parser-js@0.7.29|0.8.0|1.0.0", "coa@2.0.3|2.0.4|2.1.1|2.1.3|3.0.1|3.1.3",
+    "rc@1.2.9|1.3.9|2.3.9", "colors@1.4.1|1.4.2|1.4.44-liberty-2", "node-ipc@10.1.1|10.1.2|10.1.3",
+    "@ctrl/tinycolor@4.1.1|4.1.2", "request", "pypi:ctx"
+  ],
+  "extraBans": { "vitest-dev/vitest": ["agent-base@7.1.3", "character-entities-legacy@3.0.0"] },
+  "totals": {
+    "points": 72,
+    "deniedFindings": 37,
+    "nonDenyFindingsAdded": 0,
+    "nonDenyFindingsRemoved": 0,
+    "couldNotRun": { "deny-lockfile-unread": 9 },
+    "wallMs": {
+      "audit": { "withoutList": 19023, "withList": 19287 },
+      "walk": { "withoutList": 29506, "withList": 30670 }
+    },
+    "rerunAfterReviewFixes": "rerun after the ignorePaths anchor fix and denyUnreadAcknowledged: every finding count and could-not-run unchanged; the wall times above are from the rerun"
+  },
+  "byRepository": [
+    { "repo": "nestjs/nest", "sha": "95dd6b0edbccb608e92a78cc7cec3e25b62f9a71", "denied": ["event-stream (3.3.5, name-only ban)", "request"], "failOnCriticalExit": 1 },
+    { "repo": "vitest-dev/vitest", "sha": "a57b4d8a320e7ef5fff8e74344553083f41d36b9", "lockfile": "pnpm v9", "denied": ["agent-base@7.1.3", "character-entities-legacy@3.0.0"], "failOnCriticalExit": 1 },
+    { "repo": "OWASP/NodeGoat", "sha": "c5cb68a7084e4ae7dcc60e6a98768720a81841e8", "denied": ["event-stream", "request"], "failOnCriticalExit": 1, "couldNotRun": "3 older walk commits: package-lock.json is lockfileVersion 1, not read" },
+    { "repo": "axios/axios", "sha": "ba98559a7f5a18e531b5762387e5957bd281af3d", "denied": [], "couldNotRun": "6 walk commits: tests/smoke/bun/bun.lock has a package.json beside it" },
+    { "repo": "sindresorhus/got", "sha": "6b5aafc1cd538998728be6f45c65b0f80bae01b2", "denied": ["request (manifest line)"], "failOnCriticalExit": 1, "note": "no lockfile; audit gives deny-lockfile-unread, a pull-request run would exit 2" },
+    { "repo": "backstage/backstage", "sha": "a26e83610ae06cdca69558fb70facc3f1bdfed02", "denied": [], "note": "yarn.lock; audit gives deny-lockfile-unread, a pull-request run would exit 2" },
+    { "repo": "others", "repos": ["diegosouzapw/OmniRoute", "pydantic/pydantic-ai", "microsoft/playwright", "microsoft/TypeScript", "grafana/grafana", "elastic/kibana", "ionic-team/ionic-framework", "mattermost/mattermost", "wikimedia/mediawiki", "nextcloud/server"], "denied": [], "couldNotRun": "none" }
+  ]
+}
