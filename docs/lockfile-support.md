@@ -267,3 +267,18 @@ quiet:
   transitive fact is: no lockfile entry is read at all for it, so nothing
   is ever sent to an online check under the wrong name.
 - `bun.lockb` -- skipped. Undocumented binary format.
+
+The deny list (see [Deny list](deny-list.md)) reads every lockfile above
+that dep-guard reads, whole, on every run: npm entries by key, `name` field,
+tarball name and `link` folder; pnpm entries by key, the entry's own `name`
+field, tarball name and the name-shaped parts of a key no parser splits, at
+every `lockfileVersion` and in every YAML document; and the recorded,
+tarball and pnpm key versions. A lockfile it cannot read (`yarn.lock`,
+`bun.lock`, `bun.lockb`, npm lockfileVersion 1) gets the `lockfile-not-read`
+note with a sentence saying the deny list judged manifest names only. When
+a project installs from such a lockfile, or a project with declared
+dependencies has no lockfile dep-guard reads, a `--base` or `--trust-base`
+run with a non-empty list exits 2 (`deny-lockfile-unread`) unless
+`denyUnreadLockfiles` is `"note"` or, for one unread lockfile, the base's
+`denyUnreadAcknowledged` accepts its exact bytes and every package.json
+that installs from it is unchanged against the base.

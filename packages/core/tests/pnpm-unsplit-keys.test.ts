@@ -194,6 +194,8 @@ describe('pnpm packages keys that do not split into a name and version', () => {
         version: '3.1.0',
         resolvedUrl: `https://codeload.github.com/attacker/is-positive/tar.gz/${SHA}`,
         pnpmSnapshotName: 'is-positive',
+        pnpmNameField: 'is-positive',
+        pnpmRawKey: `github.com/attacker/is-positive/${SHA}`,
       },
     ]);
     expect(result.diagnostics.map((d) => d.code)).not.toContain('pnpm-lockfile-invalid-entry');
@@ -205,7 +207,9 @@ describe('pnpm packages keys that do not split into a name and version', () => {
       'pnpm-lock.yaml',
       lock('6.0', [`  ${key}:`, `    resolution: {type: git, repo: 'https://gitlab.com/attacker/thing.git', commit: ${SHA}}`])
     );
-    expect(result.entries.get(key)).toEqual([{ resolvedUrl: `git+https://gitlab.com/attacker/thing.git#${SHA}` }]);
+    expect(result.entries.get(key)).toEqual([
+      { resolvedUrl: `git+https://gitlab.com/attacker/thing.git#${SHA}`, pnpmRawKey: key },
+    ]);
   });
 
   test('a key with no readable location keeps its skip note and no entry', () => {

@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import type { ResolvedConfig } from './checks/types.js';
-import { withoutByteOrderMark } from './text.js';
+import type { DenyEntry, ResolvedConfig } from './checks/types.js';
+import { isValidPythonName, normalizePypiName } from './python-names.js';
+import { hasControlCharacter, withoutByteOrderMark } from './text.js';
 import { DepGuardError, type FailOn } from './types.js';
 
 // This file owns the on-disk config format and its validation. The
@@ -31,7 +32,16 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set([
   'onlineBudgetMs',
   'onlineUnchecked',
   'acknowledgedLockfiles',
+  'deny',
+  'denyUnreadLockfiles',
+  'denyUnreadAcknowledged',
 ]);
+
+// What a pull-request run with a non-empty deny list does when an install
+// lockfile cannot be read: "fail", the default, is a could-not-run (exit 2);
+// "note" keeps it a diagnostic. The same two values as onlineUnchecked, and
+// for the same reason no CLI flag.
+export const DENY_UNREAD_LOCKFILES_VALUES: ReadonlySet<string> = new Set(['fail', 'note']);
 
 // What a --base or --trust-base run does with a candidate name no online
 // step could check (online/unchecked.ts): "fail", the default, is a
@@ -65,6 +75,26 @@ function isValidLockfileAcknowledgement(entry: string): boolean {
   }
   return (
     ACKNOWLEDGEABLE_LOCKFILE_NAMES.includes(entry.slice(0, separator)) &&
+    BLOB_ID.test(entry.slice(separator + 1))
+  );
+}
+
+// A "denyUnreadAcknowledged" entry: "PATH:BLOBID", split on the LAST colon,
+// where PATH is a "/"-separated repository path with no empty, "." or ".."
+// segment whose file name is one of the lockfile names above, and BLOBID a
+// full lowercase git object id. It accepts one exact set of bytes of one
+// lockfile the deny list cannot read, so changed bytes are a gap again.
+function isValidDenyUnreadAcknowledgement(entry: string): boolean {
+  const separator = entry.lastIndexOf(':');
+  if (separator <= 0) {
+    return false;
+  }
+  const filePath = entry.slice(0, separator);
+  const segments = filePath.split('/');
+  return (
+    !filePath.includes('\\') &&
+    segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..') &&
+    ACKNOWLEDGEABLE_LOCKFILE_NAMES.includes(segments[segments.length - 1]) &&
     BLOB_ID.test(entry.slice(separator + 1))
   );
 }
@@ -144,7 +174,26 @@ function defaultConfig(): ResolvedConfig {
     minAgeDays: DEFAULT_MIN_AGE_DAYS,
     minAgeAllow: [],
     acknowledgedLockfiles: [],
+    deny: [],
+    denyUnreadAcknowledged: [],
   };
+}
+
+function validateDenyUnreadAcknowledged(value: unknown, label: string): string[] {
+  if (!isStringArray(value)) {
+    throw new DepGuardError(`${label}: "denyUnreadAcknowledged" must be an array of strings`, 'config-invalid');
+  }
+  for (const entry of value) {
+    if (!isValidDenyUnreadAcknowledgement(entry)) {
+      throw new DepGuardError(
+        `${label}: "denyUnreadAcknowledged" entry "${entry}" must be "PATH:BLOBID", where PATH is a repository ` +
+          `path to a lockfile (${ACKNOWLEDGEABLE_LOCKFILE_NAMES.join(', ')}) with no empty, "." or ".." part and ` +
+          'BLOBID is a full lowercase git blob id',
+        'config-invalid'
+      );
+    }
+  }
+  return value;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -252,6 +301,173 @@ function validateExtraAliases(value: unknown, label: string): Record<string, str
     }
     result[key] = targets;
   }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// The deny list (issue 137, checks/deny.ts)
+
+const DENY_ENTRY_FIELDS: ReadonlySet<string> = new Set(['name', 'reason', 'versions', 'reviewBy']);
+const DENY_ENTRY_SHAPE = '{ "name": "<package>", "reason": "<why>" }';
+const MAX_DENY_REASON_LENGTH = 300;
+const MAX_NPM_NAME_LENGTH = 214;
+// One npm name segment: the characters npm names are written in. Case is
+// allowed (names from before the lowercase rule still install) and compared
+// case-insensitively at match time.
+const NPM_NAME_SEGMENT = '[A-Za-z0-9._~-]+';
+const DENY_NPM_NAME = new RegExp(`^(?:@${NPM_NAME_SEGMENT}/)?${NPM_NAME_SEGMENT}$`);
+// "@scope/*", the only wildcard, the same form an allow entry takes.
+const DENY_SCOPE_WILDCARD = new RegExp(`^@${NPM_NAME_SEGMENT}/\\*$`);
+export const DENY_PYPI_PREFIX = 'pypi:';
+const CALENDAR_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+// A YYYY-MM-DD string that names a real calendar date: 2027-02-30 and
+// 2027-02-29 are refused, 2028-02-29 is not.
+function isCalendarDate(value: string): boolean {
+  const match = CALENDAR_DATE.exec(value);
+  if (match === null) {
+    return false;
+  }
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+// The deny entry name, checked as written: an exact npm name of at most 214
+// characters, "@scope/*", or "pypi:" and a valid Python project name.
+function isValidDenyName(name: string): boolean {
+  if (name.startsWith(DENY_PYPI_PREFIX)) {
+    const project = name.slice(DENY_PYPI_PREFIX.length);
+    return project.length > 0 && project.trim() === project && isValidPythonName(project);
+  }
+  if (DENY_SCOPE_WILDCARD.test(name)) {
+    return true;
+  }
+  return name.length <= MAX_NPM_NAME_LENGTH && DENY_NPM_NAME.test(name);
+}
+
+/**
+ * The identity of a deny entry: its name in the form names are compared in
+ * (lowercase for npm, "pypi:" plus the PEP 503 form for Python) and its
+ * sorted versions. Two entries with the same key are duplicates, and are
+ * refused, so every entry has its own signal and fingerprint. The same key
+ * is what the comparison-side union and the lift proposals pair entries by.
+ */
+export function denyEntryKey(entry: Pick<DenyEntry, 'name' | 'versions'>): string {
+  return JSON.stringify([normalizedDenyName(entry.name), denyVersionsKey(entry.versions)]);
+}
+
+// A deny entry's name in the form it is compared in.
+export function normalizedDenyName(name: string): string {
+  return name.startsWith(DENY_PYPI_PREFIX)
+    ? `${DENY_PYPI_PREFIX}${normalizePypiName(name.slice(DENY_PYPI_PREFIX.length))}`
+    : name.toLowerCase();
+}
+
+function denyVersionsKey(versions: readonly string[] | undefined): string[] {
+  return versions === undefined ? [] : [...new Set(versions.map((version) => version.trim()))].sort();
+}
+
+/**
+ * The checks a reviewed list entry shares with any other list of the same
+ * kind: a reason a reader can print, and an optional review date. Kept apart
+ * from the deny-specific checks so that issue 87's allow entries, when they
+ * land, use the same field names and the same refusals.
+ */
+function validateReviewedEntry(entry: Record<string, unknown>, where: string): { reason: string; reviewBy?: string } {
+  const { reason, reviewBy } = entry;
+  if (typeof reason !== 'string' || reason.trim().length === 0) {
+    throw new DepGuardError(`${where}: "reason" is required and must be a non-empty string`, 'config-invalid');
+  }
+  const trimmed = reason.trim();
+  if (trimmed.length > MAX_DENY_REASON_LENGTH) {
+    throw new DepGuardError(
+      `${where}: "reason" is ${trimmed.length} characters; at most ${MAX_DENY_REASON_LENGTH} are allowed`,
+      'config-invalid'
+    );
+  }
+  if (hasControlCharacter(trimmed)) {
+    throw new DepGuardError(
+      `${where}: "reason" carries a control, bidi or zero-width character, which a report cannot print safely`,
+      'config-invalid'
+    );
+  }
+  if (reviewBy === undefined) {
+    return { reason: trimmed };
+  }
+  if (typeof reviewBy !== 'string' || !isCalendarDate(reviewBy)) {
+    throw new DepGuardError(`${where}: "reviewBy" must be a real calendar date written YYYY-MM-DD`, 'config-invalid');
+  }
+  return { reason: trimmed, reviewBy };
+}
+
+// Validates the "deny" value. Every refusal is config-invalid with its own
+// message, so a typo fails loudly instead of quietly widening or narrowing
+// a ban.
+function validateDeny(value: unknown, label: string): DenyEntry[] {
+  if (!Array.isArray(value)) {
+    throw new DepGuardError(`${label}: "deny" must be an array of entries shaped ${DENY_ENTRY_SHAPE}`, 'config-invalid');
+  }
+  const result: DenyEntry[] = [];
+  const seen = new Map<string, number>();
+  value.forEach((raw: unknown, index) => {
+    const where = `${label}: "deny" entry ${index + 1}`;
+    if (typeof raw === 'string') {
+      throw new DepGuardError(
+        `${where} is the string "${raw.slice(0, MAX_NPM_NAME_LENGTH)}"; an entry is an object shaped ${DENY_ENTRY_SHAPE}`,
+        'config-invalid'
+      );
+    }
+    if (!isPlainObject(raw)) {
+      throw new DepGuardError(`${where} must be an object shaped ${DENY_ENTRY_SHAPE}`, 'config-invalid');
+    }
+    for (const field of Object.keys(raw)) {
+      if (!DENY_ENTRY_FIELDS.has(field)) {
+        throw new DepGuardError(
+          `${where}: unknown field "${field}"; an entry has name, reason, versions and reviewBy only`,
+          'config-invalid'
+        );
+      }
+    }
+    if (typeof raw.name !== 'string' || !isValidDenyName(raw.name)) {
+      throw new DepGuardError(
+        `${where}: "name" must be an exact npm name, "@scope/*", or "pypi:" and a Python project name`,
+        'config-invalid'
+      );
+    }
+    const name = raw.name;
+    const reviewed = validateReviewedEntry(raw, where);
+    const entry: DenyEntry = { name, reason: reviewed.reason };
+    if (raw.versions !== undefined) {
+      if (name.startsWith(DENY_PYPI_PREFIX)) {
+        throw new DepGuardError(`${where}: "versions" is for npm entries only; a "pypi:" entry bans every version`, 'config-invalid');
+      }
+      if (
+        !Array.isArray(raw.versions) ||
+        raw.versions.length === 0 ||
+        !raw.versions.every((version) => typeof version === 'string' && isExactVersion(version))
+      ) {
+        throw new DepGuardError(
+          `${where}: "versions" must be a non-empty array of exact versions, never a range`,
+          'config-invalid'
+        );
+      }
+      entry.versions = (raw.versions as string[]).map((version) => version.trim());
+    }
+    if (reviewed.reviewBy !== undefined) {
+      entry.reviewBy = reviewed.reviewBy;
+    }
+    const key = denyEntryKey(entry);
+    const earlier = seen.get(key);
+    if (earlier !== undefined) {
+      throw new DepGuardError(
+        `${where} is a duplicate of entry ${earlier} (the same name and the same versions); keep one`,
+        'config-invalid'
+      );
+    }
+    seen.set(key, index + 1);
+    result.push(entry);
+  });
   return result;
 }
 
@@ -390,7 +606,111 @@ function validateSection(raw: Record<string, unknown>, label: string): Partial<R
     result.acknowledgedLockfiles = raw.acknowledgedLockfiles;
   }
 
+  if (raw.deny !== undefined) {
+    result.deny = validateDeny(raw.deny, label);
+  }
+
+  if (raw.denyUnreadLockfiles !== undefined) {
+    if (typeof raw.denyUnreadLockfiles !== 'string' || !DENY_UNREAD_LOCKFILES_VALUES.has(raw.denyUnreadLockfiles)) {
+      throw new DepGuardError(
+        `${label}: "denyUnreadLockfiles" must be one of ${[...DENY_UNREAD_LOCKFILES_VALUES].join(', ')}`,
+        'config-invalid'
+      );
+    }
+    result.denyUnreadLockfiles = raw.denyUnreadLockfiles as 'fail' | 'note';
+  }
+
+  if (raw.denyUnreadAcknowledged !== undefined) {
+    result.denyUnreadAcknowledged = validateDenyUnreadAcknowledged(raw.denyUnreadAcknowledged, label);
+  }
+
   return result;
+}
+
+/**
+ * The deny list and its unread-lockfile setting out of one side's two config
+ * texts, read leniently: for a --staged run, whose comparison side is HEAD.
+ * A HEAD config that does not validate must not stop a commit hook (the
+ * commit that fixes the config would be blocked too), so each file's "deny"
+ * array is read entry by entry, every entry that validates is kept, and
+ * whatever could not be read is returned as a problem for a diagnostic.
+ * The overlay is the same shallow one: a local file that sets "deny"
+ * replaces the committed file's list.
+ */
+export function readDenyLeniently(
+  baseText: string | null,
+  localText: string | null,
+  label: string
+): { deny: DenyEntry[]; denyUnreadLockfiles?: 'fail' | 'note'; denyUnreadAcknowledged: string[]; problems: string[] } {
+  const problems: string[] = [];
+  let deny: DenyEntry[] = [];
+  let unread: 'fail' | 'note' | undefined;
+  // Shallow like every key: a local file that sets it replaces the list.
+  let acknowledged: string[] = [];
+  for (const [text, file] of [
+    [baseText, CONFIG_FILE],
+    [localText, LOCAL_CONFIG_FILE],
+  ] as const) {
+    if (text === null) {
+      continue;
+    }
+    const where = `${label}:${file}`;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = parseJsonConfig(text, where);
+    } catch (error) {
+      problems.push((error as Error).message);
+      continue;
+    }
+    if (parsed.deny !== undefined) {
+      if (!Array.isArray(parsed.deny)) {
+        problems.push(`${where}: "deny" is not an array`);
+      } else {
+        const kept: DenyEntry[] = [];
+        const keys = new Set<string>();
+        for (const raw of parsed.deny as unknown[]) {
+          try {
+            const [entry] = validateDeny([raw], where);
+            const key = denyEntryKey(entry);
+            if (!keys.has(key)) {
+              keys.add(key);
+              kept.push(entry);
+            }
+          } catch (error) {
+            problems.push((error as Error).message);
+          }
+        }
+        deny = kept;
+      }
+    }
+    if (parsed.denyUnreadLockfiles !== undefined) {
+      if (typeof parsed.denyUnreadLockfiles === 'string' && DENY_UNREAD_LOCKFILES_VALUES.has(parsed.denyUnreadLockfiles)) {
+        unread = parsed.denyUnreadLockfiles as 'fail' | 'note';
+      } else {
+        problems.push(`${where}: "denyUnreadLockfiles" is not one of ${[...DENY_UNREAD_LOCKFILES_VALUES].join(', ')}`);
+      }
+    }
+    if (parsed.denyUnreadAcknowledged !== undefined) {
+      if (!isStringArray(parsed.denyUnreadAcknowledged)) {
+        problems.push(`${where}: "denyUnreadAcknowledged" is not an array of strings`);
+        acknowledged = [];
+      } else {
+        acknowledged = parsed.denyUnreadAcknowledged.filter((entry) => {
+          const valid = isValidDenyUnreadAcknowledgement(entry);
+          if (!valid) {
+            problems.push(`${where}: "denyUnreadAcknowledged" entry "${entry}" is not "PATH:BLOBID" on a lockfile path`);
+          }
+          return valid;
+        });
+      }
+    }
+  }
+  return {
+    deny,
+    ...(unread === undefined ? {} : { denyUnreadLockfiles: unread }),
+    denyUnreadAcknowledged: acknowledged,
+    problems,
+  };
 }
 
 // Reads .dep-guard.json, then overlays .dep-guard.local.json on top of it.

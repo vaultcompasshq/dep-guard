@@ -101,6 +101,27 @@ export interface LockEntry {
   // one consumer, lockfiles/pnpm.ts#resolvePnpmRelativeTarballs, for that choice;
   // never identity and never a name any check judges.
   pnpmSnapshotName?: string;
+  // pnpm only, every lockfile version: the entry's own "name" field,
+  // verbatim. Read by exactly one consumer, checks/deny.ts, as one more name
+  // a deny entry matches; never identity, and never what pnpm fetches.
+  pnpmNameField?: string;
+  // pnpm only: the version in the packages-map key, when the entry records a
+  // different "version". pnpm 8 and 9 fetch the key's version for an entry
+  // with no tarball. Read by exactly one consumer, checks/deny.ts.
+  keyVersion?: string;
+  // pnpm only: the packages-map key as written, for an entry whose key does
+  // not split into a name and version (a pre-v9 git or tarball key) and is
+  // read from its resolution. Read by exactly one consumer, checks/deny.ts,
+  // which matches the name-shaped parts of the key.
+  pnpmRawKey?: string;
+}
+
+// A pnpm packages entry the parser skipped with pnpm-lockfile-invalid-entry,
+// as written: its key, and its own name and version fields when it has them.
+export interface PnpmSkippedEntry {
+  key: string;
+  name?: string;
+  version?: string;
 }
 
 export type LockfileFormat = 'npm' | 'pnpm' | 'yarn' | 'bun' | 'none';
@@ -225,4 +246,7 @@ export interface ParsedLockfile {
   // git-source.ts, loadLockfiles): present, with no entries, and never a
   // read lockfile.
   notRead?: true;
+  // pnpm only: every packages entry the parser skipped, as written. Read by
+  // exactly one consumer, checks/deny.ts.
+  skippedEntries?: PnpmSkippedEntry[];
 }

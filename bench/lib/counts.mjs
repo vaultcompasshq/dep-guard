@@ -33,6 +33,7 @@ export const RULE_IDS = Object.freeze([
   'dependency-confusion',
   'registered-squat',
   'publish-age',
+  'denied-package',
 ]);
 
 export const LOCKFILE_FORMATS = Object.freeze(['npm', 'pnpm', 'yarn', 'bun', 'none']);
@@ -50,6 +51,17 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   'delta-ambiguous-lock-entry',
   'delta-new-lock-entries',
   'delta-unknown-earlier-entry',
+  'deny-entries-unread',
+  'deny-entry-kept-from-comparison-side',
+  'deny-head-config-invalid',
+  'deny-kept-over-baseline',
+  'deny-lockfile-acknowledged',
+  // Also the run.couldNotRun code of a pull-request run with a deny list
+  // and an install it could not read (0.20.0).
+  'deny-lockfile-unread',
+  'deny-nothing-to-judge',
+  'deny-overrides-allow',
+  'deny-review-overdue',
   'ignore-path-dropped',
   'ignore-path-project-kept',
   'ignore-path-unmatched',

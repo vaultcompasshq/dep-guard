@@ -774,3 +774,65 @@ describe('parsePnpmLockfile: multi-document lockfiles (pnpm 12 self-management)'
     expect(result.diagnostics.filter((d) => d.code === 'pnpm-multi-document-lockfile')).toEqual([]);
   });
 });
+
+describe('the names and versions a pnpm entry writes, kept for the deny list', () => {
+  const v9 = (packages: string[]): string =>
+    ['lockfileVersion: \'9.0\'', 'importers:', '  .: {}', 'packages:', ...packages, ''].join('\n');
+
+  test('a key version that differs from the recorded version is kept beside it', () => {
+    const result = parsePnpmLockfile(
+      PATH,
+      v9(['  ua-parser-js@0.7.29:', '    version: 0.7.30', '    resolution: {integrity: sha512-x}'])
+    );
+    expect(result.entries.get('ua-parser-js')).toEqual([
+      { version: '0.7.30', keyVersion: '0.7.29', integrity: 'sha512-x' },
+    ]);
+  });
+
+  test('a matching key version adds nothing', () => {
+    const result = parsePnpmLockfile(PATH, v9(['  ms@2.1.3:', '    resolution: {integrity: sha512-x}']));
+    expect(result.entries.get('ms')).toEqual([{ version: '2.1.3', integrity: 'sha512-x' }]);
+  });
+
+  test('the snapshot name field is kept at lockfile v9 too, apart from the pre-v9 registry pick', () => {
+    const result = parsePnpmLockfile(
+      PATH,
+      v9(['  safe-name@1.0.0:', '    name: event-stream', '    resolution: {integrity: sha512-x}'])
+    );
+    expect(result.entries.get('safe-name')).toEqual([
+      { version: '1.0.0', integrity: 'sha512-x', pnpmNameField: 'event-stream' },
+    ]);
+  });
+
+  test('two entries that differ only in a name field or a key version are both kept', () => {
+    const result = parsePnpmLockfile(
+      PATH,
+      v9([
+        '  a@1.0.0:',
+        '    resolution: {integrity: sha512-x}',
+        '  /a@1.0.0:',
+        '    name: event-stream',
+        '    resolution: {integrity: sha512-x}',
+      ])
+    );
+    expect(result.entries.get('a')).toHaveLength(2);
+  });
+
+  test('a skipped key is recorded as written, with its name and version fields', () => {
+    const key = 'github.com/kevva/is-positive/97edff6f525f192a3f83cea1944765f769ae2678';
+    const result = parsePnpmLockfile(
+      PATH,
+      [
+        'lockfileVersion: \'6.0\'',
+        'packages:',
+        `  ${key}:`,
+        '    name: event-stream',
+        '    version: 3.3.6',
+        '    resolution: {integrity: sha512-x}',
+        '  /bad@1.0.0: 7',
+        '',
+      ].join('\n')
+    );
+    expect(result.skippedEntries).toEqual([{ key, name: 'event-stream', version: '3.3.6' }, { key: '/bad@1.0.0' }]);
+  });
+});

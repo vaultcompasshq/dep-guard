@@ -441,8 +441,9 @@ export function registryHostsOf(
 
 // The path each .npmrc-named registry is mounted under, per host, for a
 // registry that serves its tarballs below a path ("/api/npm/remote/"). The
-// tarball-name rule strips it before reading a name out of the path.
-function registryBasePathsOf(
+// tarball-name rule strips it before reading a name out of the path, and so
+// does the deny list (checks/deny.ts).
+export function registryBasePathsOf(
   pins: Map<string, string>,
   defaultRegistry: string | null | undefined
 ): Map<string, string[]> {

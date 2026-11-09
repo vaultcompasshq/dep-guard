@@ -1432,4 +1432,53 @@ describe('scan(): run.online summary', () => {
       expect(result.run.online).toMatchObject({ lookupsAttempted: 1, cacheHits: 0 });
     });
   });
+
+  test('76 an online could-not-run holds the run and the deny gap is still said, as a diagnostic', async () => {
+    const dir = initRepo();
+    writeFileSync(path.join(dir, '.dep-guard.json'), JSON.stringify({ deny: [{ name: 'event-stream', reason: 'refused here' }] }));
+    commitManifest(dir, {});
+    // No lockfile at all: a project with declared dependencies the deny
+    // list cannot judge, on a run the online step also cannot finish.
+    commitManifest(dir, { raect: '^1.0.0' });
+    fetchWeeklyDownloadsMock.mockRejectedValue(new Error('socket hang up'));
+    const result = await scan({ repoRoot: dir, mode: { kind: 'base', ref: 'HEAD~1' }, corpusDir: FIXTURE_CORPUS, online: true });
+    expect(result.exitCode).toBe(2);
+    expect(result.run.couldNotRun?.code).toBe('online-names-unchecked');
+    const gap = result.run.diagnostics.filter((d) => d.code === 'deny-lockfile-unread');
+    expect(gap).toHaveLength(1);
+    expect(gap[0].message).toContain('package.json');
+  });
+
+  test('69 online enrichment leaves denied-package untouched', async () => {
+    const dir = initRepo();
+    writeFileSync(
+      path.join(dir, '.dep-guard.json'),
+      JSON.stringify({ deny: [{ name: 'some-brand-new-thing', reason: 'refused here' }] })
+    );
+    commitManifest(dir, {});
+    commitManifestWithLock(dir, { 'some-brand-new-thing': '1.0.0' });
+    const offline = await scan({ repoRoot: dir, mode: { kind: 'base', ref: 'HEAD~1' }, corpusDir: FIXTURE_CORPUS });
+
+    fetchWeeklyDownloadsMock.mockResolvedValue({ counts: new Map([['some-brand-new-thing', 9_000_000]]), noRecord: new Set() });
+    fetchPackumentMock.mockResolvedValue({
+      createdAt: '2015-01-01T00:00:00.000Z',
+      latestVersion: '1.0.0',
+      latestPublishedAt: '2015-01-01T00:00:00.000Z',
+      deprecated: false,
+      unpublished: false,
+      securityHolder: false,
+      versionTimes: { '1.0.0': '2015-01-01T00:00:00.000Z' },
+    });
+    const online = await scan({
+      repoRoot: dir,
+      mode: { kind: 'base', ref: 'HEAD~1' },
+      corpusDir: FIXTURE_CORPUS,
+      online: true,
+    });
+    const deniedOf = (result: Awaited<ReturnType<typeof ScanFn>>): unknown[] =>
+      result.findings.filter((f) => f.ruleId === 'denied-package');
+    expect(deniedOf(offline)).toHaveLength(1);
+    expect(deniedOf(online)).toEqual(deniedOf(offline));
+    expect(online.exitCode).toBe(1);
+  });
 });

@@ -28,6 +28,7 @@ import type { PythonLockfile, PythonManifestInfo } from './python-types.js';
 import {
   EMPTY_PROJECTS,
   isReadLockfile,
+  manifestTextDigest,
   parseNpmrcDefaultRegistry,
   parseNpmrcPins,
   projectReasonKey,
@@ -3722,11 +3723,24 @@ async function loadState(
     diagnostics
   );
 
+  // Read back through the caching source, so each text was already read
+  // for parsing and costs nothing more.
+  const manifestDigests = new Map<string, string>();
+  for (const manifest of manifests) {
+    if (manifest.python === undefined) {
+      const text = await source.read(manifest.path);
+      if (text !== null) {
+        manifestDigests.set(manifest.path, manifestTextDigest(text));
+      }
+    }
+  }
+
   const state: RepoState = {
     manifests,
     lockfile,
     extraLockfiles,
     lockfileInventory,
+    manifestDigests,
     // pnpm honours the workspace-level allowlist and every manifest's own
     // pnpm block together, and computeDelta reads only this merged list,
     // so the merge has to happen here rather than in the install-script

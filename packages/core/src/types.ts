@@ -14,7 +14,8 @@ export type RuleId =
   | 'version-hygiene'
   | 'dependency-confusion'
   | 'registered-squat'
-  | 'publish-age';
+  | 'publish-age'
+  | 'denied-package';
 
 export interface Finding {
   ruleId: RuleId;

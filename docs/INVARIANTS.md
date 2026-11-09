@@ -1702,8 +1702,10 @@ not a finding, because inventing a finding for a package the engine cannot
 name is how a gate becomes noise people learn to skip.
 
 One exit is not a finding and not a diagnostic either (0.16.0, audit B2):
-`run.couldNotRun`, today only `online-names-unchecked`, a `--base` or
-`--trust-base` run that left a candidate name unchecked online. The run
+`run.couldNotRun`: `online-names-unchecked`, a `--base` or `--trust-base`
+run that left a candidate name unchecked online, and `deny-lockfile-unread`
+(0.20.0), a `--base` or `--trust-base` run with a deny list and an install
+it could not read (see the deny list section below). The run
 scanned, the report is complete, and `exitCode` is 2. It is a separate
 field precisely so that this section stays true of every diagnostic,
 including the `online-deadline-exceeded` and `online-check-unreachable`
@@ -5497,3 +5499,148 @@ pnpm git key replaced, and a second git entry of the same name from another
 repository in v6 and v9. Pinned by the `describe` block `a git entry from
 another repository than every earlier entry of its name` in
 `packages/core/tests/pnpm-unsplit-keys.test.ts`.
+
+## A deny list judges the whole tree, and nothing the head writes clears it (0.20.0)
+
+The `deny` config key (issue 137) is the one rule that judges every entry on
+the judged side rather than what the change moved. `denyFindings` in
+`checks/deny.ts` reads `CheckContext.judged`, which `judgedSideOf` in
+`scan.ts` builds from the whole side under judgment (`lockfilesOf` gives every
+npm and pnpm lockfile, extras and further pnpm documents included), and reads
+`ctx.delta` only to set `details.kind`. A ban added on the base branch
+therefore fails every pull request until the package is gone, in audit,
+`--base`, `--staged`, `--trust-base` and `check`. Each claim below was checked
+against a mutation that the cited test kills.
+
+- **Identity is a union, and it fails closed.** An entry matches when any
+  name in a package's identity set matches: the lockfile key; the npm `name`
+  field; the pnpm entry's own `name` field at every lockfile version
+  (`LockEntry.pnpmNameField`, kept apart from `pnpmSnapshotName`, which picks
+  a registry and is never matched); the name-shaped parts of a pnpm key no
+  parser splits (`LockEntry.pnpmRawKey`, and `ParsedLockfile.skippedEntries`
+  for an entry the parser skipped); the tarball name, read by
+  `registryTarballIdentity` with the `.npmrc` base paths
+  (`registryBasePathsOf`), and again from the fully percent-decoded,
+  lower-cased path (`tarballFacts`; `registryTarballPackageName` is not read,
+  since on any name a deny entry can match it gives nothing the decoded
+  read does not); npm `link`
+  entries (`workspaceLinks`); every manifest line under its key and its alias
+  target, and a URL specifier under its tarball name; and Python names under
+  PEP 503, including the name a wheel or sdist file name carries
+  (`archiveDistributionName`). A forged name can only add a name to the set.
+  Alias edges and `LockEntry.lookupName` are not in it: `recordAliasEdges`
+  keys edges by dependency name across the whole lockfile, so an edge's target
+  lands on every same-named entry (measured in mattermost: an edge asking for
+  `@redocly/ajv` under `ajv` attached to 4 real ajv entries), and an alias that
+  really installs its target already carries the target as its name field or
+  tarball name (0 of 59 bench edge keys were the only identity of such an
+  entry). Pinned by the `describe` blocks `identity: every name an entry
+  carries is matched` and `identity: Python` in
+  `packages/core/tests/check-deny.test.ts`, tests `18 an alias edge alone does
+  not match (ajv shape)` and `26b a pnpm pre-v9 git key the parser carries
+  from its resolution, with no name field, matches on its key segment`
+  among them.
+- **A pnpm relative tarball is resolved before the deny list reads it.**
+  `resolvePnpmRelativeTarballs` runs in `loadState` (git-source.ts) over
+  every lockfile of the side before any rule, so the deny list reads the URL
+  pnpm fetches. Pinned by test `R1 a
+  pnpm relative tarball is resolved against the registry before the deny list
+  reads it`.
+- **The version set is a union too.** A versioned entry matches when any of
+  the recorded version, the tarball file-name version, or the pnpm key
+  version (`LockEntry.keyVersion`, set when the key and the recorded version
+  differ) is listed, build metadata stripped on both sides, a prerelease only
+  when listed exactly. pnpm 8.15.9 and 9.15.9 build the fetch URL from the
+  key's version and 10.29.3 from the snapshot version (`getTarball` in
+  `pkgSnapshotToResolution`, read at each tag), so the set holds what each of
+  them fetches. When no version backs what installs, the match is by name
+  alone with `versionUnread`: no readable version, an unread location, a git,
+  file or url source, a host the project does not name, or a registry tarball
+  whose file name carries no version (`lockEntryVersions`). Pinned by the
+  `describe` block `versions`, test `39 a pnpm key version differing from the
+  snapshot version: either one listed matches (0.7.29)` among them.
+- **Where the list comes from.** On a `--trust-base` run, the trust base's
+  list only (`loadTrustedControls`); `describeDenyChange` in `trust-base.ts`
+  names a head lift and counts a head addition, and names a
+  `denyUnreadAcknowledged` entry the head adds. On `--base` without a trust
+  base, `applyComparisonDenyList` in `scan.ts` applies the union of the base
+  ref's list (`loadConfigAtRef`, read on every such run) and the working
+  tree's; on `--staged`, the union of HEAD's list, read leniently by
+  `readDenyLeniently` with a `deny-head-config-invalid` diagnostic, and the
+  working tree's. In the union the comparison side's entry wins wholesale
+  (`unionDenyLists`), and `deny-entry-kept-from-comparison-side` names what
+  the judged tree dropped. `denyUnreadLockfiles` takes the stricter side
+  (`stricterDenyUnread`). Pinned by the `describe` block `which list a run
+  applies, in each mode`.
+- **ignorePaths drops a deny finding only where nothing installs, on either
+  side.** `applyPathFilters` keeps a deny finding under an ignorePaths entry
+  when its anchor is a project on the judged side or on the reference side,
+  or when the project beside the lockfile the entry lives in is
+  (`anchorOf(lockfilePath)`), with `ignoreOverride.position` "a denied
+  package on an installed path"; it never takes the general path's excuse
+  for a project the reference already installs. A lockfile entry is anchored
+  only on a declaring manifest the judged side makes a project
+  (`manifestsByLockfile` in `checks/deny.ts`), so a nested package.json no
+  rule makes a project, a test fixture say, cannot take a root lockfile's
+  entry onto an ignored path. Pinned by tests `54 ignorePaths on a fixture
+  nothing installs on either side drops the finding`, `55 ignorePaths on a
+  path the change makes a project keeps it`, `56 ignorePaths on a project the
+  base already installs keeps it`, `56b ignorePaths on a path only the
+  reference side installs keeps it`, `56c a pnpm v9 transitive ban stays when
+  an ignored non-project fixture declares the name`, `56d an npm nested
+  transitive ban stays when an ignored non-project fixture declares the name`
+  and `56f the filter keeps a deny finding on a non-project anchor when its
+  lockfile has a project beside it`.
+- **The baseline and allow never clear it.** `applyPathFilters` skips the
+  baseline test for `denied-package` and counts what it would have matched in
+  `deny-kept-over-baseline`; `checks/deny.ts` never calls `allowClears`, and
+  `deny-overrides-allow` names a package both lists cover. Pinned by test `53
+  allow and a baseline holding the fingerprint each leave the finding, from
+  base and head`.
+- **reviewBy fails closed.** A passed `reviewBy` keeps the ban, adds a
+  sentence to the message, sets `details.reviewOverdue`, and raises
+  `deny-review-overdue` on every run, with or without a match. The clock
+  never moves an exit code. Pinned by test `58 a passed reviewBy still blocks
+  and raises deny-review-overdue, also with no match`.
+- **An install the list cannot read is a could-not-run on a pull-request
+  run.** `denyCoverage` lists unread lockfiles a project installs from (one
+  with a project manifest beside it, or the nearest lockfile directory of a
+  project on either side) and projects with declared dependencies and no
+  lockfile dep-guard reads; npm-family gaps count only when the list has an
+  npm entry, and Python gaps only when it has a `pypi:` entry.
+  `settleDenyCoverage` in `scan.ts` makes that `run.couldNotRun`
+  `deny-lockfile-unread` (exit 2) on a `--base` or `--trust-base` run unless
+  `denyUnreadLockfiles` is "note", and a diagnostic otherwise; when the online
+  could-not-run already holds the run, the deny one is a diagnostic (test `76
+  an online could-not-run holds the run and the deny gap is still said, as a
+  diagnostic` in `packages/core/tests/scan-online.test.ts`). An unread
+  install lockfile whose `PATH:BLOBID` the comparison side's
+  `denyUnreadAcknowledged` lists is left out of the gap and named in
+  `deny-lockfile-acknowledged` on every run; the judged tree's own entries
+  never count (`applyComparisonDenyList`), a null blob id is never accepted,
+  and changed lockfile bytes are a gap again. The acknowledgement also holds
+  only while every package.json project that installs from that lockfile
+  (`installersOn` in `denyCoverage`, by nearest lockfile directory) is the
+  same set of paths on the judged and the reference side with the same
+  SHA-256 of its text (`RepoState.manifestDigests` against the file read at
+  the comparison ref, `brokenAcknowledgement` in `scan.ts`); a changed,
+  added or removed installing manifest is a gap again, named in the
+  message. Pinned by tests `77 an acknowledgement breaks when the
+  package.json beside the lockfile changes`, `78 an acknowledgement of a
+  root yarn.lock breaks when a workspace member is added` and `79 an
+  acknowledgement holds when only an unrelated file changes, in every
+  pull-request mode`. A tree with nothing that can install
+  raises `deny-nothing-to-judge` and passes. Pinned by the `describe` block
+  `lockfiles the deny list cannot read`.
+- **Fingerprints.** One finding per entry, package and install root; the
+  signal is `denySignal`, and duplicates are refused at load, so no two
+  entries share a fingerprint. Pinned by tests `67 fingerprint unchanged
+  across a version bump and a hoisting move` and `68 two entries for one name
+  with different versions give distinct fingerprints`.
+
+What this does not establish: every name and version above is text the
+change's author writes. The tarball-identity and source rules back npm
+entries with a URL; nothing backs a pnpm entry with no tarball beyond its
+integrity hash, nor a Python lockfile's names. dep-guard reads files and does
+not run at install time. docs/deny-list.md, "What the deny list cannot see",
+has the limits per format.

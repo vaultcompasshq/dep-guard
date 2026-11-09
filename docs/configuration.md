@@ -16,7 +16,9 @@
   "minAgeAllow": ["some-package@1.2.3"],
   "onlineBudgetMs": 20000,
   "onlineUnchecked": "fail",
-  "acknowledgedLockfiles": ["yarn.lock:3b18e512dba79e4c8300dd08aeb37f8e728b8dad"]
+  "acknowledgedLockfiles": ["yarn.lock:3b18e512dba79e4c8300dd08aeb37f8e728b8dad"],
+  "deny": [{ "name": "event-stream", "reason": "compromised in 2018" }],
+  "denyUnreadLockfiles": "fail"
 }
 ```
 
@@ -91,6 +93,23 @@ so in the `lockfile-downgrade-acknowledged` diagnostic. On a staged scan
 first, in a commit of their own. A lockfile path that is a symlink has no
 identity to acknowledge. dep-guard 0.10.0 and earlier refuse a config that
 contains this key, so it needs 0.10.1 or later.
+
+`deny` lists packages this repository refuses, by name, scope or exact
+version, each with a reason, and `denyUnreadLockfiles` decides whether a
+pull-request run with a non-empty list exits 2 when it cannot read what a
+project installs. `denyUnreadAcknowledged` lists `PATH:BLOBID` entries, each
+accepting the exact bytes of one unread lockfile so that file alone no
+longer exits 2 while every package.json that installs from it is unchanged
+against the comparison side; it is read from the comparison side only, like
+`acknowledgedLockfiles`, and is a separate key because it names any
+lockfile path, not only a root one, and affects the deny list only. Unlike every other key, the deny list judges the whole
+tree on every run, and nothing a change writes clears a deny finding:
+`allow` and the baseline never do, and `ignorePaths` does only where nothing
+installs. Which side's list a run applies differs by mode: a `--base` or
+`--staged` run applies the union of the comparison side's list and the
+working tree's, so a `--base` run reads the base ref's config on every run.
+See [Deny list](deny-list.md) for the entry shape, what is matched, and what
+the list cannot see.
 
 Every key here, the baseline file beside it, and the scope pins in
 `.npmrc`, are **control inputs**: they decide what dep-guard reports rather

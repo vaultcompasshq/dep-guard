@@ -124,6 +124,30 @@ see below):
 - **Dependency confusion**: a scope pinned to a private registry that
   resolves from the public one, and internal names arriving from outside.
 
+Plus one rule you configure: a **deny list** (`deny` in `.dep-guard.json`)
+of packages this repository refuses, by exact name, by `@scope/*`, or by
+exact version, each with a reason. Unlike the six rules above it judges the
+whole tree on every run, not only what a change adds: every manifest line
+and every npm and pnpm lockfile entry, against every name and version the
+lockfile records for what installs (key, name field, tarball name, and for
+pnpm the key's version). A match is a critical `denied-package` finding. On
+a pull request the list comes from the base branch, `allow` and the
+baseline never clear it, and `ignorePaths` clears it only where nothing
+installs. A pull-request run that cannot read what a project installs exits
+2 on every pull request, a docs-only one included: a project on `yarn.lock`,
+`bun.lock` or `bun.lockb` (a smoke-test directory counts), on an npm
+lockfileVersion 1 file, with declared dependencies and no lockfile at all (a
+library, say), or, with a `pypi:` entry, a Python project with only a
+`requirements.txt`, even a pinned and hashed one. The ways out go on the
+base branch: accept one unread lockfile's exact bytes with
+`denyUnreadAcknowledged` (it holds only while every package.json that
+installs from that lockfile is unchanged), or every gap with `"denyUnreadLockfiles": "note"`
+(see [which repositories exit
+2](docs/deny-list.md#which-repositories-exit-2-on-every-pull-request)). A deny
+gate is a root scan. It matches names the files write, so read [what the
+deny list cannot see](docs/deny-list.md#what-the-deny-list-cannot-see)
+before relying on it.
+
 Findings carry a severity and a stable fingerprint. A fingerprint survives
 version bumps and corpus refreshes, so a baseline you accept today keeps
 working tomorrow.

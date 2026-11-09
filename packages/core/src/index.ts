@@ -60,5 +60,9 @@ export type { ResolvedConfig } from './config.js';
 // scripts/tests/core-package-files.test.mjs's exports-map assertions
 // together with any change to package.json's own "exports" field.
 export { isBlocking } from './gate.js';
+// The one definition of the characters a report strips and a deny reason
+// may not carry, for the CLI's text renderer. Widening "exports" this way
+// is backward compatible; see the note at the top of this file.
+export { sanitizeText } from './text.js';
 export { DepGuardError } from './types.js';
 export type { Diagnostic, FailOn, Finding, RuleId, Severity } from './types.js';

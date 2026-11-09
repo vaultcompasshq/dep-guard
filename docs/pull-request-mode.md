@@ -84,6 +84,30 @@ request that replaces the link with a regular file: the base then
 contributes no declarations for that file, so every name in it is looked up,
 and `python-index-unread-comparison-side` says so.
 
+The deny list (see [Deny list](deny-list.md)) is a control input too, read
+in the reverse direction of `allow`: a ban the head removes still applies
+and is NAMED in the config line (`proposed: lift deny event-stream`, or
+`proposed: lift deny ua-parser-js@0.7.30` for one dropped version), and a ban
+the head adds is COUNTED (`1 deny entry added`) and does not apply until it
+is merged. A case-only rename of an npm name is not a lift, and a reworded
+reason or review date reads `deny reasons changed`. Without `--trust-base` a
+change still cannot lift its own ban: a `--base` run applies the union of
+the `--base` ref's list and the working tree's, and a `--staged` run the
+union of HEAD's and the working tree's (`applyComparisonDenyList` in
+`scan.ts`). So under conductor, where the preview of the proposed rules
+withholds `--trust-base`, a head addition shows in the preview and a head
+lift does not take effect even there. Because the `--base` ref's config is
+read on every `--base` run, a base config that does not validate is
+`config-invalid` (exit 2) on a plain `--base` run, with or without a deny
+list. A pull-request run with a non-empty list that cannot read what a
+project installs exits 2 with `run.couldNotRun` `deny-lockfile-unread`
+unless the trust base sets `"denyUnreadLockfiles": "note"`, or its
+`denyUnreadAcknowledged` accepts that unread lockfile's exact bytes and
+no package.json that installs from it changed, appeared or went away
+against the trust base. An
+acknowledgement only the head adds is named in the proposals and does not
+count.
+
 A control input the head carries and the base does not reads `config added
 in this pull request`, and the run uses the defaults rather than the head's
 proposal. The allow counter keeps reporting what the *base* allow list
