@@ -41,6 +41,11 @@ export interface DepChange {
   bundled?: true;
   before?: LockEntry;
   after?: LockEntry;
+  // The specifier on the comparison side, when the line was already there.
+  // Absent when the line is new. `specifier` is the side under judgment.
+  // version-hygiene uses this to tell a spec that itself moved from a spec
+  // whose resolution moved.
+  previousSpecifier?: string;
 }
 
 // One resolved lockfile entry that is not in the before lockfile in the
@@ -1626,6 +1631,7 @@ export function computeDelta(
         ...(manifest.python === undefined ? {} : { python: true as const }),
         ...(manifest.python !== undefined && dep.pipGrammar === true ? { pipGrammar: true as const } : {}),
         ...(manifest.python !== undefined && dep.gitTable !== undefined ? { gitTable: dep.gitTable } : {}),
+        ...(previous === undefined ? {} : { previousSpecifier: previous.specifier }),
         before: beforeSelection.entry,
         after: afterSelection.entry,
       });

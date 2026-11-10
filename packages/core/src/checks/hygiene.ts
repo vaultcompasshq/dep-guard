@@ -102,6 +102,22 @@ const SEVERITY_RANK: Readonly<Record<Severity, number>> = {
   low: 1,
 };
 
+function hygieneMessage(change: DepChange): string {
+  const shown = change.specifier === '' ? '(empty)' : change.specifier;
+  const base = `"${change.registryName}" is specified as "${shown}", which pins no version at all.`;
+  const specHeld = change.previousSpecifier !== undefined && change.previousSpecifier === change.specifier;
+  if (!specHeld || change.before === undefined || change.after === undefined) {
+    return base;
+  }
+  const file = change.lockfilePath ?? 'the lockfile';
+  const beforeVersion = change.before.version;
+  const afterVersion = change.after.version;
+  if (beforeVersion !== undefined && afterVersion !== undefined && beforeVersion !== afterVersion) {
+    return `${base} The spec in ${change.manifestPath} did not change; ${file} resolved it from ${beforeVersion} to ${afterVersion}.`;
+  }
+  return `${base} The spec in ${change.manifestPath} did not change; ${file} resolved it to different bytes.`;
+}
+
 function rangeToJudge(change: DepChange): string | null {
   if (change.protocol === 'registry') {
     return change.specifier;
@@ -163,12 +179,11 @@ export const hygieneCheck: Check = (ctx) => {
     }
     seen.set(key, findings.length);
 
-    const shown = change.specifier === '' ? '(empty)' : change.specifier;
     findings.push({
       ruleId: 'version-hygiene',
       severity,
       packageName: change.registryName,
-      message: `"${change.registryName}" is specified as "${shown}", which pins no version at all.`,
+      message: hygieneMessage(change),
       manifestPath: change.manifestPath,
       // depType is here because the severity is decided by it, and without
       // it a reader cannot tell why one wildcard reported low and another

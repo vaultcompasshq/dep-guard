@@ -16,6 +16,7 @@ GitHub release notes, which are generated from the commit history.
 
 ### Changed
 
+- A version-hygiene finding whose spec did not move now says so, and names the lockfile resolution that did move (from one version to the other, or to different bytes). The finding still blocks. A spec that itself became `*`, `latest` or empty keeps the original sentence.
 - The CI conductor action pin and the @vaultcompass/conductor devDependency move to 0.18.1, and the CI gate pin and the gate devDependencies move to dep-guard 0.20.0, vault-guard 1.13.3 and intent-guard 1.10.6, the versions conductor 0.18.1 expects.
 
 ## [0.20.0] - 2026-11-09

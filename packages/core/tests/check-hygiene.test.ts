@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { hygieneCheck } from '../src/checks/hygiene.js';
+import { fingerprintFinding } from '../src/fingerprint.js';
 import { parseManifest } from '../src/manifest.js';
 import type { CheckContext, ResolvedConfig } from '../src/checks/types.js';
 import type { Corpus } from '../src/corpus.js';
@@ -39,6 +40,8 @@ function makeChange(overrides: Partial<DepChange> & { name: string }): DepChange
     manifestPath: overrides.manifestPath ?? 'package.json',
     before: overrides.before,
     after: overrides.after,
+    ...(overrides.lockfilePath === undefined ? {} : { lockfilePath: overrides.lockfilePath }),
+    ...(overrides.previousSpecifier === undefined ? {} : { previousSpecifier: overrides.previousSpecifier }),
   };
 }
 
@@ -91,6 +94,76 @@ describe('hygieneCheck: flagged specifiers', () => {
   test('a changed dependency with an ordinary bumped range is silent', () => {
     const changes = [makeChange({ name: 'left-pad', kind: 'changed', specifier: '^1.2.0' })];
     expect(hygieneCheck(makeContext(changes))).toEqual([]);
+  });
+
+  test('an unchanged wildcard says the spec did not move and names the resolution that did', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          previousSpecifier: '*',
+          manifestPath: 'packages/app/package.json',
+          lockfilePath: 'pnpm-lock.yaml',
+          before: { version: '1.2.3' },
+          after: { version: '1.2.4' },
+        }),
+      ])
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].message).toBe(
+      '"left-pad" is specified as "*", which pins no version at all. ' +
+        'The spec in packages/app/package.json did not change; pnpm-lock.yaml resolved it from 1.2.3 to 1.2.4.'
+    );
+    expect(findings[0].severity).toBe('medium');
+    const plain = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          manifestPath: 'packages/app/package.json',
+        }),
+      ])
+    );
+    expect(fingerprintFinding(findings[0])).toBe(fingerprintFinding(plain[0]));
+  });
+
+  test('an unchanged wildcard whose versions match says the lockfile resolved different bytes', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          previousSpecifier: '*',
+          lockfilePath: 'package-lock.json',
+          before: { version: '1.2.3', integrity: 'sha512-one' },
+          after: { version: '1.2.3', integrity: 'sha512-two' },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe(
+      '"left-pad" is specified as "*", which pins no version at all. ' +
+        'The spec in package.json did not change; package-lock.json resolved it to different bytes.'
+    );
+  });
+
+  test('a spec rewritten to a wildcard keeps the original sentence', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          previousSpecifier: '^1.2.3',
+          before: { version: '1.2.3' },
+          after: { version: '1.2.4' },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe('"left-pad" is specified as "*", which pins no version at all.');
   });
 });
 
