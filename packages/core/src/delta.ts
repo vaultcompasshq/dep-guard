@@ -41,11 +41,19 @@ export interface DepChange {
   bundled?: true;
   before?: LockEntry;
   after?: LockEntry;
-  // The specifier on the comparison side, when the line was already there.
-  // Absent when the line is new. `specifier` is the side under judgment.
-  // version-hygiene uses this to tell a spec that itself moved from a spec
-  // whose resolution moved.
+  // The specifier text on the comparison side, when the line was already
+  // there. Absent when the line is new. `specifier` is the side under
+  // judgment. Equal text is not itself the decision that the spec held:
+  // that is `specifierHeld`, which also requires the pin provenance to match.
   previousSpecifier?: string;
+  // True only when computeDelta's own specifierHeld test passed: the
+  // comparison side already named this dependency, the specifier text is
+  // the same, and the pin provenance is the same. Absent otherwise,
+  // including when the text matches but the pin provenance does not.
+  // version-hygiene reads this instead of comparing the two specifier
+  // strings, and it adds the lockfile sentence only when this is set and
+  // kind is 'changed'.
+  specifierHeld?: true;
 }
 
 // One resolved lockfile entry that is not in the before lockfile in the
@@ -1632,6 +1640,7 @@ export function computeDelta(
         ...(manifest.python !== undefined && dep.pipGrammar === true ? { pipGrammar: true as const } : {}),
         ...(manifest.python !== undefined && dep.gitTable !== undefined ? { gitTable: dep.gitTable } : {}),
         ...(previous === undefined ? {} : { previousSpecifier: previous.specifier }),
+        ...(specifierHeld ? { specifierHeld: true as const } : {}),
         before: beforeSelection.entry,
         after: afterSelection.entry,
       });

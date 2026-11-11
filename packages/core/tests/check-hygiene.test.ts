@@ -42,6 +42,7 @@ function makeChange(overrides: Partial<DepChange> & { name: string }): DepChange
     after: overrides.after,
     ...(overrides.lockfilePath === undefined ? {} : { lockfilePath: overrides.lockfilePath }),
     ...(overrides.previousSpecifier === undefined ? {} : { previousSpecifier: overrides.previousSpecifier }),
+    ...(overrides.specifierHeld === true ? { specifierHeld: true as const } : {}),
   };
 }
 
@@ -104,6 +105,7 @@ describe('hygieneCheck: flagged specifiers', () => {
           kind: 'changed',
           specifier: '*',
           previousSpecifier: '*',
+          specifierHeld: true,
           manifestPath: 'packages/app/package.json',
           lockfilePath: 'pnpm-lock.yaml',
           before: { version: '1.2.3' },
@@ -138,6 +140,7 @@ describe('hygieneCheck: flagged specifiers', () => {
           kind: 'changed',
           specifier: '*',
           previousSpecifier: '*',
+          specifierHeld: true,
           lockfilePath: 'package-lock.json',
           before: { version: '1.2.3', integrity: 'sha512-one' },
           after: { version: '1.2.3', integrity: 'sha512-two' },
@@ -148,6 +151,99 @@ describe('hygieneCheck: flagged specifiers', () => {
       '"left-pad" is specified as "*", which pins no version at all. ' +
         'The spec in package.json did not change; package-lock.json resolved it to different bytes.'
     );
+  });
+
+  test('a held wildcard with a version recorded on only one side names that', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          specifierHeld: true,
+          lockfilePath: 'package-lock.json',
+          before: { integrity: 'sha512-same', resolvedUrl: 'https://registry.npmjs.org/left-pad/-/left-pad-1.2.3.tgz' },
+          after: {
+            version: '1.2.3',
+            integrity: 'sha512-same',
+            resolvedUrl: 'https://registry.npmjs.org/left-pad/-/left-pad-1.2.3.tgz',
+          },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe(
+      '"left-pad" is specified as "*", which pins no version at all. ' +
+        'The spec in package.json did not change; package-lock.json resolved it from no recorded version to 1.2.3.'
+    );
+  });
+
+  test('a held wildcard whose integrity and resolved URL both moved names both', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          specifierHeld: true,
+          lockfilePath: 'package-lock.json',
+          before: {
+            version: '1.2.3',
+            integrity: 'sha512-one',
+            resolvedUrl: 'https://registry.npmjs.org/left-pad/-/left-pad-1.2.3.tgz',
+          },
+          after: {
+            version: '1.2.3',
+            integrity: 'sha512-two',
+            resolvedUrl: 'https://registry.example/left-pad/-/left-pad-1.2.3.tgz',
+          },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe(
+      '"left-pad" is specified as "*", which pins no version at all. ' +
+        'The spec in package.json did not change; package-lock.json resolved it to different bytes and a different URL.'
+    );
+  });
+
+  test('matching specifier text without the held-spec decision keeps the original sentence', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          previousSpecifier: '*',
+          lockfilePath: 'package-lock.json',
+          before: {
+            version: '1.2.3',
+            integrity: 'sha512-same',
+            resolvedUrl: 'https://registry.npmjs.org/left-pad/-/left-pad-1.2.3.tgz',
+          },
+          after: {
+            version: '1.2.3',
+            integrity: 'sha512-same',
+            resolvedUrl: 'https://registry.example/left-pad/-/left-pad-1.2.3.tgz',
+          },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe('"left-pad" is specified as "*", which pins no version at all.');
+  });
+
+  test('an added wildcard keeps the original sentence even when the selected version moved', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'added',
+          specifier: '*',
+          previousSpecifier: '*',
+          before: { version: '1.2.3' },
+          after: { version: '1.2.4' },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe('"left-pad" is specified as "*", which pins no version at all.');
   });
 
   test('a spec rewritten to a wildcard keeps the original sentence', () => {

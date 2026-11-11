@@ -102,20 +102,67 @@ const SEVERITY_RANK: Readonly<Record<Severity, number>> = {
   low: 1,
 };
 
+// The extra sentence is added only when computeDelta's own specifierHeld
+// test passed and the change is kind 'changed'. Comparing the two specifier
+// strings would claim the spec held when only the text matches (a Python
+// pin whose provenance moved) and would also claim it for a manifest that
+// became a project, which is kind 'added' even when the text matches. The
+// sentence names only the lockfile fact that differs. A version move is
+// named on its own, from one version to the other, including when the
+// integrity or the URL moved with it: that is the resolution a version
+// bump is. When the version did not move, the sentence names the integrity,
+// the resolved URL, the install-script flag turning on, or each of those
+// that did.
+function resolutionClause(change: DepChange): string | null {
+  const before = change.before;
+  const after = change.after;
+  if (before === undefined || after === undefined) {
+    return null;
+  }
+  const file = change.lockfilePath ?? 'the lockfile';
+  if (before.version !== after.version) {
+    const from = before.version ?? 'no recorded version';
+    const to = after.version ?? 'no recorded version';
+    return `${file} resolved it from ${from} to ${to}`;
+  }
+  const parts: string[] = [];
+  if (before.integrity !== after.integrity) {
+    parts.push('different bytes');
+  }
+  if (before.resolvedUrl !== after.resolvedUrl) {
+    parts.push('a different URL');
+  }
+  const scriptOn = before.hasInstallScript !== true && after.hasInstallScript === true;
+  if (parts.length === 0 && !scriptOn) {
+    return null;
+  }
+  if (parts.length === 0) {
+    return `${file} turned the install-script flag on`;
+  }
+  if (!scriptOn && parts.length === 1 && parts[0] === 'different bytes') {
+    return `${file} resolved it to different bytes`;
+  }
+  if (!scriptOn && parts.length === 1 && parts[0] === 'a different URL') {
+    return `${file} resolved it to a different URL`;
+  }
+  const joined = parts.length === 1 ? parts[0] : `${parts[0]} and ${parts[1]}`;
+  if (scriptOn) {
+    return `${file} resolved it to ${joined}, and turned the install-script flag on`;
+  }
+  return `${file} resolved it to ${joined}`;
+}
+
 function hygieneMessage(change: DepChange): string {
   const shown = change.specifier === '' ? '(empty)' : change.specifier;
   const base = `"${change.registryName}" is specified as "${shown}", which pins no version at all.`;
-  const specHeld = change.previousSpecifier !== undefined && change.previousSpecifier === change.specifier;
-  if (!specHeld || change.before === undefined || change.after === undefined) {
+  if (change.specifierHeld !== true || change.kind !== 'changed') {
     return base;
   }
-  const file = change.lockfilePath ?? 'the lockfile';
-  const beforeVersion = change.before.version;
-  const afterVersion = change.after.version;
-  if (beforeVersion !== undefined && afterVersion !== undefined && beforeVersion !== afterVersion) {
-    return `${base} The spec in ${change.manifestPath} did not change; ${file} resolved it from ${beforeVersion} to ${afterVersion}.`;
+  const clause = resolutionClause(change);
+  if (clause === null) {
+    return base;
   }
-  return `${base} The spec in ${change.manifestPath} did not change; ${file} resolved it to different bytes.`;
+  return `${base} The spec in ${change.manifestPath} did not change; ${clause}.`;
 }
 
 function rangeToJudge(change: DepChange): string | null {
