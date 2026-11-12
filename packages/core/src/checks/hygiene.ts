@@ -102,6 +102,123 @@ const SEVERITY_RANK: Readonly<Record<Severity, number>> = {
   low: 1,
 };
 
+// The extra sentence is added only when computeDelta's own specifierHeld
+// test passed and the change is kind 'changed'. Comparing the two specifier
+// strings would claim the spec held when only the text matches (a Python
+// pin whose provenance moved) and would also claim it for a manifest that
+// became a project, which is kind 'added' even when the text matches. The
+// sentence names only the lockfile fact that differs. A version move is
+// named on its own, from one version to the other, including when the
+// integrity or the URL moved with it: that is the resolution a version
+// bump is. When the version did not move, the sentence names the integrity,
+// the resolved URL, the install-script flag turning on, or each of those
+// that did. An integrity change is named for what it is. Different bytes
+// is only two digests of one algorithm. The strength ladder matches
+// tamper.ts: a stronger hash is an upward rehash of the same bytes, and a
+// weaker one is a downgrade.
+const HASH_STRENGTH: ReadonlyMap<string, number> = new Map([
+  ['md5', 1],
+  ['sha1', 2],
+  ['sha256', 3],
+  ['sha384', 4],
+  ['sha512', 5],
+]);
+
+function recordedHash(value: string | undefined): string {
+  return value?.trim() ?? '';
+}
+
+function hashStrength(value: string): number | null {
+  let strongest: number | null = null;
+  for (const token of value.split(/\s+/)) {
+    const separator = token.indexOf('-');
+    if (separator <= 0) {
+      continue;
+    }
+    const strength = HASH_STRENGTH.get(token.slice(0, separator).toLowerCase());
+    if (strength !== undefined && (strongest === null || strength > strongest)) {
+      strongest = strength;
+    }
+  }
+  return strongest;
+}
+
+function integrityFact(before: string | undefined, after: string | undefined): string | null {
+  const beforeHash = recordedHash(before);
+  const afterHash = recordedHash(after);
+  if (beforeHash === afterHash) {
+    return null;
+  }
+  if (beforeHash === '') {
+    return 'recorded a hash';
+  }
+  if (afterHash === '') {
+    return 'dropped the recorded hash';
+  }
+  const beforeStrength = hashStrength(beforeHash);
+  const afterStrength = hashStrength(afterHash);
+  if (beforeStrength === null || afterStrength === null) {
+    return 'resolved it to a different hash';
+  }
+  if (afterStrength > beforeStrength) {
+    return 'rehashed it upward';
+  }
+  if (afterStrength < beforeStrength) {
+    return 'resolved it to a weaker hash';
+  }
+  return 'resolved it to different bytes';
+}
+
+function resolutionClause(change: DepChange): string | null {
+  const before = change.before;
+  const after = change.after;
+  if (before === undefined || after === undefined) {
+    return null;
+  }
+  const file = change.lockfilePath ?? 'the lockfile';
+  if (before.version !== after.version) {
+    const from = before.version ?? 'no recorded version';
+    const to = after.version ?? 'no recorded version';
+    return `${file} resolved it from ${from} to ${to}`;
+  }
+  const integrity = integrityFact(before.integrity, after.integrity);
+  const urlMoved = before.resolvedUrl !== after.resolvedUrl;
+  const scriptOn = before.hasInstallScript !== true && after.hasInstallScript === true;
+  let sentence: string | null = null;
+  if (integrity === 'resolved it to different bytes' && urlMoved) {
+    sentence = `${file} resolved it to different bytes and a different URL`;
+  } else if (integrity !== null && urlMoved) {
+    sentence = `${file} ${integrity} and resolved it to a different URL`;
+  } else if (integrity !== null) {
+    sentence = `${file} ${integrity}`;
+  } else if (urlMoved) {
+    sentence = `${file} resolved it to a different URL`;
+  }
+  if (sentence === null && !scriptOn) {
+    return null;
+  }
+  if (sentence === null) {
+    return `${file} turned the install-script flag on`;
+  }
+  if (scriptOn) {
+    return `${sentence}, and turned the install-script flag on`;
+  }
+  return sentence;
+}
+
+function hygieneMessage(change: DepChange): string {
+  const shown = change.specifier === '' ? '(empty)' : change.specifier;
+  const base = `"${change.registryName}" is specified as "${shown}", which pins no version at all.`;
+  if (change.specifierHeld !== true || change.kind !== 'changed') {
+    return base;
+  }
+  const clause = resolutionClause(change);
+  if (clause === null) {
+    return base;
+  }
+  return `${base} The spec in ${change.manifestPath} did not change; ${clause}.`;
+}
+
 function rangeToJudge(change: DepChange): string | null {
   if (change.protocol === 'registry') {
     return change.specifier;
@@ -157,18 +274,21 @@ export const hygieneCheck: Check = (ctx) => {
       const keptDeclaredSeverity = SEVERITY_BY_DEP_TYPE[keptDepType] as Severity;
       if (SEVERITY_RANK[declaredSeverity] > SEVERITY_RANK[keptDeclaredSeverity]) {
         kept.severity = severity;
-        (kept.details as Record<string, unknown>).depType = change.depType;
+        kept.message = hygieneMessage(change);
+        const details = kept.details as Record<string, unknown>;
+        details.depType = change.depType;
+        details.specifier = change.specifier;
+        details.kind = change.kind;
       }
       continue;
     }
     seen.set(key, findings.length);
 
-    const shown = change.specifier === '' ? '(empty)' : change.specifier;
     findings.push({
       ruleId: 'version-hygiene',
       severity,
       packageName: change.registryName,
-      message: `"${change.registryName}" is specified as "${shown}", which pins no version at all.`,
+      message: hygieneMessage(change),
       manifestPath: change.manifestPath,
       // depType is here because the severity is decided by it, and without
       // it a reader cannot tell why one wildcard reported low and another

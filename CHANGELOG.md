@@ -16,6 +16,7 @@ GitHub release notes, which are generated from the commit history.
 
 ### Changed
 
+- A version-hygiene finding whose spec did not move now says so, and names what in the lockfile actually moved: the version, from one to the other (or from no recorded version, when only one side recorded one), or, when the version did not move, the hash fact, the resolved URL, or the install-script flag. A hash fact is a dropped hash, a newly recorded hash, an upward rehash, a weaker hash, or different bytes when two digests of one algorithm differ. An unreadable hash is named as a different hash. The finding still blocks. A spec that itself became `*`, `latest` or empty keeps the original sentence, as does a dependency whose manifest became a project: that line is added, so the lockfile sentence is not attached even when the spec text matches. One name in two sections keeps the sentence of the section the finding reports.
 - The CI conductor action pin and the @vaultcompass/conductor devDependency move to 0.18.1, and the CI gate pin and the gate devDependencies move to dep-guard 0.20.0, vault-guard 1.13.3 and intent-guard 1.10.6, the versions conductor 0.18.1 expects.
 
 ## [0.20.0] - 2026-11-09
