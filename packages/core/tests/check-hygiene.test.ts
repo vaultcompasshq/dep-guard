@@ -132,6 +132,108 @@ describe('hygieneCheck: flagged specifiers', () => {
     expect(fingerprintFinding(findings[0])).toBe(fingerprintFinding(plain[0]));
   });
 
+  test('a held wildcard whose hash was removed names that and does not say different bytes', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          specifierHeld: true,
+          lockfilePath: 'package-lock.json',
+          before: { version: '1.2.3', integrity: 'sha512-one' },
+          after: { version: '1.2.3' },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe(
+      '"left-pad" is specified as "*", which pins no version at all. ' +
+        'The spec in package.json did not change; package-lock.json dropped the recorded hash.'
+    );
+    expect(findings[0].message).not.toContain('different bytes');
+  });
+
+  test('a held wildcard whose hash was recorded names that and does not say different bytes', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          specifierHeld: true,
+          lockfilePath: 'package-lock.json',
+          before: { version: '1.2.3' },
+          after: { version: '1.2.3', integrity: 'sha512-one' },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe(
+      '"left-pad" is specified as "*", which pins no version at all. ' +
+        'The spec in package.json did not change; package-lock.json recorded a hash.'
+    );
+  });
+
+  test('a held wildcard rehashed upward names that and does not say different bytes', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          specifierHeld: true,
+          lockfilePath: 'package-lock.json',
+          before: { version: '1.2.3', integrity: 'sha1-one' },
+          after: { version: '1.2.3', integrity: 'sha512-two' },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe(
+      '"left-pad" is specified as "*", which pins no version at all. ' +
+        'The spec in package.json did not change; package-lock.json rehashed it upward.'
+    );
+  });
+
+  test('a held wildcard resolved to a weaker hash names that and does not say different bytes', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          specifierHeld: true,
+          lockfilePath: 'package-lock.json',
+          before: { version: '1.2.3', integrity: 'sha512-one' },
+          after: { version: '1.2.3', integrity: 'sha1-two' },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe(
+      '"left-pad" is specified as "*", which pins no version at all. ' +
+        'The spec in package.json did not change; package-lock.json resolved it to a weaker hash.'
+    );
+  });
+
+  test('a held wildcard with an unreadable hash names a different hash', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          specifierHeld: true,
+          lockfilePath: 'package-lock.json',
+          before: { version: '1.2.3', integrity: 'sha512-one' },
+          after: { version: '1.2.3', integrity: 'not-a-hash' },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe(
+      '"left-pad" is specified as "*", which pins no version at all. ' +
+        'The spec in package.json did not change; package-lock.json resolved it to a different hash.'
+    );
+    expect(findings[0].message).not.toContain('different bytes');
+  });
+
   test('an unchanged wildcard whose versions match says the lockfile resolved different bytes', () => {
     const findings = hygieneCheck(
       makeContext([
@@ -424,6 +526,36 @@ describe('hygieneCheck: severity by dependency section', () => {
   test('a wildcard in devDependencies is low', () => {
     const changes = [makeChange({ name: 'left-pad', specifier: '*', depType: 'devDependencies' })];
     expect(hygieneCheck(makeContext(changes))[0].severity).toBe('low');
+  });
+
+  test('a later section that wins the collapse uses that section sentence', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          specifierHeld: true,
+          depType: 'devDependencies',
+          lockfilePath: 'package-lock.json',
+          before: { version: '1.2.3' },
+          after: { version: '1.2.4' },
+        }),
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          previousSpecifier: '^1.0.0',
+          depType: 'optionalDependencies',
+          before: { version: '1.2.3' },
+          after: { version: '1.2.4' },
+        }),
+      ])
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('medium');
+    expect(findings[0].details).toMatchObject({ depType: 'optionalDependencies', specifier: '*' });
+    expect(findings[0].message).toBe('"left-pad" is specified as "*", which pins no version at all.');
   });
 
   test('one name in two sections is reported at the more severe of the two, whichever arrives first', () => {

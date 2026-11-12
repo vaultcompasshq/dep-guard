@@ -112,7 +112,63 @@ const SEVERITY_RANK: Readonly<Record<Severity, number>> = {
 // integrity or the URL moved with it: that is the resolution a version
 // bump is. When the version did not move, the sentence names the integrity,
 // the resolved URL, the install-script flag turning on, or each of those
-// that did.
+// that did. An integrity change is named for what it is. Different bytes
+// is only two digests of one algorithm. The strength ladder matches
+// tamper.ts: a stronger hash is an upward rehash of the same bytes, and a
+// weaker one is a downgrade.
+const HASH_STRENGTH: ReadonlyMap<string, number> = new Map([
+  ['md5', 1],
+  ['sha1', 2],
+  ['sha256', 3],
+  ['sha384', 4],
+  ['sha512', 5],
+]);
+
+function recordedHash(value: string | undefined): string {
+  return value?.trim() ?? '';
+}
+
+function hashStrength(value: string): number | null {
+  let strongest: number | null = null;
+  for (const token of value.split(/\s+/)) {
+    const separator = token.indexOf('-');
+    if (separator <= 0) {
+      continue;
+    }
+    const strength = HASH_STRENGTH.get(token.slice(0, separator).toLowerCase());
+    if (strength !== undefined && (strongest === null || strength > strongest)) {
+      strongest = strength;
+    }
+  }
+  return strongest;
+}
+
+function integrityFact(before: string | undefined, after: string | undefined): string | null {
+  const beforeHash = recordedHash(before);
+  const afterHash = recordedHash(after);
+  if (beforeHash === afterHash) {
+    return null;
+  }
+  if (beforeHash === '') {
+    return 'recorded a hash';
+  }
+  if (afterHash === '') {
+    return 'dropped the recorded hash';
+  }
+  const beforeStrength = hashStrength(beforeHash);
+  const afterStrength = hashStrength(afterHash);
+  if (beforeStrength === null || afterStrength === null) {
+    return 'resolved it to a different hash';
+  }
+  if (afterStrength > beforeStrength) {
+    return 'rehashed it upward';
+  }
+  if (afterStrength < beforeStrength) {
+    return 'resolved it to a weaker hash';
+  }
+  return 'resolved it to different bytes';
+}
+
 function resolutionClause(change: DepChange): string | null {
   const before = change.before;
   const after = change.after;
@@ -125,31 +181,29 @@ function resolutionClause(change: DepChange): string | null {
     const to = after.version ?? 'no recorded version';
     return `${file} resolved it from ${from} to ${to}`;
   }
-  const parts: string[] = [];
-  if (before.integrity !== after.integrity) {
-    parts.push('different bytes');
-  }
-  if (before.resolvedUrl !== after.resolvedUrl) {
-    parts.push('a different URL');
-  }
+  const integrity = integrityFact(before.integrity, after.integrity);
+  const urlMoved = before.resolvedUrl !== after.resolvedUrl;
   const scriptOn = before.hasInstallScript !== true && after.hasInstallScript === true;
-  if (parts.length === 0 && !scriptOn) {
+  let sentence: string | null = null;
+  if (integrity === 'resolved it to different bytes' && urlMoved) {
+    sentence = `${file} resolved it to different bytes and a different URL`;
+  } else if (integrity !== null && urlMoved) {
+    sentence = `${file} ${integrity} and resolved it to a different URL`;
+  } else if (integrity !== null) {
+    sentence = `${file} ${integrity}`;
+  } else if (urlMoved) {
+    sentence = `${file} resolved it to a different URL`;
+  }
+  if (sentence === null && !scriptOn) {
     return null;
   }
-  if (parts.length === 0) {
+  if (sentence === null) {
     return `${file} turned the install-script flag on`;
   }
-  if (!scriptOn && parts.length === 1 && parts[0] === 'different bytes') {
-    return `${file} resolved it to different bytes`;
-  }
-  if (!scriptOn && parts.length === 1 && parts[0] === 'a different URL') {
-    return `${file} resolved it to a different URL`;
-  }
-  const joined = parts.length === 1 ? parts[0] : `${parts[0]} and ${parts[1]}`;
   if (scriptOn) {
-    return `${file} resolved it to ${joined}, and turned the install-script flag on`;
+    return `${sentence}, and turned the install-script flag on`;
   }
-  return `${file} resolved it to ${joined}`;
+  return sentence;
 }
 
 function hygieneMessage(change: DepChange): string {
@@ -220,7 +274,11 @@ export const hygieneCheck: Check = (ctx) => {
       const keptDeclaredSeverity = SEVERITY_BY_DEP_TYPE[keptDepType] as Severity;
       if (SEVERITY_RANK[declaredSeverity] > SEVERITY_RANK[keptDeclaredSeverity]) {
         kept.severity = severity;
-        (kept.details as Record<string, unknown>).depType = change.depType;
+        kept.message = hygieneMessage(change);
+        const details = kept.details as Record<string, unknown>;
+        details.depType = change.depType;
+        details.specifier = change.specifier;
+        details.kind = change.kind;
       }
       continue;
     }
