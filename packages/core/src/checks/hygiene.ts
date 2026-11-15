@@ -143,6 +143,23 @@ function hashStrength(value: string): number | null {
   return strongest;
 }
 
+// The digests an integrity value records under its strongest algorithm. A
+// value can hold more than one hash, and under one algorithm more than one
+// digest, so this is a set.
+function strongestDigests(value: string, strength: number): Set<string> {
+  const digests = new Set<string>();
+  for (const token of value.split(/\s+/)) {
+    const separator = token.indexOf('-');
+    if (separator <= 0) {
+      continue;
+    }
+    if (HASH_STRENGTH.get(token.slice(0, separator).toLowerCase()) === strength) {
+      digests.add(token.slice(separator + 1));
+    }
+  }
+  return digests;
+}
+
 function integrityFact(before: string | undefined, after: string | undefined): string | null {
   const beforeHash = recordedHash(before);
   const afterHash = recordedHash(after);
@@ -165,6 +182,16 @@ function integrityFact(before: string | undefined, after: string | undefined): s
   }
   if (afterStrength < beforeStrength) {
     return 'resolved it to a weaker hash';
+  }
+  // Same strongest algorithm on both sides. The bytes are shown to differ
+  // only when no digest of that algorithm is on both sides: a second, weaker
+  // hash added or dropped, or the same hashes in another order, changes the
+  // string and not the bytes.
+  const afterDigests = strongestDigests(afterHash, afterStrength);
+  for (const digest of strongestDigests(beforeHash, beforeStrength)) {
+    if (afterDigests.has(digest)) {
+      return 'recorded the hash differently';
+    }
   }
   return 'resolved it to different bytes';
 }

@@ -234,6 +234,48 @@ describe('hygieneCheck: flagged specifiers', () => {
     expect(findings[0].message).not.toContain('different bytes');
   });
 
+  test.each([
+    ['a second, weaker hash recorded beside an unchanged one', 'sha512-one', 'sha512-one sha1-two'],
+    ['a weaker hash dropped from beside an unchanged one', 'sha1-two sha512-one', 'sha512-one'],
+    ['the same two hashes in another order', 'sha1-two sha512-one', 'sha512-one sha1-two'],
+    ['the same two hashes spaced differently', 'sha1-two sha512-one', 'sha1-two  sha512-one'],
+  ])('a held wildcard with %s does not say different bytes', (_name, before, after) => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          specifierHeld: true,
+          lockfilePath: 'package-lock.json',
+          before: { version: '1.2.3', integrity: before },
+          after: { version: '1.2.3', integrity: after },
+        }),
+      ])
+    );
+    expect(findings[0].message).toBe(
+      '"left-pad" is specified as "*", which pins no version at all. ' +
+        'The spec in package.json did not change; package-lock.json recorded the hash differently.'
+    );
+  });
+
+  test('a held wildcard whose strongest digest differs beside an unchanged weaker one says different bytes', () => {
+    const findings = hygieneCheck(
+      makeContext([
+        makeChange({
+          name: 'left-pad',
+          kind: 'changed',
+          specifier: '*',
+          specifierHeld: true,
+          lockfilePath: 'package-lock.json',
+          before: { version: '1.2.3', integrity: 'sha1-two sha512-one' },
+          after: { version: '1.2.3', integrity: 'sha1-two sha512-three' },
+        }),
+      ])
+    );
+    expect(findings[0].message).toContain('package-lock.json resolved it to different bytes.');
+  });
+
   test('an unchanged wildcard whose versions match says the lockfile resolved different bytes', () => {
     const findings = hygieneCheck(
       makeContext([
