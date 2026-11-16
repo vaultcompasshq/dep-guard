@@ -10,6 +10,10 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Changed
+
+- The CI conductor action pin and the @vaultcompass/conductor devDependency move to 0.19.0, and the CI gate pin and the gate devDependencies move to dep-guard 0.20.1, vault-guard 1.13.4 and intent-guard 1.10.6, the versions conductor 0.19.0 expects.
+
 ## [0.20.1] - 2026-11-15
 
 ### Added
