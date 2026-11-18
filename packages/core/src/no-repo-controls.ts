@@ -6,10 +6,8 @@ import path from 'node:path';
 import { BASELINE_FILE } from './baseline.js';
 import { CONFIG_FILE, LOCAL_CONFIG_FILE } from './config.js';
 import { cleanNoRepoControlsGitEnv } from './git-env.js';
-import { isPythonLockfilePath } from './python-lockfiles.js';
-import { isPythonManifestPath } from './python-manifest.js';
 import { DepGuardError } from './types.js';
-import type { RepoState } from './state.js';
+import { parseNpmrcPins, type RepoState } from './state.js';
 import { isInsideDir, resolveGitBinary } from './utils/git-binary.js';
 import { checkLocalGitConfig, localGitConfigRefusal } from './utils/local-git-config.js';
 import { readVerifiedHeadTree, type VerifiedEntry } from './utils/verified-head-tree.js';
@@ -17,9 +15,21 @@ import { objectInfo, readVerifiedBlobsBounded } from './utils/verified-objects.j
 
 const CLONE_FRESH = 'Clone the repository fresh and assess the clone.';
 
+const TOOL_PREFIX = 'dep-guard: ';
+
+// The CLI prints every DepGuardError as "dep-guard: <message> (<code>)", so
+// a refusal carries no prefix of its own. Messages built by the shared git
+// and object-store helpers start with one; it is removed here, once, for
+// every refusal this mode raises.
+function withoutToolPrefix(message: string): string {
+  let text = message;
+  while (text.startsWith(TOOL_PREFIX)) text = text.slice(TOOL_PREFIX.length);
+  return text;
+}
+
 export class NoRepoControlsError extends DepGuardError {
   constructor(message: string) {
-    super(message, 'no-repo-controls-refused');
+    super(withoutToolPrefix(message), 'no-repo-controls-refused');
     this.name = 'NoRepoControlsError';
   }
 }
@@ -42,6 +52,15 @@ export interface HeadOnlyRepository extends PreparedNoRepoControlsRepository {
   repoControls: { honoured: false; present: string[] };
   notScanned: NotScannedEntry[];
   excludedPaths: ReadonlySet<string>;
+  // The committed .npmrc's scope pins, read as data for
+  // dependency-confusion rule 1 only (checks/confusion.ts); never a control.
+  npmrcRegistryPins: ReadonlyMap<string, string>;
+  objectSizes: ReadonlyMap<string, number>;
+  inputBytesLimit: number;
+  oversizedBytesLimit: number;
+  totalInputBytesLimit: number;
+  retainedBytesBeforeSource: number;
+  oversizedBytesBeforeSource: number;
 }
 
 function compareNotScanned(left: NotScannedEntry, right: NotScannedEntry): number {
@@ -55,7 +74,7 @@ function compareNotScanned(left: NotScannedEntry, right: NotScannedEntry): numbe
 
 export function recordHeadOnlyNotScanned(
   repository: HeadOnlyRepository,
-  entry: Omit<NotScannedEntry, 'kind'> & { kind?: 'declined' }
+  entry: Omit<NotScannedEntry, 'kind'> & { kind?: 'declined' | 'too-large' }
 ): void {
   const row: NotScannedEntry = { ...entry, kind: entry.kind ?? 'declined' };
   const key = JSON.stringify([row.path, row.line ?? null, row.kind, row.reason]);
@@ -92,6 +111,20 @@ const LOCKFILE_NAMES = new Set([
   'bun.lock',
   'bun.lockb',
 ]);
+const CANONICAL_INPUT_NAMES: ReadonlyMap<string, string> = new Map(
+  [
+    'package.json',
+    ...LOCKFILE_NAMES,
+    'pyproject.toml',
+    'uv.toml',
+    'Pipfile',
+    'requirements.in',
+    'poetry.lock',
+    'uv.lock',
+    'pdm.lock',
+    'Pipfile.lock',
+  ].map((name) => [name.toLowerCase(), name])
+);
 const SKIPPED_DIR_NAMES = new Set([
   'node_modules',
   '.venv',
@@ -108,14 +141,67 @@ function baseName(relative: string): string {
   return slash === -1 ? relative : relative.slice(slash + 1);
 }
 
-function dependencyInput(relative: string): boolean {
+export function canonicalDependencyInputPath(relative: string): string | null {
   const name = baseName(relative);
-  return (
-    name === 'package.json' ||
-    isPythonManifestPath(relative) ||
-    LOCKFILE_NAMES.has(name) ||
-    isPythonLockfilePath(relative)
-  );
+  const lower = name.toLowerCase();
+  const slash = relative.lastIndexOf('/');
+  const parent = slash === -1 ? '' : baseName(relative.slice(0, slash)).toLowerCase();
+  let canonical = CANONICAL_INPUT_NAMES.get(lower) ?? null;
+  let dir = relative.slice(0, relative.length - name.length);
+  if (canonical === null && lower.endsWith('.txt')) {
+    if (lower.startsWith('requirements') || lower.endsWith('requirements.txt')) {
+      canonical = lower;
+    } else if (parent === 'requirements') {
+      // Matched only by its directory: that directory's own spelling is
+      // part of what makes it an input, so it is canonical too.
+      canonical = lower;
+      dir = `${dir.slice(0, dir.length - 'requirements/'.length)}requirements/`;
+    }
+  }
+  if (canonical === null) return null;
+  return dir + canonical;
+}
+
+// Dependency files of ecosystems this tool does not parse. Under
+// --no-repo-controls each one is listed in notScanned, so a repository
+// whose dependencies live only in them is not reported as clean by
+// omission. Matched case-insensitively, like the inputs above.
+const UNSUPPORTED_INPUTS: ReadonlyMap<string, string> = new Map([
+  ['go.mod', 'Go'],
+  ['go.sum', 'Go'],
+  ['setup.py', 'Python setuptools'],
+  ['setup.cfg', 'Python setuptools'],
+  ['environment.yml', 'Conda'],
+  ['environment.yaml', 'Conda'],
+  ['cargo.toml', 'Rust'],
+  ['cargo.lock', 'Rust'],
+  ['gemfile', 'Ruby'],
+  ['gemfile.lock', 'Ruby'],
+  ['composer.json', 'PHP'],
+  ['composer.lock', 'PHP'],
+  ['pom.xml', 'Maven'],
+  ['build.gradle', 'Gradle'],
+  ['build.gradle.kts', 'Gradle'],
+  ['gradle.lockfile', 'Gradle'],
+  ['packages.config', 'NuGet'],
+  ['packages.lock.json', 'NuGet'],
+  ['directory.packages.props', 'NuGet'],
+  ['package.swift', 'Swift'],
+  ['package.resolved', 'Swift'],
+  ['pubspec.yaml', 'Dart'],
+  ['pubspec.lock', 'Dart'],
+  ['mix.exs', 'Elixir'],
+  ['mix.lock', 'Elixir'],
+  ['deno.json', 'Deno'],
+  ['deno.lock', 'Deno'],
+]);
+
+export function unsupportedDependencyEcosystem(relative: string): string | null {
+  return UNSUPPORTED_INPUTS.get(baseName(relative).toLowerCase()) ?? null;
+}
+
+function dependencyInput(relative: string): boolean {
+  return canonicalDependencyInputPath(relative) !== null;
 }
 
 function skippedSegment(relative: string): string | null {
@@ -277,7 +363,10 @@ function assertOwnObjectStore(repoRoot: string, gitBin: string): void {
  * Resolve and vet the repository before any object is read. The local config
  * query is the first git process started by this function.
  */
-export function prepareNoRepoControlsRepository(startDir: string): PreparedNoRepoControlsRepository {
+export function prepareNoRepoControlsRepository(
+  startDir: string,
+  workingDirectory?: string
+): PreparedNoRepoControlsRepository {
   let gitBin: string;
   try {
     gitBin = resolveGitBinary();
@@ -285,15 +374,40 @@ export function prepareNoRepoControlsRepository(startDir: string): PreparedNoRep
     throw new NoRepoControlsError(error instanceof Error ? error.message : String(error));
   }
   const realGit = realOrSelf(gitBin);
-  const here = realOrSelf(startDir);
+  // The CLI passes process.cwd() as workingDirectory: the directory the
+  // operator runs from must itself be the repository root, and the path
+  // argument only has to name that root or a directory inside it. A
+  // library caller that passes no working directory names the root itself.
+  const here = realOrSelf(workingDirectory ?? startDir);
+  const hereLabel = workingDirectory === undefined ? 'the directory given' : 'the current directory';
+  if (workingDirectory !== undefined) {
+    const target = realOrSelf(path.resolve(workingDirectory, startDir));
+    if (!isInsideDir(target, here)) {
+      throw new NoRepoControlsError(
+        `--no-repo-controls assesses the repository at the current directory (${here}), and the path ` +
+          `argument ${target} is outside the repository there. Pass the repository root or a ` +
+          'directory inside it, from the root. Nothing was scanned.'
+      );
+    }
+  }
   if (isInsideDir(realGit, here)) throw gitInsideRepo(gitBin, here);
 
-  const config = checkLocalGitConfig(startDir, cleanNoRepoControlsGitEnv(), gitBin);
+  const config = checkLocalGitConfig(here, cleanNoRepoControlsGitEnv(), gitBin);
   if (!config.ok) {
+    // git could not read a local config at all: say plainly when that is
+    // because the directory is not in a repository, rather than leave the
+    // operator with git's own wording.
+    if (config.reason === 'git' && typeof lstatOrCode(path.join(here, '.git')) === 'string') {
+      throw new NoRepoControlsError(
+        `--no-repo-controls must run from the root of the repository being assessed: ${hereLabel} ` +
+          `(${here}) is not the root of a git repository (${config.detail}). Change to the repository ` +
+          'root and run it there. Nothing was scanned.'
+      );
+    }
     throw new NoRepoControlsError(localGitConfigRefusal(config, 'dep-guard'));
   }
 
-  const top = git(gitBin, startDir, ['rev-parse', '--show-toplevel']);
+  const top = git(gitBin, here, ['rev-parse', '--show-toplevel']);
   if (!top.ok || top.out.trim() === '') {
     throw new NoRepoControlsError(
       `dep-guard: --no-repo-controls needs a git work tree: ${
@@ -305,8 +419,8 @@ export function prepareNoRepoControlsRepository(startDir: string): PreparedNoRep
   if (isInsideDir(realGit, repoRoot)) throw gitInsideRepo(gitBin, repoRoot);
   if (path.relative(here, repoRoot) !== '') {
     throw new NoRepoControlsError(
-      'dep-guard: --no-repo-controls must run from the root of the repository being assessed: the current ' +
-        `directory is ${here}, but the top level git reports for it is ${repoRoot}. Run it from the root. ` +
+      `--no-repo-controls must run from the root of the repository being assessed: ${hereLabel} ` +
+        `is ${here}, but the top level git reports for it is ${repoRoot}. Run it from the root. ` +
         'Nothing was scanned.'
     );
   }
@@ -331,15 +445,34 @@ export function prepareNoRepoControlsRepository(startDir: string): PreparedNoRep
 
 export async function loadHeadOnlyRepository(
   startDir: string,
-  limits: { inputBytes?: number; oversizedBytes?: number; totalInputBytes?: number } = {}
+  limits: { inputBytes?: number; oversizedBytes?: number; totalInputBytes?: number } = {},
+  workingDirectory?: string
 ): Promise<HeadOnlyRepository> {
-  const prepared = prepareNoRepoControlsRepository(startDir);
+  const prepared = prepareNoRepoControlsRepository(startDir, workingDirectory);
   let entries: VerifiedEntry[];
   try {
     entries = readVerifiedHeadTree(prepared.repoRoot, prepared.head, prepared.git);
   } catch (error) {
     throw new NoRepoControlsError(error instanceof Error ? error.message : String(error));
   }
+  const inputSpellings = new Map<string, string[]>();
+  for (const entry of entries) {
+    const canonical = canonicalDependencyInputPath(entry.path);
+    if (canonical === null) continue;
+    inputSpellings.set(canonical, [...(inputSpellings.get(canonical) ?? []), entry.path]);
+  }
+  for (const paths of inputSpellings.values()) {
+    if (paths.length < 2) continue;
+    const names = [...paths].sort().map((entry) => `"${entry}"`).join(', ');
+    throw new NoRepoControlsError(
+      `dep-guard: refusing to run: committed dependency inputs collide when names are compared ` +
+        `case-insensitively: ${names}. Keep only one spelling. Nothing was scanned.`
+    );
+  }
+  entries = entries.map((entry) => {
+    const canonical = canonicalDependencyInputPath(entry.path);
+    return canonical === null ? entry : { ...entry, path: canonical };
+  });
   const present: string[] = [];
   const notScanned: NotScannedEntry[] = [];
   const excludedPaths = new Set<string>();
@@ -349,12 +482,14 @@ export async function loadHeadOnlyRepository(
   const inputEntries = entries.filter(
     (entry) => entry.type === 'blob' && dependencyInput(entry.path)
   );
+  const npmrcEntry = entries.find((entry) => entry.type === 'blob' && entry.path === '.npmrc');
+  const sizedEntries = npmrcEntry === undefined ? inputEntries : [...inputEntries, npmrcEntry];
   const sizes = objectInfo(
     prepared.repoRoot,
-    inputEntries.map((entry) => entry.oid),
+    entries.filter((entry) => entry.type !== 'commit').map((entry) => entry.oid),
     prepared.git
   );
-  const retainedInputBytes = inputEntries.reduce((total, entry) => {
+  const retainedInputBytes = sizedEntries.reduce((total, entry) => {
     const size = sizes.get(entry.oid)?.size ?? 0;
     return size <= inputLimit ? total + size : total;
   }, 0);
@@ -367,6 +502,10 @@ export async function loadHeadOnlyRepository(
   }
   const oversizedEntries = inputEntries.filter(
     (entry) => (sizes.get(entry.oid)?.size ?? 0) > inputLimit
+  );
+  const oversizedBytesBeforeSource = oversizedEntries.reduce(
+    (total, entry) => total + (sizes.get(entry.oid)?.size ?? 0),
+    0
   );
   if (oversizedEntries.length > 0) {
     await readVerifiedBlobsBounded(
@@ -383,6 +522,34 @@ export async function loadHeadOnlyRepository(
         kind: 'too-large',
         reason: `dependency input is ${sizes.get(entry.oid)?.size ?? 0} bytes, over the ${inputLimit} byte parse limit`,
       });
+    }
+  }
+  let npmrcContent: string | null = null;
+  if (npmrcEntry !== undefined) {
+    const npmrcSize = sizes.get(npmrcEntry.oid)?.size ?? 0;
+    if (npmrcSize > inputLimit) {
+      await readVerifiedBlobsBounded(
+        prepared.repoRoot,
+        [npmrcEntry.oid],
+        prepared.git,
+        0,
+        oversizedLimit
+      );
+      notScanned.push({
+        path: npmrcEntry.path,
+        kind: 'too-large',
+        reason: `dependency-confusion data is ${npmrcSize} bytes, over the ${inputLimit} byte parse limit`,
+      });
+    } else {
+      npmrcContent =
+        (await readVerifiedBlobsBounded(
+          prepared.repoRoot,
+          [npmrcEntry.oid],
+          prepared.git,
+          inputLimit,
+          0,
+          totalInputLimit
+        )).blobs.get(npmrcEntry.oid)?.toString('utf8') ?? null;
     }
   }
   for (const entry of entries) {
@@ -413,11 +580,12 @@ export async function loadHeadOnlyRepository(
         reason: `dependency input under the built-in skipped directory ${segment}`,
       });
     }
-    if (name === 'go.mod' || name === 'go.sum') {
+    const unsupported = unsupportedDependencyEcosystem(entry.path);
+    if (unsupported !== null) {
       notScanned.push({
         path: entry.path,
         kind: 'unsupported',
-        reason: 'Go dependency files are detected but not parsed',
+        reason: `${unsupported} dependency files are detected but not parsed`,
       });
     }
   }
@@ -429,6 +597,14 @@ export async function loadHeadOnlyRepository(
     repoControls: { honoured: false, present },
     notScanned,
     excludedPaths,
+    npmrcRegistryPins: parseNpmrcPins(npmrcContent),
+    objectSizes: new Map([...sizes].map(([oid, info]) => [oid, info.size])),
+    inputBytesLimit: inputLimit,
+    oversizedBytesLimit: oversizedLimit,
+    totalInputBytesLimit: totalInputLimit,
+    retainedBytesBeforeSource:
+      npmrcEntry === undefined || npmrcContent === null ? 0 : sizes.get(npmrcEntry.oid)?.size ?? 0,
+    oversizedBytesBeforeSource,
   };
 }
 

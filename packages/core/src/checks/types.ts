@@ -122,6 +122,11 @@ export interface CheckContext {
   // every real caller (scan.ts's runChecks) sets it. See RepoState's own
   // field of the same name in state.ts for why this exists at all.
   npmrcDefaultRegistry?: string | null;
+  // In HEAD-only mode the committed .npmrc is subject data, not a control.
+  // Only dependency-confusion rule 1 reads this field, and only to add a
+  // pin-mismatch finding. The ordinary npmrc fields above remain empty so
+  // repository-authored registry declarations cannot clear another rule.
+  confusionNpmrcRegistryPins?: ReadonlyMap<string, string>;
   // True when the project .npmrc on the side being judged differs from the
   // one on any comparison side (added, removed or changed). The install
   // reads the judged side's .npmrc, so the same resolved URL is no longer
@@ -136,13 +141,6 @@ export interface CheckContext {
   // True only for the HEAD-only assessment mode. Checks use this to keep
   // findings that repository-chosen context would otherwise drop or lower.
   noRepoControls?: boolean;
-  // HEAD-only mode records repository-derived reasons an online lookup was
-  // declined here so the report can distinguish "not sent" from "checked".
-  recordNotScanned?: (entry: { path: string; reason: string; line?: number }) => void;
-  // Filled by the online orchestrator in HEAD-only mode. If any candidate
-  // for a name records a non-public resolution, no public npm endpoint may
-  // receive that name through another online check.
-  privateOnlineNames?: ReadonlySet<string>;
   // The whole judged side, for the one check that judges every entry rather
   // than what the change moved: the deny list (checks/deny.ts). Set by
   // scan.ts from the side under judgment; absent on a hand-built context,

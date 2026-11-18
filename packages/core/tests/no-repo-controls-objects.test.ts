@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { deflate, inflate } from 'node:zlib';
 import { loadStates } from '../src/git-source.js';
 import {
+  canonicalDependencyInputPath,
   loadHeadOnlyRepository,
   prepareNoRepoControlsRepository,
 } from '../src/no-repo-controls.js';
@@ -36,6 +37,27 @@ const IDENTITY = {
   GIT_COMMITTER_EMAIL: 'test@example.invalid',
 };
 const tempDirs: string[] = [];
+
+test.each([
+  ['Package.json', 'package.json'],
+  ['Package-Lock.json', 'package-lock.json'],
+  ['NPM-SHRINKWRAP.JSON', 'npm-shrinkwrap.json'],
+  ['PNPM-LOCK.yaml', 'pnpm-lock.yaml'],
+  ['YARN.LOCK', 'yarn.lock'],
+  ['BUN.LOCK', 'bun.lock'],
+  ['BUN.LOCKB', 'bun.lockb'],
+  ['PyProject.toml', 'pyproject.toml'],
+  ['UV.TOML', 'uv.toml'],
+  ['PIPFILE', 'Pipfile'],
+  ['Requirements-Dev.TXT', 'requirements-dev.txt'],
+  ['REQUIREMENTS.IN', 'requirements.in'],
+  ['Poetry.Lock', 'poetry.lock'],
+  ['UV.Lock', 'uv.lock'],
+  ['PDM.Lock', 'pdm.lock'],
+  ['PIPFILE.LOCK', 'Pipfile.lock'],
+] as const)('canonicalizes the HEAD-only dependency input %s', (written, canonical) => {
+  expect(canonicalDependencyInputPath(`nested/${written}`)).toBe(`nested/${canonical}`);
+});
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync(resolveGitBinary(), args, {
@@ -187,6 +209,24 @@ test('spends the tree row budget while parsing', () => {
   expect(() => parseTree(bytes, 20, 'tree', { left: 1 })).toThrow('too large to list');
 });
 
+test('refuses case-colliding dependency inputs and names both paths', async () => {
+  const root = await repo();
+  const blob = writeObject(root, 'blob', Buffer.from('{"dependencies":{}}\n'));
+  const tree = writeObject(
+    root,
+    'tree',
+    Buffer.concat([
+      treeRow('100644', 'Package.json', blob),
+      treeRow('100644', 'package.json', blob),
+    ])
+  );
+  await pointHeadAtTree(root, tree);
+
+  await expect(loadHeadOnlyRepository(root)).rejects.toThrow(
+    /Package\.json.*package\.json|package\.json.*Package\.json/
+  );
+});
+
 test('reads a verified HEAD commit, tree and blob', async () => {
   const root = await repo();
   const prepared = prepareNoRepoControlsRepository(root);
@@ -210,6 +250,63 @@ test('refuses when the total committed dependency inputs exceed the retained-inp
   await expect(
     loadHeadOnlyRepository(root, { inputBytes: 64, oversizedBytes: 1024, totalInputBytes: 64 })
   ).rejects.toThrow('total retained-input budget');
+});
+
+test('counts requirements includes against one shared retained-input budget', async () => {
+  const root = await repo();
+  await writeFile(
+    path.join(root, 'requirements.txt'),
+    '-r includes/first.txt\n-r includes/second.txt\n'
+  );
+  await mkdir(path.join(root, 'includes'));
+  await writeFile(
+    path.join(root, 'includes', 'first.txt'),
+    `first-package==1.0.0\n#${'a'.repeat(40)}\n`
+  );
+  await writeFile(
+    path.join(root, 'includes', 'second.txt'),
+    `second-package==1.0.0\n#${'b'.repeat(40)}\n`
+  );
+  await git(root, 'add', 'requirements.txt', 'includes/first.txt', 'includes/second.txt');
+  await execFileAsync(resolveGitBinary(), ['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'includes'], {
+    cwd: root,
+    env: { ...GIT_ENV, ...IDENTITY },
+  });
+  const repository = await loadHeadOnlyRepository(root, {
+    inputBytes: 1024,
+    oversizedBytes: 1024,
+    totalInputBytes: 160,
+  });
+
+  await expect(
+    loadStates(root, { kind: 'audit' }, { headOnly: repository })
+  ).rejects.toThrow('total retained-input budget');
+});
+
+test('reports an oversized requirements include instead of using a zero-byte discard budget', async () => {
+  const root = await repo();
+  await writeFile(path.join(root, 'requirements.txt'), '-r includes/large.txt\n');
+  await mkdir(path.join(root, 'includes'));
+  await writeFile(path.join(root, 'includes', 'large.txt'), `${'x'.repeat(100)}\n`);
+  await git(root, 'add', 'requirements.txt', 'includes/large.txt');
+  await execFileAsync(resolveGitBinary(), ['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'include'], {
+    cwd: root,
+    env: { ...GIT_ENV, ...IDENTITY },
+  });
+  const repository = await loadHeadOnlyRepository(root, {
+    inputBytes: 64,
+    oversizedBytes: 1024,
+    totalInputBytes: 1024,
+  });
+
+  await expect(
+    loadStates(root, { kind: 'audit' }, { headOnly: repository })
+  ).resolves.toBeDefined();
+  expect(repository.notScanned).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ path: 'includes/large.txt', kind: 'too-large' }),
+    ])
+  );
 });
 
 test('loads dependency state only from verified HEAD blobs', async () => {

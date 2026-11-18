@@ -30,6 +30,9 @@ const IDENTITY = {
 };
 const tempDirs: string[] = [];
 const POSIX = process.platform === 'win32' ? test.skip : test;
+const ONLINE_REFUSAL =
+  'online checks would send names from a repository you do not trust to public registries; ' +
+  'run without --online, or without --no-repo-controls on a checkout you trust';
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' });
@@ -118,6 +121,78 @@ test.each([
   expect(result.scannedCommit).toBe((await git(root, 'rev-parse', 'HEAD')).trim());
   expect(result.notScannedCount).toBe(result.notScanned?.length);
   expect(result.run.online.enabled).toBe(false);
+});
+
+POSIX('requires process.cwd itself to be the repository root even when path names the root', async () => {
+  const root = await repo();
+
+  await expect(
+    execFileAsync(
+      process.execPath,
+      [CLI_ENTRY, 'scan', root, '--no-repo-controls', '--corpus-dir', FIXTURE_CORPUS],
+      { cwd: path.dirname(root), env: GIT_ENV, encoding: 'utf8' }
+    )
+  ).rejects.toMatchObject({
+    code: 2,
+    stderr: expect.stringContaining('current directory'),
+  });
+});
+
+POSIX('accepts a scan path inside the repository when cwd is the root', async () => {
+  const root = await repo();
+  await mkdir(path.join(root, 'nested'));
+
+  const result = await runJson(root, ['scan', 'nested']);
+
+  expect(result.repoControls?.honoured).toBe(false);
+});
+
+POSIX('refuses a scan path outside the repository rooted at cwd', async () => {
+  const root = await repo();
+  const outside = await mkdtemp(path.join(tmpdir(), 'dep-guard-outside-path-'));
+  tempDirs.push(outside);
+
+  await expect(
+    execFileAsync(
+      process.execPath,
+      [CLI_ENTRY, 'scan', outside, '--no-repo-controls', '--corpus-dir', FIXTURE_CORPUS],
+      { cwd: root, env: GIT_ENV, encoding: 'utf8' }
+    )
+  ).rejects.toMatchObject({
+    code: 2,
+    stderr: expect.stringContaining('outside the repository'),
+  });
+});
+
+POSIX('prints one dep-guard prefix on a repository-config refusal', async () => {
+  const root = await repo();
+  await git(root, 'config', '--local', 'core.hooksPath', 'hooks');
+
+  await expect(
+    execFileAsync(process.execPath, [CLI_ENTRY, 'scan', '--no-repo-controls'], {
+      cwd: root,
+      env: GIT_ENV,
+      encoding: 'utf8',
+    })
+  ).rejects.toMatchObject({
+    code: 2,
+    stderr: expect.not.stringContaining('dep-guard: dep-guard:'),
+  });
+});
+
+test.each([
+  ['scan', ['scan']],
+  ['check', ['check', 'private-package-name']],
+] as const)('the built %s command refuses --online with --no-repo-controls', async (_command, args) => {
+  const root = await repo();
+
+  await expect(
+    execFileAsync(process.execPath, [CLI_ENTRY, ...args, '--no-repo-controls', '--online'], {
+      cwd: root,
+      env: GIT_ENV,
+      encoding: 'utf8',
+    })
+  ).rejects.toMatchObject({ code: 2, stderr: expect.stringContaining(ONLINE_REFUSAL) });
 });
 
 test('text and SARIF carry the same qualified no-repo-controls facts', async () => {

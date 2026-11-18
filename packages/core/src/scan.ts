@@ -94,19 +94,17 @@ import {
 import { defaultCachePath, loadCache } from './online/cache.js';
 import { fetchPackument, fetchWeeklyDownloads } from './online/registry-client.js';
 import type { DownloadCountsResult } from './online/registry-client.js';
-import { newNames, newRegistryNames } from './checks/candidates.js';
+import { newNames } from './checks/candidates.js';
 import { pythonTyposquatCheck } from './checks/python-typosquat.js';
 import { pypiNamesNotChecked, summarizeEcosystems, type EcosystemsSummary } from './ecosystems.js';
 import { fetchPypiProject } from './online/pypi-client.js';
 import { checkPypiExistence, type PypiExistenceStats } from './online/pypi-existence.js';
-import { PUBLIC_REGISTRY_ORIGIN } from './online/registry-scope.js';
-import { originOf } from './resolution.js';
 import { applyUvSources, judgedPythonControls, PythonIndexRule } from './python-sources.js';
 import { loadPythonControls } from './python-trust.js';
 import {
   finalizeHeadOnlyNotScanned,
   loadHeadOnlyRepository,
-  recordHeadOnlyNotScanned,
+  NoRepoControlsError,
   type HeadOnlyRepository,
   type NotScannedEntry,
 } from './no-repo-controls.js';
@@ -519,7 +517,8 @@ function runChecks(
   npmrcChanged: boolean,
   pythonIndex: PythonIndexRule | null = null,
   judged: JudgedSide | null = null,
-  headOnly: HeadOnlyRepository | null = null
+  noRepoControls = false,
+  confusionNpmrcPins: ReadonlyMap<string, string> | null = null
 ): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
   const ctx: CheckContext = {
     corpus,
@@ -530,13 +529,8 @@ function runChecks(
     npmrcChanged,
     ...(pythonIndex === null ? {} : { pythonIndex }),
     ...(judged === null ? {} : { judged }),
-    ...(headOnly === null
-      ? {}
-      : {
-          noRepoControls: true,
-          recordNotScanned: (entry: { path: string; reason: string; line?: number }) =>
-            recordHeadOnlyNotScanned(headOnly, entry),
-        }),
+    ...(noRepoControls ? { noRepoControls: true } : {}),
+    ...(confusionNpmrcPins === null ? {} : { confusionNpmrcRegistryPins: confusionNpmrcPins }),
     diagnostics: [],
     allowed: [],
   };
@@ -931,21 +925,6 @@ async function enrichOnline(
   pypiStats: PypiExistenceStats;
   unchecked: UncheckedName[];
 }> {
-  if (ctx.noRepoControls === true) {
-    const privateNames = new Set<string>();
-    for (const { change, registryName } of newRegistryNames(ctx)) {
-      const resolvedUrl = change.after?.resolvedUrl;
-      if (resolvedUrl === undefined || originOf(resolvedUrl) === PUBLIC_REGISTRY_ORIGIN) continue;
-      privateNames.add(registryName);
-      ctx.recordNotScanned?.({
-        path: change.lockfilePath ?? change.manifestPath,
-        reason:
-          `public npm online checks were not run for ${registryName} because its lockfile ` +
-          'resolution does not name the public npm registry',
-      });
-    }
-    ctx.privateOnlineNames = privateNames;
-  }
   const deadline = createOnlineDeadline(budgetMs);
   // Threaded through every real fetch below rather than kept at module
   // scope: see LookupCounter's own comment for why a fresh one per call is
@@ -1749,6 +1728,27 @@ function buildResult(
 // The full pipeline: loadConfig -> loadCorpus -> loadStates -> computeDelta
 // -> run all six checks -> fingerprint -> ignorePaths/baseline filter ->
 // evaluateGate.
+// Under --no-repo-controls a refusal raised by a shared git or object-store
+// helper is a plain Error; it is re-raised as the mode's own refusal so the
+// CLI reports it as one, with exit 2 and a single prefix.
+async function asNoRepoControlsRefusal<T>(work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof DepGuardError) throw error;
+    throw new NoRepoControlsError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+// What a whole-HEAD assessment counts as judged: a parsed manifest (npm or
+// Python), a read npm or pnpm lockfile, or a read Python lockfile.
+function headOnlyJudgedSomething(state: RepoState): boolean {
+  return (
+    sideResolvedSomething(state) ||
+    (state.pythonLockfiles ?? []).some((lockfile) => lockfile.unreadable === undefined)
+  );
+}
+
 function sideResolvedSomething(state: RepoState): boolean {
   if (state.manifests.length > 0) {
     return true;
@@ -1776,15 +1776,32 @@ export async function scan(opts: {
   // --trust-base decides by WHOSE RULES it is judged. See trust-base.ts.
   trustBase?: string;
   noRepoControls?: boolean;
+  // Under noRepoControls only: the directory the operator runs from. The
+  // CLI passes process.cwd(); it must be the repository root itself, and
+  // repoRoot must name that root or a directory inside it. Absent, repoRoot
+  // must be the root.
+  workingDirectory?: string;
 }): Promise<ScanResult> {
   const startedAt = Date.now();
+  if (opts.noRepoControls === true && opts.online === true) {
+    throw new DepGuardError(
+      'online checks would send names from a repository you do not trust to public registries; ' +
+        'run without --online, or without --no-repo-controls on a checkout you trust',
+      'config-invalid'
+    );
+  }
   if (opts.noRepoControls === true && (opts.trustBase !== undefined || opts.mode.kind !== 'audit')) {
     throw new DepGuardError(
       '--no-repo-controls cannot be combined with --trust-base, --base or --staged',
       'config-invalid'
     );
   }
-  const headOnly = opts.noRepoControls === true ? await loadHeadOnlyRepository(opts.repoRoot) : null;
+  const headOnly =
+    opts.noRepoControls === true
+      ? await asNoRepoControlsRefusal(() =>
+          loadHeadOnlyRepository(opts.repoRoot, {}, opts.workingDirectory)
+        )
+      : null;
   // Checked before anything else touches opts.repoRoot -- resolveScanRoot
   // spawns git against it, and loadConfig below joins config file names
   // onto it, both of which turn a missing directory or a file-where-a-
@@ -1838,14 +1855,15 @@ export async function scan(opts: {
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const isIgnoredPath = (repoPath: string): boolean =>
     matchingIgnoreEntries(repoPath, config.ignorePaths).length > 0;
-  const statePair = await loadStates(headOnly === null ? opts.repoRoot : root, opts.mode, {
-    isIgnoredPath,
-    ...(headOnly === null ? {} : { headOnly }),
-  });
+  const loadSides = () =>
+    loadStates(headOnly === null ? opts.repoRoot : root, opts.mode, {
+      isIgnoredPath,
+      ...(headOnly === null ? {} : { headOnly }),
+    });
+  const statePair = headOnly === null ? await loadSides() : await asNoRepoControlsRefusal(loadSides);
   if (headOnly !== null) {
     statePair.after = {
       ...statePair.after,
-      onlyBuilt: [],
       npmrcContent: null,
       npmrcRegistryPins: new Map(),
       npmrcDefaultRegistry: null,
@@ -2115,12 +2133,12 @@ export async function scan(opts: {
     corpus,
     config,
     delta,
-    headOnly
+    headOnly !== null
       ? new Map()
       : controls === null
         ? statePair.after.npmrcRegistryPins
         : controls.npmrcPins,
-    headOnly
+    headOnly !== null
       ? null
       : controls === null
         ? statePair.after.npmrcDefaultRegistry
@@ -2132,7 +2150,8 @@ export async function scan(opts: {
     ) || (controls?.npmrcChanged ?? false),
     pythonIndex,
     judgedSideOf(statePair.after),
-    headOnly
+    headOnly !== null,
+    headOnly === null ? null : headOnly.npmrcRegistryPins
   );
   // A --base or --trust-base run is the pull-request/CI shape (issue #75):
   // never a commit hook, so the online budget's default is minutes rather
@@ -2198,6 +2217,18 @@ export async function scan(opts: {
           'judged; see notScanned for every path',
       };
     }
+  }
+  if (headOnly !== null && couldNotRun === null && !headOnlyJudgedSomething(statePair.after)) {
+    // A clean pass here would mean only that nothing was read. Checked after the
+    // too-large or unparseable verdict above, which names the cause more
+    // precisely; here every input was skipped or of an unsupported
+    // ecosystem, or there was none: notScanned says which.
+    couldNotRun = {
+      code: 'head-nothing-judged',
+      message:
+        'nothing was judged: no committed manifest or lockfile in HEAD was read under ' +
+        '--no-repo-controls; see notScanned for what was found and why it was not judged',
+    };
   }
   const lockfileByManifest = new Map<string, string>();
   for (const change of delta.changes) {
@@ -2350,6 +2381,11 @@ export async function checkSingle(opts: {
   // fingerprint match meaningless (see applyPathFilters above).
   trustBase?: string;
   noRepoControls?: boolean;
+  // Under noRepoControls only: the directory the operator runs from. The
+  // CLI passes process.cwd(); it must be the repository root itself, and
+  // repoRoot must name that root or a directory inside it. Absent, repoRoot
+  // must be the root.
+  workingDirectory?: string;
 }): Promise<ScanResult> {
   // An empty (or whitespace-only) name has no meaningful answer. Reporting
   // "safe" for it -- which an empty name would otherwise do, via a
@@ -2359,6 +2395,13 @@ export async function checkSingle(opts: {
   if (opts.name.trim().length === 0) {
     throw new DepGuardError('checkSingle: "name" must not be empty or whitespace-only', 'name-invalid');
   }
+  if (opts.noRepoControls === true && opts.online === true) {
+    throw new DepGuardError(
+      'online checks would send names from a repository you do not trust to public registries; ' +
+        'run without --online, or without --no-repo-controls on a checkout you trust',
+      'config-invalid'
+    );
+  }
   if (opts.noRepoControls === true && opts.trustBase !== undefined) {
     throw new DepGuardError(
       '--no-repo-controls cannot be combined with --trust-base',
@@ -2367,7 +2410,12 @@ export async function checkSingle(opts: {
   }
 
   const startedAt = Date.now();
-  const headOnly = opts.noRepoControls === true ? await loadHeadOnlyRepository(opts.repoRoot) : null;
+  const headOnly =
+    opts.noRepoControls === true
+      ? await asNoRepoControlsRefusal(() =>
+          loadHeadOnlyRepository(opts.repoRoot, {}, opts.workingDirectory)
+        )
+      : null;
   // Same reasoning as the check at the top of scan(): a missing directory
   // or a file where a directory belongs has to be reported as
   // path-missing, before loadConfig below turns it into a confusing
@@ -2404,7 +2452,7 @@ export async function checkSingle(opts: {
     false,
     null,
     null,
-    headOnly
+    headOnly !== null
   );
   // The deny list judges the one name asked about. No version is given, so a
   // versioned ban matches by name and says so (checks/deny.ts).

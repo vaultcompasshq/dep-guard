@@ -345,6 +345,7 @@ function buildProgram(): Command {
           onlineBudgetMs,
           trustBase: options.trustBase,
           noRepoControls: noRepoControls(options),
+          ...(noRepoControls(options) ? { workingDirectory: process.cwd() } : {}),
         });
         emit(result, format);
         reportCouldNotRun(result);
@@ -387,6 +388,7 @@ function buildProgram(): Command {
           onlineBudgetMs,
           trustBase: options.trustBase,
           noRepoControls: noRepoControls(options),
+          ...(noRepoControls(options) ? { workingDirectory: process.cwd() } : {}),
         });
         emit(result, format);
         reportCouldNotRun(result);

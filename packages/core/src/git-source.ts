@@ -39,7 +39,11 @@ import {
 } from './state.js';
 import { withoutByteOrderMark } from './text.js';
 import { DepGuardError, type Diagnostic } from './types.js';
-import { MAX_DEPENDENCY_INPUT_BYTES, type HeadOnlyRepository } from './no-repo-controls.js';
+import {
+  NoRepoControlsError,
+  recordHeadOnlyNotScanned,
+  type HeadOnlyRepository,
+} from './no-repo-controls.js';
 import { readVerifiedBlobsBounded } from './utils/verified-objects.js';
 
 // Loads the two sides of a scan out of a repository. Everything below
@@ -742,20 +746,73 @@ function headOnlySource(repository: HeadOnlyRepository): FileSource {
   );
   const listed = new Map([...regular, ...symlinks]);
   const children = buildChildIndex(listed.keys());
-  const readOne = async (relPath: string): Promise<string | null> => {
-    if (baseName(relPath) === NPMRC || repository.excludedPaths.has(relPath)) return null;
-    const oid = listed.get(relPath);
-    if (oid === undefined) return null;
-    const bytes = (
+  const cached = new Map<string, Buffer>();
+  const verifiedOversized = new Set<string>();
+  let retainedBytes = repository.retainedBytesBeforeSource;
+  let oversizedBytes = repository.oversizedBytesBeforeSource;
+  const tooLarge = async (relPath: string, oid: string): Promise<boolean> => {
+    const size = repository.objectSizes.get(oid);
+    if (size === undefined) {
+      throw new NoRepoControlsError(
+        `refusing to run: committed input ${relPath} has no verified object size. ` +
+          'Nothing was scanned.'
+      );
+    }
+    if (size <= repository.inputBytesLimit) return false;
+    if (!verifiedOversized.has(oid)) {
+      if (oversizedBytes + size > repository.oversizedBytesLimit) {
+        throw new NoRepoControlsError(
+          `refusing to run: committed dependency inputs exceed the ` +
+            `${repository.oversizedBytesLimit} byte oversized-blob verification budget. Nothing was scanned.`
+        );
+      }
       await readVerifiedBlobsBounded(
         repository.repoRoot,
         [oid],
         repository.git,
-        MAX_DEPENDENCY_INPUT_BYTES,
-        0
-      )
-    ).blobs.get(oid);
-    return bytes?.toString('utf8') ?? null;
+        0,
+        size
+      );
+      verifiedOversized.add(oid);
+      oversizedBytes += size;
+    }
+    recordHeadOnlyNotScanned(repository, {
+      path: relPath,
+      kind: 'too-large',
+      reason:
+        `dependency input is ${size} bytes, over the ${repository.inputBytesLimit} byte parse limit`,
+    });
+    return true;
+  };
+  const readOids = async (oids: readonly string[]): Promise<void> => {
+    const unread = [...new Set(oids)].filter((oid) => !cached.has(oid));
+    if (unread.length === 0) return;
+    const added = unread.reduce((total, oid) => total + (repository.objectSizes.get(oid) ?? 0), 0);
+    if (retainedBytes + added > repository.totalInputBytesLimit) {
+      throw new NoRepoControlsError(
+        `refusing to run: committed dependency inputs exceed the ` +
+          `${repository.totalInputBytesLimit} byte total retained-input budget while following ` +
+          'dependency-file references. Nothing was scanned.'
+      );
+    }
+    const read = await readVerifiedBlobsBounded(
+      repository.repoRoot,
+      unread,
+      repository.git,
+      repository.inputBytesLimit,
+      0,
+      repository.totalInputBytesLimit - retainedBytes
+    );
+    for (const [oid, bytes] of read.blobs) cached.set(oid, bytes);
+    retainedBytes += added;
+  };
+  const readOne = async (relPath: string): Promise<string | null> => {
+    if (baseName(relPath) === NPMRC || repository.excludedPaths.has(relPath)) return null;
+    const oid = listed.get(relPath);
+    if (oid === undefined) return null;
+    if (await tooLarge(relPath, oid)) return null;
+    await readOids([oid]);
+    return cached.get(oid)?.toString('utf8') ?? null;
   };
   return {
     async read(relPath: string): Promise<string | null> {
@@ -774,19 +831,15 @@ function headOnlySource(repository: HeadOnlyRepository): FileSource {
           result.set(relPath, null);
           continue;
         }
+        if (await tooLarge(relPath, oid)) {
+          result.set(relPath, null);
+          continue;
+        }
         byOid.set(oid, [...(byOid.get(oid) ?? []), relPath]);
       }
-      const blobs = (
-        await readVerifiedBlobsBounded(
-          repository.repoRoot,
-          [...byOid.keys()],
-          repository.git,
-          MAX_DEPENDENCY_INPUT_BYTES,
-          0
-        )
-      ).blobs;
+      await readOids([...byOid.keys()]);
       for (const [oid, paths] of byOid) {
-        const text = blobs.get(oid)?.toString('utf8') ?? null;
+        const text = cached.get(oid)?.toString('utf8') ?? null;
         for (const relPath of paths) result.set(relPath, text);
       }
       return result;
@@ -811,15 +864,9 @@ function headOnlySource(repository: HeadOnlyRepository): FileSource {
     async readLink(relPath: string): Promise<string | null> {
       const oid = symlinks.get(relPath);
       if (oid === undefined) return null;
-      return (
-        await readVerifiedBlobsBounded(
-          repository.repoRoot,
-          [oid],
-          repository.git,
-          MAX_DEPENDENCY_INPUT_BYTES,
-          0
-        )
-      ).blobs.get(oid)?.toString('utf8') ?? null;
+      if (await tooLarge(relPath, oid)) return null;
+      await readOids([oid]);
+      return cached.get(oid)?.toString('utf8') ?? null;
     },
     async ignoresCase(): Promise<boolean> {
       return false;

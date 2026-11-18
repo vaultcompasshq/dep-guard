@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { scan } from '../src/scan.js';
+import { jest } from '@jest/globals';
+import { checkSingle, scan } from '../src/scan.js';
 import { resolveGitBinary } from '../src/utils/git-binary.js';
 
 const execFileAsync = promisify(execFile);
@@ -80,8 +81,61 @@ async function repoWith(files: Record<string, string>): Promise<string> {
   return root;
 }
 
+function npmLock(name: string, resolved: string): string {
+  return JSON.stringify({
+    name: 'fixture',
+    version: '1.0.0',
+    lockfileVersion: 3,
+    packages: {
+      '': { dependencies: { [name]: '1.0.0' } },
+      [`node_modules/${name}`]: {
+        version: '1.0.0',
+        resolved,
+        integrity: 'sha512-fixture',
+      },
+    },
+  });
+}
+
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+const ONLINE_REFUSAL =
+  'online checks would send names from a repository you do not trust to public registries; ' +
+  'run without --online, or without --no-repo-controls on a checkout you trust';
+
+test.each([
+  ['scan', (root: string) => scan({
+    repoRoot: root,
+    mode: { kind: 'audit' } as const,
+    corpusDir: FIXTURE_CORPUS,
+    online: true,
+    noRepoControls: true,
+  })],
+  ['check', (root: string) => checkSingle({
+    repoRoot: root,
+    name: 'private-package-name',
+    corpusDir: FIXTURE_CORPUS,
+    online: true,
+    noRepoControls: true,
+  })],
+] as const)('%s refuses online before fetch under no-repo-controls', async (_command, run) => {
+  const root = await repoWith({
+    'package.json': '{"dependencies":{"private-package-name":"1.0.0"}}\n',
+    'requirements.txt': 'private-python-name==1.0.0\n',
+  });
+  const originalFetch = globalThis.fetch;
+  const fetchStub = jest.fn(async () => {
+    throw new Error('fetch must not be called');
+  });
+  globalThis.fetch = fetchStub as typeof fetch;
+  try {
+    await expect(run(root)).rejects.toThrow(ONLINE_REFUSAL);
+    expect(fetchStub).not.toHaveBeenCalled();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('judges every HEAD dependency with defaults and reports ignored repository controls', async () => {
@@ -142,6 +196,153 @@ test('judges every HEAD dependency with defaults and reports ignored repository 
     expect.objectContaining({ path: 'package.json', kind: 'declined' }),
   ]);
   expect(result.notScannedCount).toBe(1);
+});
+
+test('committed npm scope pins can add dependency-confusion under no-repo-controls', async () => {
+  const name = '@acmecorp/private-package';
+  const root = await repoWith({
+    '.npmrc': '@acmecorp:registry=https://npm.acmecorp.invalid/\n',
+    'package.json': JSON.stringify({ dependencies: { [name]: '1.0.0' } }),
+    'package-lock.json': npmLock(
+      name,
+      'https://registry.npmjs.org/@acmecorp/private-package/-/private-package-1.0.0.tgz'
+    ),
+  });
+
+  const result = await scan({
+    repoRoot: root,
+    mode: { kind: 'audit' },
+    corpusDir: FIXTURE_CORPUS,
+    noRepoControls: true,
+  });
+
+  expect(result.findings).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        ruleId: 'dependency-confusion',
+        severity: 'high',
+        packageName: name,
+      }),
+    ])
+  );
+});
+
+test('committed npm scope pins cannot suppress unknown-package under no-repo-controls', async () => {
+  const name = '@acmecorp/definitely-not-in-corpus';
+  const root = await repoWith({
+    '.npmrc': '@acmecorp:registry=https://npm.acmecorp.invalid/\n',
+    'package.json': JSON.stringify({ dependencies: { [name]: '1.0.0' } }),
+    'package-lock.json': npmLock(
+      name,
+      'https://npm.acmecorp.invalid/@acmecorp/definitely-not-in-corpus/-/definitely-not-in-corpus-1.0.0.tgz'
+    ),
+  });
+
+  const result = await scan({
+    repoRoot: root,
+    mode: { kind: 'audit' },
+    corpusDir: FIXTURE_CORPUS,
+    noRepoControls: true,
+  });
+
+  expect(result.findings).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ ruleId: 'unknown-package', packageName: name }),
+    ])
+  );
+});
+
+test('judges a case-variant package manifest under no-repo-controls', async () => {
+  const root = await repoWith({
+    'Package.json': '{"dependencies":{"case-variant-not-in-corpus":"1.0.0"}}\n',
+  });
+
+  const result = await scan({
+    repoRoot: root,
+    mode: { kind: 'audit' },
+    corpusDir: FIXTURE_CORPUS,
+    noRepoControls: true,
+  });
+
+  expect(result.findings).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        ruleId: 'unknown-package',
+        packageName: 'case-variant-not-in-corpus',
+      }),
+    ])
+  );
+});
+
+test('keeps pnpm onlyBuiltDependencies as adding-only data under no-repo-controls', async () => {
+  const root = await repoWith({
+    'package.json': JSON.stringify({
+      name: 'fixture',
+      pnpm: { onlyBuiltDependencies: ['native-addon'] },
+    }),
+    'pnpm-lock.yaml': "lockfileVersion: '9.0'\npackages:\n",
+  });
+
+  const result = await scan({
+    repoRoot: root,
+    mode: { kind: 'audit' },
+    corpusDir: FIXTURE_CORPUS,
+    noRepoControls: true,
+  });
+
+  expect(result.findings).toEqual([
+    expect.objectContaining({
+      ruleId: 'install-script',
+      severity: 'low',
+      packageName: 'native-addon',
+      details: expect.objectContaining({ signal: 'present' }),
+    }),
+  ]);
+});
+
+test('lists known unsupported dependency files and exits because nothing was judged', async () => {
+  const files = [
+    'setup.py',
+    'setup.cfg',
+    'environment.yml',
+    'Cargo.toml',
+    'go.mod',
+  ];
+  const root = await repoWith(Object.fromEntries(files.map((file) => [file, '# fixture\n'])));
+
+  const result = await scan({
+    repoRoot: root,
+    mode: { kind: 'audit' },
+    corpusDir: FIXTURE_CORPUS,
+    noRepoControls: true,
+  });
+
+  expect(result.notScanned).toEqual(
+    expect.arrayContaining(
+      files.map((file) => expect.objectContaining({ path: file, kind: 'unsupported' }))
+    )
+  );
+  expect(result.run.couldNotRun?.message).toContain('nothing was judged');
+  expect(result.exitCode).toBe(2);
+});
+
+test('exits incomplete when every dependency input is under a built-in skipped directory', async () => {
+  const root = await repoWith({
+    'vendor/package.json': '{"dependencies":{"hidden":"1.0.0"}}\n',
+  });
+
+  const result = await scan({
+    repoRoot: root,
+    mode: { kind: 'audit' },
+    corpusDir: FIXTURE_CORPUS,
+    noRepoControls: true,
+  });
+
+  expect(result.notScanned).toEqual([
+    expect.objectContaining({ path: 'vendor/package.json', kind: 'built-in-skip' }),
+  ]);
+  expect(result.run.couldNotRun?.message).toContain('nothing was judged');
+  expect(result.exitCode).toBe(2);
 });
 
 test.each([

@@ -69,7 +69,6 @@ interface Candidate {
   lookupName: string;
   version: string;
   manifestPath: string;
-  repositoryEvidence?: string[];
 }
 
 // One candidate per (manifestPath, name, lookupName, version) quadruple.
@@ -162,21 +161,7 @@ function collectCandidates(ctx: CheckContext, diagnostics: Diagnostic[]): Candid
       // candidate filter.
       continue;
     }
-    const nonPublicResolution = isNonPublicResolution(
-      ctx,
-      name,
-      entryChange.after.resolvedUrl
-    );
-    if (nonPublicResolution) {
-      if (ctx.noRepoControls === true) {
-        ctx.recordNotScanned?.({
-          path: entryChange.lockfilePath,
-          reason:
-            `online publish-age check was not run for ${name} because its lockfile resolution ` +
-            'does not name the public npm registry',
-        });
-        continue;
-      }
+    if (isNonPublicResolution(ctx, name, entryChange.after.resolvedUrl)) {
       // Internal scopes/prefixes are a name-shaped declaration a user has
       // to remember to configure; a private origin or an .npmrc scope pin
       // is the SAME fact stated by the lockfile and the project's own
@@ -196,20 +181,8 @@ function collectCandidates(ctx: CheckContext, diagnostics: Diagnostic[]): Candid
     // decision above this line judges `name` (identity), never this value,
     // on purpose: an entry whose declared name is internal or privately
     // pinned must not be sent to the wire under some OTHER name either.
-    const lookupName =
-      ctx.noRepoControls === true ? name : entryChange.after.lookupName ?? name;
-    const repositoryEvidence = [
-      ...(ctx.noRepoControls === true && entryChange.after.lookupName !== undefined
-        ? ['lockfile lookup name']
-        : []),
-    ];
-    const candidate: Candidate = {
-      name,
-      lookupName,
-      version,
-      manifestPath: entryChange.manifestPath,
-      ...(repositoryEvidence.length === 0 ? {} : { repositoryEvidence }),
-    };
+    const lookupName = entryChange.after.lookupName ?? name;
+    const candidate: Candidate = { name, lookupName, version, manifestPath: entryChange.manifestPath };
     const key = dedupeKey(candidate);
     if (seen.has(key)) {
       continue;
@@ -411,15 +384,6 @@ export async function findPublishAgeFindings(
           // manifestPath and details.signal), so this can never move a
           // baseline.
           ...(candidate.lookupName !== candidate.name ? { lookupName: candidate.lookupName } : {}),
-          ...(candidate.repositoryEvidence !== undefined
-            ? {
-                repositoryContext: {
-                  ignored: true,
-                  ordinaryOutcome: 'not-checked',
-                  evidence: candidate.repositoryEvidence,
-                },
-              }
-            : {}),
         },
       });
     }
