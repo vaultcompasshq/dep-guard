@@ -62,6 +62,7 @@ export const DIAGNOSTIC_CODES = Object.freeze([
   'deny-nothing-to-judge',
   'deny-overrides-allow',
   'deny-review-overdue',
+  'head-inputs-not-judged',
   'ignore-path-dropped',
   'ignore-path-project-kept',
   'ignore-path-unmatched',

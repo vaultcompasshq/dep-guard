@@ -117,6 +117,7 @@ test.each([
   expect(result.repoControls).toEqual({ honoured: false, present: [] });
   expect(result.scannedCommit).toBe((await git(root, 'rev-parse', 'HEAD')).trim());
   expect(result.notScannedCount).toBe(result.notScanned?.length);
+  expect(result.run.online.enabled).toBe(false);
 });
 
 test('text and SARIF carry the same qualified no-repo-controls facts', async () => {

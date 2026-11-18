@@ -24,6 +24,8 @@ import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
 import { isNonPublicName } from './registry-scope.js';
+import { PUBLIC_REGISTRY_ORIGIN } from './registry-scope.js';
+import { originOf } from '../resolution.js';
 import { unreachable, type UncheckedSink } from './unchecked.js';
 
 export const REGISTERED_SQUAT_DOWNLOAD_FLOOR = 50;
@@ -90,11 +92,24 @@ export async function findRegisteredSquats(
   // putting them all on the wire would spend the online budget, which on a
   // pull-request run turns into online-names-unchecked. A lockfile-only
   // name a change adds to an existing lockfile is sent (NewName.freshLockfile).
-  const candidates = newRegistryNames(ctx).filter(({ registryName, freshLockfile }) => {
+  const candidates = newRegistryNames(ctx).filter(({ change, registryName, freshLockfile }) => {
     if (freshLockfile === true && ctx.noRepoControls !== true) {
       return false;
     }
     if (isInternalName(registryName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
+      return false;
+    }
+    if (
+      ctx.noRepoControls === true &&
+      change.after?.resolvedUrl !== undefined &&
+      originOf(change.after.resolvedUrl) !== PUBLIC_REGISTRY_ORIGIN
+    ) {
+      ctx.recordNotScanned?.({
+        path: change.lockfilePath ?? change.manifestPath,
+        reason:
+          `online registered-squat check was not run for ${registryName} because its lockfile ` +
+          'resolution does not name the public npm registry',
+      });
       return false;
     }
     if (isNonPublicName(ctx, registryName)) {

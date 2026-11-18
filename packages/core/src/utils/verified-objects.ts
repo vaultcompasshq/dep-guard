@@ -176,7 +176,8 @@ export async function readVerifiedBlobsBounded(
   oids: readonly string[],
   git: string,
   keepAtMost: number,
-  discardAtMost: number
+  discardAtMost: number,
+  retainAtMost: number = MAX_BATCH_BYTES
 ): Promise<BoundedBlobRead> {
   const unique = [...new Set(oids)];
   const blobs = new Map<string, Buffer>();
@@ -196,9 +197,9 @@ export async function readVerifiedBlobsBounded(
   child.stderr.on('data', (chunk: Buffer) => {
     if (stderr.length < 16_384) stderr += chunk.toString('utf8');
   });
-  const exited = new Promise<{ code: number | null; error: Error | null }>((resolve) => {
-    child.once('error', (error) => resolve({ code: null, error }));
-    child.once('close', (code) => resolve({ code, error: null }));
+  const exited = new Promise<{ status: number | null; error: Error | null }>((resolve) => {
+    child.once('error', (error) => resolve({ status: null, error }));
+    child.once('close', (status) => resolve({ status, error: null }));
   });
   child.stdin.on('error', () => undefined);
   child.stdin.end(`${unique.join('\n')}\n`);
@@ -211,6 +212,7 @@ export async function readVerifiedBlobsBounded(
   let kept: Buffer[] = [];
   let currentSize = 0;
   let discarded = 0;
+  let retained = 0;
 
   const finish = (): void => {
     const oid = unique[index];
@@ -258,6 +260,14 @@ export async function readVerifiedBlobsBounded(
                   'verification budget. Nothing was scanned.'
               );
             }
+          } else {
+            retained += size;
+            if (retained > retainAtMost) {
+              throw new ObjectStoreMismatch(
+                `dep-guard: committed dependency inputs exceed the ${retainAtMost} byte retained-blob ` +
+                  'verification budget. Nothing was scanned.'
+              );
+            }
           }
           hash = createHash(algorithm).update(`blob ${size}\0`);
           remaining = size;
@@ -289,10 +299,10 @@ export async function readVerifiedBlobsBounded(
     throw error;
   }
   const status = await exited;
-  if (status.error !== null || status.code !== 0) {
+  if (status.error !== null || status.status !== 0) {
     throw new ObjectStoreMismatch(
       `dep-guard: could not read committed blobs with git cat-file --batch: ${
-        stderr.trim() || String(status.error ?? `git exited with status ${String(status.code)}`)
+        stderr.trim() || String(status.error ?? `git exited with status ${String(status.status)}`)
       }. Nothing was scanned.`
     );
   }

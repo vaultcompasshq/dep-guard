@@ -5,6 +5,7 @@ import { createOnlineDeadline } from '../src/online/deadline.js';
 import { existenceCheck } from '../src/checks/existence.js';
 import { findPublishAgeFindings } from '../src/online/publish-age.js';
 import { findRegisteredSquats } from '../src/online/registered-squat.js';
+import { checkPypiExistence } from '../src/online/pypi-existence.js';
 
 const CORPUS: Corpus = {
   hasName: () => true,
@@ -26,7 +27,10 @@ const CONFIG: ResolvedConfig = {
   minAgeAllow: [],
 };
 
-function context(noRepoControls: boolean): CheckContext {
+function context(
+  noRepoControls: boolean,
+  declined: Array<{ path: string; reason: string; line?: number }> = []
+): CheckContext {
   const entry: LockEntryChange = {
     name: 'example',
     packageName: 'example',
@@ -54,12 +58,13 @@ function context(noRepoControls: boolean): CheckContext {
     npmrcRegistryPins: new Map(),
     npmrcDefaultRegistry: null,
     ...(noRepoControls ? { noRepoControls: true } : {}),
+    ...(noRepoControls ? { recordNotScanned: (entry) => declined.push(entry) } : {}),
     diagnostics: [],
     allowed: [],
   };
 }
 
-test('a lockfile host cannot suppress the publish-age finding under no-repo-controls', async () => {
+test('a non-public lockfile host is never sent for publish age under no-repo-controls', async () => {
   const ordinary = context(false);
   const ordinaryCalls: string[] = [];
   const ordinaryFindings = await findPublishAgeFindings(
@@ -71,7 +76,8 @@ test('a lockfile host cannot suppress the publish-age finding under no-repo-cont
   expect(ordinaryFindings).toEqual([]);
   expect(ordinaryCalls).toEqual([]);
 
-  const guarded = context(true);
+  const declined: Array<{ path: string; reason: string; line?: number }> = [];
+  const guarded = context(true, declined);
   const guardedCalls: string[] = [];
   const findings = await findPublishAgeFindings(
     guarded,
@@ -86,23 +92,17 @@ test('a lockfile host cannot suppress the publish-age finding under no-repo-cont
     () => Date.parse('2026-11-18T00:00:00.000Z')
   );
 
-  expect(guardedCalls).toEqual(['example']);
-  expect(findings).toEqual([
+  expect(guardedCalls).toEqual([]);
+  expect(findings).toEqual([]);
+  expect(declined).toEqual([
     expect.objectContaining({
-      ruleId: 'publish-age',
-      packageName: 'example',
-      details: expect.objectContaining({
-        repositoryContext: {
-          ignored: true,
-          ordinaryOutcome: 'not-checked',
-          evidence: ['lockfile resolved URL host', 'lockfile lookup name'],
-        },
-      }),
+      path: 'package-lock.json',
+      reason: expect.stringContaining('example'),
     }),
   ]);
 });
 
-test('whole-HEAD lockfile names still receive the registered-squat check', async () => {
+test('a whole-HEAD name from a non-public resolution is not sent for registered-squat', async () => {
   const ordinary = context(false);
   const ordinaryCalls: string[] = [];
   expect(
@@ -121,7 +121,8 @@ test('whole-HEAD lockfile names still receive the registered-squat check', async
   ).toEqual([]);
   expect(ordinaryCalls).toEqual([]);
 
-  const guarded = context(true);
+  const declined: Array<{ path: string; reason: string; line?: number }> = [];
+  const guarded = context(true, declined);
   const guardedCalls: string[] = [];
   const findings = await findRegisteredSquats(
     guarded,
@@ -137,11 +138,55 @@ test('whole-HEAD lockfile names still receive the registered-squat check', async
     () => Date.parse('2026-11-18T00:00:00.000Z')
   );
 
-  expect(guardedCalls).toEqual(['example']);
-  expect(findings).toEqual([
+  expect(guardedCalls).toEqual([]);
+  expect(findings).toEqual([]);
+  expect(declined).toEqual([
     expect.objectContaining({
-      ruleId: 'registered-squat',
-      details: expect.objectContaining({ repositoryContext: expect.any(Object) }),
+      path: 'package-lock.json',
+      reason: expect.stringContaining('example'),
+    }),
+  ]);
+});
+
+test('a non-public Python lock source is not sent to PyPI under no-repo-controls', async () => {
+  const declined: Array<{ path: string; reason: string; line?: number }> = [];
+  const guarded = context(true, declined);
+  const calls: string[] = [];
+  const result = await checkPypiExistence(
+    [
+      {
+        name: 'internal-python-package',
+        written: 'internal-python-package',
+        anchorPath: 'uv.lock',
+        lockfilePath: 'uv.lock',
+        source: 'lockfile',
+        specifier: '==1.0.0',
+        depType: 'dependencies',
+        recordedOrigin: 'https://python.invalid/simple',
+      },
+      {
+        name: 'internal-python-package',
+        written: 'internal-python-package',
+        anchorPath: 'requirements.txt',
+        source: 'manifest',
+        specifier: '==1.0.0',
+        depType: 'dependencies',
+        recordedOrigin: null,
+      },
+    ],
+    guarded,
+    null,
+    { fetchPypiProject: async (name) => (calls.push(name), 'exists') },
+    guarded.diagnostics,
+    createOnlineDeadline(Number.POSITIVE_INFINITY, () => 0)
+  );
+
+  expect(calls).toEqual([]);
+  expect(result.findings).toEqual([]);
+  expect(declined).toEqual([
+    expect.objectContaining({
+      path: 'uv.lock',
+      reason: expect.stringContaining('internal-python-package'),
     }),
   ]);
 });

@@ -147,6 +147,16 @@ test('hashes oversized blobs without retaining them and enforces the discard bud
   ).rejects.toThrow('verification budget');
 });
 
+test('enforces a running retained-blob budget while streaming verified objects', async () => {
+  const root = await repo();
+  const first = writeObject(root, 'blob', Buffer.from('first'));
+  const second = writeObject(root, 'blob', Buffer.from('second'));
+
+  await expect(
+    readVerifiedBlobsBounded(root, [first, second], resolveGitBinary(), 8, 64, 8)
+  ).rejects.toThrow('retained-blob verification budget');
+});
+
 test.each([
   ['100664', 'file'],
   ['100600', 'file'],
@@ -186,6 +196,20 @@ test('reads a verified HEAD commit, tree and blob', async () => {
   expect(manifest).toMatchObject({ type: 'blob', mode: '100644' });
   const blobs = readVerifiedBlobs(prepared.repoRoot, [manifest!.oid], prepared.git);
   expect(blobs.get(manifest!.oid)?.toString('utf8')).toContain('example');
+});
+
+test('refuses when the total committed dependency inputs exceed the retained-input budget', async () => {
+  const root = await repo();
+  await writeFile(path.join(root, 'package-lock.json'), '{"lockfileVersion":3,"packages":{}}\n');
+  await git(root, 'add', 'package-lock.json');
+  await execFileAsync(resolveGitBinary(), ['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'lock'], {
+    cwd: root,
+    env: { ...GIT_ENV, ...IDENTITY },
+  });
+
+  await expect(
+    loadHeadOnlyRepository(root, { inputBytes: 64, oversizedBytes: 1024, totalInputBytes: 64 })
+  ).rejects.toThrow('total retained-input budget');
 });
 
 test('loads dependency state only from verified HEAD blobs', async () => {

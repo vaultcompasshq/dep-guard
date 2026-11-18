@@ -377,6 +377,8 @@ function lockEntryNames(ctx: CheckContext): DepChange[] {
         manifestPath: entryChange.lockfilePath,
         lockfilePath: entryChange.lockfilePath,
         lockfileFormat: format,
+        after: entryChange.after,
+        ...(entryChange.before === undefined ? {} : { before: entryChange.before }),
         ...(entryChange.after.inBundle === true ? { bundled: true as const } : {}),
         ...(ctx.noRepoControls === true && name === key && keyIsFolderOrdinarily
           ? {

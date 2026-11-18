@@ -94,16 +94,19 @@ import {
 import { defaultCachePath, loadCache } from './online/cache.js';
 import { fetchPackument, fetchWeeklyDownloads } from './online/registry-client.js';
 import type { DownloadCountsResult } from './online/registry-client.js';
-import { newNames } from './checks/candidates.js';
+import { newNames, newRegistryNames } from './checks/candidates.js';
 import { pythonTyposquatCheck } from './checks/python-typosquat.js';
 import { pypiNamesNotChecked, summarizeEcosystems, type EcosystemsSummary } from './ecosystems.js';
 import { fetchPypiProject } from './online/pypi-client.js';
 import { checkPypiExistence, type PypiExistenceStats } from './online/pypi-existence.js';
+import { PUBLIC_REGISTRY_ORIGIN } from './online/registry-scope.js';
+import { originOf } from './resolution.js';
 import { applyUvSources, judgedPythonControls, PythonIndexRule } from './python-sources.js';
 import { loadPythonControls } from './python-trust.js';
 import {
   finalizeHeadOnlyNotScanned,
   loadHeadOnlyRepository,
+  recordHeadOnlyNotScanned,
   type HeadOnlyRepository,
   type NotScannedEntry,
 } from './no-repo-controls.js';
@@ -516,7 +519,7 @@ function runChecks(
   npmrcChanged: boolean,
   pythonIndex: PythonIndexRule | null = null,
   judged: JudgedSide | null = null,
-  noRepoControls = false
+  headOnly: HeadOnlyRepository | null = null
 ): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
   const ctx: CheckContext = {
     corpus,
@@ -527,7 +530,13 @@ function runChecks(
     npmrcChanged,
     ...(pythonIndex === null ? {} : { pythonIndex }),
     ...(judged === null ? {} : { judged }),
-    ...(noRepoControls ? { noRepoControls: true } : {}),
+    ...(headOnly === null
+      ? {}
+      : {
+          noRepoControls: true,
+          recordNotScanned: (entry: { path: string; reason: string; line?: number }) =>
+            recordHeadOnlyNotScanned(headOnly, entry),
+        }),
     diagnostics: [],
     allowed: [],
   };
@@ -922,6 +931,21 @@ async function enrichOnline(
   pypiStats: PypiExistenceStats;
   unchecked: UncheckedName[];
 }> {
+  if (ctx.noRepoControls === true) {
+    const privateNames = new Set<string>();
+    for (const { change, registryName } of newRegistryNames(ctx)) {
+      const resolvedUrl = change.after?.resolvedUrl;
+      if (resolvedUrl === undefined || originOf(resolvedUrl) === PUBLIC_REGISTRY_ORIGIN) continue;
+      privateNames.add(registryName);
+      ctx.recordNotScanned?.({
+        path: change.lockfilePath ?? change.manifestPath,
+        reason:
+          `public npm online checks were not run for ${registryName} because its lockfile ` +
+          'resolution does not name the public npm registry',
+      });
+    }
+    ctx.privateOnlineNames = privateNames;
+  }
   const deadline = createOnlineDeadline(budgetMs);
   // Threaded through every real fetch below rather than kept at module
   // scope: see LookupCounter's own comment for why a fresh one per call is
@@ -1814,7 +1838,7 @@ export async function scan(opts: {
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const isIgnoredPath = (repoPath: string): boolean =>
     matchingIgnoreEntries(repoPath, config.ignorePaths).length > 0;
-  const statePair = await loadStates(root, opts.mode, {
+  const statePair = await loadStates(headOnly === null ? opts.repoRoot : root, opts.mode, {
     isIgnoredPath,
     ...(headOnly === null ? {} : { headOnly }),
   });
@@ -2091,12 +2115,12 @@ export async function scan(opts: {
     corpus,
     config,
     delta,
-    headOnly !== null
+    headOnly
       ? new Map()
       : controls === null
         ? statePair.after.npmrcRegistryPins
         : controls.npmrcPins,
-    headOnly !== null
+    headOnly
       ? null
       : controls === null
         ? statePair.after.npmrcDefaultRegistry
@@ -2108,7 +2132,7 @@ export async function scan(opts: {
     ) || (controls?.npmrcChanged ?? false),
     pythonIndex,
     judgedSideOf(statePair.after),
-    headOnly !== null
+    headOnly
   );
   // A --base or --trust-base run is the pull-request/CI shape (issue #75):
   // never a commit hook, so the online budget's default is minutes rather
@@ -2380,7 +2404,7 @@ export async function checkSingle(opts: {
     false,
     null,
     null,
-    headOnly !== null
+    headOnly
   );
   // The deny list judges the one name asked about. No version is given, so a
   // versioned ban matches by name and says so (checks/deny.ts).

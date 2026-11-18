@@ -281,6 +281,7 @@ export const hygieneCheck: Check = (ctx) => {
     if (range === null || !FLAGGED_SPECIFIERS.has(range)) {
       continue;
     }
+    const declaredSeverity = SEVERITY_BY_DEP_TYPE[change.depType];
     const normalSeverity = ordinarySeverity(change);
     if (normalSeverity === null && ctx.noRepoControls !== true) {
       continue;
@@ -304,11 +305,11 @@ export const hygieneCheck: Check = (ctx) => {
       // carries the wildcard when it is in more than one.
       const kept = findings[existing];
       const keptDepType = (kept.details as Record<string, unknown>).depType as DepType;
-      const keptNormalSeverity = ordinarySeverity({ ...change, depType: keptDepType });
-      if (
-        normalSeverity !== null &&
-        (keptNormalSeverity === null || SEVERITY_RANK[normalSeverity] > SEVERITY_RANK[keptNormalSeverity])
-      ) {
+      const keptDeclaredSeverity = SEVERITY_BY_DEP_TYPE[keptDepType];
+      const declaredRank = declaredSeverity === null ? 0 : SEVERITY_RANK[declaredSeverity];
+      const keptDeclaredRank =
+        keptDeclaredSeverity === null ? 0 : SEVERITY_RANK[keptDeclaredSeverity];
+      if (declaredRank > keptDeclaredRank) {
         kept.severity = severity;
         kept.message = hygieneMessage(change);
         const details = kept.details as Record<string, unknown>;

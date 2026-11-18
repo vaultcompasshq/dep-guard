@@ -223,6 +223,9 @@ export async function resolveUnknownPackages(
     if (isInternalName(finding.packageName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
       continue;
     }
+    if (ctx.noRepoControls === true && ctx.privateOnlineNames?.has(finding.packageName) === true) {
+      continue;
+    }
     if (isNonPublicName(ctx, finding.packageName)) {
       // Visible, not silent: unlike the internalScopes/internalPrefixes
       // filter above, a real manifest-declared scope pinned to a private

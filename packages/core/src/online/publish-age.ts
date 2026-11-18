@@ -167,7 +167,16 @@ function collectCandidates(ctx: CheckContext, diagnostics: Diagnostic[]): Candid
       name,
       entryChange.after.resolvedUrl
     );
-    if (nonPublicResolution && ctx.noRepoControls !== true) {
+    if (nonPublicResolution) {
+      if (ctx.noRepoControls === true) {
+        ctx.recordNotScanned?.({
+          path: entryChange.lockfilePath,
+          reason:
+            `online publish-age check was not run for ${name} because its lockfile resolution ` +
+            'does not name the public npm registry',
+        });
+        continue;
+      }
       // Internal scopes/prefixes are a name-shaped declaration a user has
       // to remember to configure; a private origin or an .npmrc scope pin
       // is the SAME fact stated by the lockfile and the project's own
@@ -190,7 +199,6 @@ function collectCandidates(ctx: CheckContext, diagnostics: Diagnostic[]): Candid
     const lookupName =
       ctx.noRepoControls === true ? name : entryChange.after.lookupName ?? name;
     const repositoryEvidence = [
-      ...(nonPublicResolution ? ['lockfile resolved URL host'] : []),
       ...(ctx.noRepoControls === true && entryChange.after.lookupName !== undefined
         ? ['lockfile lookup name']
         : []),

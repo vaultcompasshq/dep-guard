@@ -44,6 +44,29 @@ export interface HeadOnlyRepository extends PreparedNoRepoControlsRepository {
   excludedPaths: ReadonlySet<string>;
 }
 
+function compareNotScanned(left: NotScannedEntry, right: NotScannedEntry): number {
+  if (left.path !== right.path) return left.path < right.path ? -1 : 1;
+  const leftLine = left.line ?? -1;
+  const rightLine = right.line ?? -1;
+  if (leftLine !== rightLine) return leftLine - rightLine;
+  if (left.kind !== right.kind) return left.kind < right.kind ? -1 : 1;
+  return left.reason < right.reason ? -1 : left.reason > right.reason ? 1 : 0;
+}
+
+export function recordHeadOnlyNotScanned(
+  repository: HeadOnlyRepository,
+  entry: Omit<NotScannedEntry, 'kind'> & { kind?: 'declined' }
+): void {
+  const row: NotScannedEntry = { ...entry, kind: entry.kind ?? 'declined' };
+  const key = JSON.stringify([row.path, row.line ?? null, row.kind, row.reason]);
+  const exists = repository.notScanned.some(
+    (current) =>
+      JSON.stringify([current.path, current.line ?? null, current.kind, current.reason]) === key
+  );
+  if (!exists) repository.notScanned.push(row);
+  repository.notScanned.sort(compareNotScanned);
+}
+
 const CONTROL_NAMES = new Set(
   [
     CONFIG_FILE,
@@ -60,6 +83,7 @@ const CONTROL_NAMES = new Set(
 );
 export const MAX_DEPENDENCY_INPUT_BYTES = 64 * 1024 * 1024;
 export const MAX_OVERSIZED_INPUT_BYTES = 2 * 1024 * 1024 * 1024;
+export const MAX_TOTAL_DEPENDENCY_INPUT_BYTES = 512 * 1024 * 1024;
 const LOCKFILE_NAMES = new Set([
   'npm-shrinkwrap.json',
   'package-lock.json',
@@ -307,7 +331,7 @@ export function prepareNoRepoControlsRepository(startDir: string): PreparedNoRep
 
 export async function loadHeadOnlyRepository(
   startDir: string,
-  limits: { inputBytes?: number; oversizedBytes?: number } = {}
+  limits: { inputBytes?: number; oversizedBytes?: number; totalInputBytes?: number } = {}
 ): Promise<HeadOnlyRepository> {
   const prepared = prepareNoRepoControlsRepository(startDir);
   let entries: VerifiedEntry[];
@@ -321,6 +345,7 @@ export async function loadHeadOnlyRepository(
   const excludedPaths = new Set<string>();
   const inputLimit = limits.inputBytes ?? MAX_DEPENDENCY_INPUT_BYTES;
   const oversizedLimit = limits.oversizedBytes ?? MAX_OVERSIZED_INPUT_BYTES;
+  const totalInputLimit = limits.totalInputBytes ?? MAX_TOTAL_DEPENDENCY_INPUT_BYTES;
   const inputEntries = entries.filter(
     (entry) => entry.type === 'blob' && dependencyInput(entry.path)
   );
@@ -329,6 +354,17 @@ export async function loadHeadOnlyRepository(
     inputEntries.map((entry) => entry.oid),
     prepared.git
   );
+  const retainedInputBytes = inputEntries.reduce((total, entry) => {
+    const size = sizes.get(entry.oid)?.size ?? 0;
+    return size <= inputLimit ? total + size : total;
+  }, 0);
+  if (retainedInputBytes > totalInputLimit) {
+    throw new NoRepoControlsError(
+      `dep-guard: refusing to run: committed dependency inputs need ${retainedInputBytes} bytes, ` +
+        `over the ${totalInputLimit} byte total retained-input budget. Reduce the committed dependency ` +
+        'inputs or assess them separately. Nothing was scanned.'
+    );
+  }
   const oversizedEntries = inputEntries.filter(
     (entry) => (sizes.get(entry.oid)?.size ?? 0) > inputLimit
   );
@@ -516,8 +552,5 @@ export function finalizeHeadOnlyNotScanned(
       seen.add(key);
       return true;
     })
-    .sort((left, right) => {
-      if (left.path !== right.path) return left.path < right.path ? -1 : 1;
-      return (left.line ?? 0) - (right.line ?? 0);
-    });
+    .sort(compareNotScanned);
 }

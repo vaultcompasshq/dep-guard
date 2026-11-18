@@ -136,6 +136,13 @@ export interface CheckContext {
   // True only for the HEAD-only assessment mode. Checks use this to keep
   // findings that repository-chosen context would otherwise drop or lower.
   noRepoControls?: boolean;
+  // HEAD-only mode records repository-derived reasons an online lookup was
+  // declined here so the report can distinguish "not sent" from "checked".
+  recordNotScanned?: (entry: { path: string; reason: string; line?: number }) => void;
+  // Filled by the online orchestrator in HEAD-only mode. If any candidate
+  // for a name records a non-public resolution, no public npm endpoint may
+  // receive that name through another online check.
+  privateOnlineNames?: ReadonlySet<string>;
   // The whole judged side, for the one check that judges every entry rather
   // than what the change moved: the deny list (checks/deny.ts). Set by
   // scan.ts from the side under judgment; absent on a hand-built context,

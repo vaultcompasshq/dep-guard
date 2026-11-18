@@ -57,6 +57,7 @@ export function asymmetryCandidateNames(findings: readonly Omit<Finding, 'finger
       finding.severity === 'low' &&
       !isPythonFinding(finding) &&
       !isInternalName(finding.packageName, ctx.config.internalScopes, ctx.config.internalPrefixes) &&
+      !(ctx.noRepoControls === true && ctx.privateOnlineNames?.has(finding.packageName) === true) &&
       !isNonPublicName(ctx, finding.packageName)
     ) {
       names.add(finding.packageName);
@@ -85,6 +86,9 @@ export async function applyTyposquatAsymmetry(
       continue;
     }
     if (isInternalName(finding.packageName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
+      continue;
+    }
+    if (ctx.noRepoControls === true && ctx.privateOnlineNames?.has(finding.packageName) === true) {
       continue;
     }
     if (isNonPublicName(ctx, finding.packageName)) {

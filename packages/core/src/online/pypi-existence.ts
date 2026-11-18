@@ -30,6 +30,7 @@ import type { Diagnostic, Finding } from '../types.js';
 import type { OnlineDeadline } from './deadline.js';
 import { ONLINE_DEADLINE_CODE, deadlineDiagnosticMessage } from './deadline.js';
 import type { PypiAnswer } from './pypi-client.js';
+import { isPypiOrigin } from '../python-index.js';
 import { unreachable as unreachableName, type UncheckedSink } from './unchecked.js';
 
 export const PYPI_CHECK_LABEL = 'pypi existence';
@@ -137,6 +138,26 @@ export async function checkPypiExistence(
   for (const [name, group] of byName) {
     if (isPypiInternalName(name, ctx.config.internalPrefixes)) {
       stats.internal += 1;
+      continue;
+    }
+    const nonPublicSources =
+      ctx.noRepoControls === true
+        ? group.filter(
+            (candidate) =>
+              candidate.recordedOrigin !== null && !isPypiOrigin(candidate.recordedOrigin)
+          )
+        : [];
+    if (nonPublicSources.length > 0) {
+      for (const candidate of nonPublicSources) {
+        ctx.recordNotScanned?.({
+          path: candidate.lockfilePath ?? candidate.anchorPath,
+          reason:
+            `online PyPI existence check was not run for ${name} because its lockfile source ` +
+            'does not name PyPI',
+        });
+      }
+      stats.privateIndex += 1;
+      fullySkipped.add(name);
       continue;
     }
     const sendable: PypiCandidate[] = [];
