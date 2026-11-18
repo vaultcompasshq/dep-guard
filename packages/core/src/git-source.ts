@@ -39,6 +39,8 @@ import {
 } from './state.js';
 import { withoutByteOrderMark } from './text.js';
 import { DepGuardError, type Diagnostic } from './types.js';
+import type { HeadOnlyRepository } from './no-repo-controls.js';
+import { readVerifiedBlobs } from './utils/verified-objects.js';
 
 // Loads the two sides of a scan out of a repository. Everything below
 // reads bytes and hands them to the existing parsers; no rule logic lives
@@ -723,6 +725,80 @@ function gitSource(
     // different directories. The path is its own identity here.
     async identifyDir(relPath: string): Promise<string | null> {
       return relPath;
+    },
+  };
+}
+
+function headOnlySource(repository: HeadOnlyRepository): FileSource {
+  const regular = new Map(
+    repository.entries
+      .filter((entry) => entry.type === 'blob')
+      .map((entry) => [entry.path, entry.oid] as const)
+  );
+  const symlinks = new Map(
+    repository.entries
+      .filter((entry) => entry.type === 'symlink')
+      .map((entry) => [entry.path, entry.oid] as const)
+  );
+  const listed = new Map([...regular, ...symlinks]);
+  const children = buildChildIndex(listed.keys());
+  const readOne = (relPath: string): string | null => {
+    if (baseName(relPath) === NPMRC) return null;
+    const oid = listed.get(relPath);
+    if (oid === undefined) return null;
+    const bytes = readVerifiedBlobs(repository.repoRoot, [oid], repository.git).get(oid);
+    return bytes?.toString('utf8') ?? null;
+  };
+  return {
+    async read(relPath: string): Promise<string | null> {
+      return readOne(relPath);
+    },
+    async readMany(relPaths: string[]): Promise<Map<string, string | null>> {
+      const result = new Map<string, string | null>();
+      const byOid = new Map<string, string[]>();
+      for (const relPath of relPaths) {
+        if (baseName(relPath) === NPMRC) {
+          result.set(relPath, null);
+          continue;
+        }
+        const oid = listed.get(relPath);
+        if (oid === undefined) {
+          result.set(relPath, null);
+          continue;
+        }
+        byOid.set(oid, [...(byOid.get(oid) ?? []), relPath]);
+      }
+      const blobs = readVerifiedBlobs(repository.repoRoot, [...byOid.keys()], repository.git);
+      for (const [oid, paths] of byOid) {
+        const text = blobs.get(oid)?.toString('utf8') ?? null;
+        for (const relPath of paths) result.set(relPath, text);
+      }
+      return result;
+    },
+    async listChildDirs(dir: string): Promise<string[]> {
+      return children.get(dir) ?? [];
+    },
+    async identifyDir(relPath: string): Promise<string | null> {
+      return relPath;
+    },
+    async listFiles(): Promise<string[]> {
+      return [...listed.keys()];
+    },
+    async lockfileInventory(): Promise<Array<{ path: string; blobId: string | null }>> {
+      return [...listed]
+        .filter(([filePath]) => isLockfileName(filePath))
+        .map(([filePath, oid]) => ({ path: filePath, blobId: oid }));
+    },
+    async isSymlink(relPath: string): Promise<boolean> {
+      return symlinks.has(relPath);
+    },
+    async readLink(relPath: string): Promise<string | null> {
+      const oid = symlinks.get(relPath);
+      if (oid === undefined) return null;
+      return readVerifiedBlobs(repository.repoRoot, [oid], repository.git).get(oid)?.toString('utf8') ?? null;
+    },
+    async ignoresCase(): Promise<boolean> {
+      return false;
     },
   };
 }
@@ -4105,9 +4181,28 @@ export async function refsNameSameTree(repoRoot: string, a: string, b: string): 
 export async function loadStates(
   repoRoot: string,
   mode: ScanMode,
-  options: { isIgnoredPath?: (relPath: string) => boolean } = {}
+  options: {
+    isIgnoredPath?: (relPath: string) => boolean;
+    headOnly?: HeadOnlyRepository;
+  } = {}
 ): Promise<StatePair> {
   const isIgnoredPath = options.isIgnoredPath ?? (() => false);
+  if (options.headOnly !== undefined) {
+    if (mode.kind !== 'audit') {
+      throw new DepGuardError('--no-repo-controls cannot be combined with a comparison mode', 'git-error');
+    }
+    const diagnostics: Diagnostic[] = [];
+    const after = await loadState(
+      headOnlySource(options.headOnly),
+      diagnostics,
+      JUDGED,
+      '',
+      isIgnoredPath,
+      []
+    );
+    settleParseFailures([after], '', diagnostics);
+    return { before: null, after: after.state, mode, diagnostics: dedupeDiagnostics(diagnostics) };
+  }
   await assertScannablePath(repoRoot);
   const diagnostics: Diagnostic[] = [];
 
