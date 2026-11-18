@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, copyFile, mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -8,9 +8,11 @@ import {
   prepareNoRepoControlsRepository,
 } from '../src/no-repo-controls.js';
 import { resolveGitBinary } from '../src/utils/git-binary.js';
+import { readVerifiedHeadTree } from '../src/utils/verified-head-tree.js';
 
 const execFileAsync = promisify(execFile);
 const POSIX = process.platform === 'win32' ? test.skip : test;
+const WINDOWS = process.platform === 'win32' ? test : test.skip;
 const IDENTITY = {
   GIT_AUTHOR_NAME: 'Test',
   GIT_AUTHOR_EMAIL: 'test@example.invalid',
@@ -131,6 +133,16 @@ describe('no-repo-controls repository preparation', () => {
       'utf8'
     );
     expect((await refusal(alternateRepo)).message).toContain('.git/objects/info/alternates exists');
+
+    const httpAlternateRepo = await cleanRepo();
+    await writeFile(
+      path.join(httpAlternateRepo, '.git', 'objects', 'info', 'http-alternates'),
+      'https://example.invalid/objects\n',
+      'utf8'
+    );
+    expect((await refusal(httpAlternateRepo)).message).toContain(
+      '.git/objects/info/http-alternates exists'
+    );
   });
 
   POSIX('refuses links anywhere in the object store', async () => {
@@ -149,6 +161,17 @@ describe('no-repo-controls repository preparation', () => {
     }
   });
 
+  POSIX('refuses a special file in the object store', async () => {
+    const repo = await cleanRepo();
+    const fifo = path.join(repo, '.git', 'objects', 'special');
+    await execFileAsync('mkfifo', [fifo]);
+
+    const error = await refusal(repo);
+
+    expect(error.message).toContain('.git/objects/special');
+    expect(error.message).toContain('special file');
+  });
+
   POSIX('refuses a git binary resolved from inside the assessed repository', async () => {
     const repo = await cleanRepo();
     const bin = path.join(repo, 'bin');
@@ -165,6 +188,61 @@ describe('no-repo-controls repository preparation', () => {
     } finally {
       process.env.PATH = saved;
     }
+  });
+
+  WINDOWS('does not run a tracked git.exe from the assessed root', async () => {
+    const repo = await cleanRepo();
+    const planted = path.join(repo, 'git.exe');
+    await copyFile(process.execPath, planted);
+    await git(repo, 'add', 'git.exe');
+    await execFileAsync(resolveGitBinary(), ['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'planted git'], {
+      cwd: repo,
+      env: { ...GIT_ENV, ...IDENTITY },
+    });
+
+    const prepared = prepareNoRepoControlsRepository(repo);
+
+    expect(prepared.git.toLowerCase()).not.toBe(planted.toLowerCase());
+    expect(prepared.head).toBe((await git(repo, 'rev-parse', 'HEAD')).trim());
+  });
+
+  POSIX('never invokes a configured clean filter while reading HEAD objects', async () => {
+    const repo = await cleanRepo();
+    const prepared = prepareNoRepoControlsRepository(repo);
+    const marker = path.join(repo, 'filter-ran');
+    const filter = path.join(repo, 'filter.sh');
+    await writeFile(filter, `#!/bin/sh\n: > '${marker}'\ncat\n`, 'utf8');
+    await chmod(filter, 0o755);
+    await writeFile(path.join(repo, '.gitattributes'), 'package.json filter=owned\n', 'utf8');
+    await git(repo, 'config', '--local', 'filter.owned.clean', filter);
+
+    await git(repo, 'hash-object', 'package.json');
+    await access(marker);
+    await rm(marker);
+
+    readVerifiedHeadTree(repo, prepared.head, prepared.git);
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await refusal(repo)).message).toContain('filter.owned.clean');
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  POSIX('never invokes a configured fsmonitor while reading HEAD objects', async () => {
+    const repo = await cleanRepo();
+    const prepared = prepareNoRepoControlsRepository(repo);
+    const marker = path.join(repo, 'fsmonitor-ran');
+    const monitor = path.join(repo, 'fsmonitor.sh');
+    await writeFile(monitor, `#!/bin/sh\n: > '${marker}'\nprintf 'token\\n'\n`, 'utf8');
+    await chmod(monitor, 0o755);
+    await git(repo, 'config', '--local', 'core.fsmonitor', monitor);
+
+    await git(repo, 'ls-files');
+    await access(marker);
+    await rm(marker);
+
+    readVerifiedHeadTree(repo, prepared.head, prepared.git);
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await refusal(repo)).message).toContain('core.fsmonitor');
+    await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   test('refuses an unborn HEAD and a HEAD that is not a commit', async () => {

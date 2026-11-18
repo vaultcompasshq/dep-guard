@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cleanNoRepoControlsGitEnv } from '../git-env.js';
 
@@ -31,6 +31,11 @@ export function gitObjectId(algorithm: 'sha1' | 'sha256', type: string, bytes: B
 export interface VerifiedObject {
   type: string;
   bytes: Buffer;
+}
+
+export interface ObjectInfo {
+  type: string;
+  size: number;
 }
 
 export function readVerifiedObjects(
@@ -111,14 +116,14 @@ export function readVerifiedBlobs(
   return blobs;
 }
 
-export function objectTypes(
+export function objectInfo(
   repoRoot: string,
   oids: readonly string[],
   git: string
-): Map<string, string> {
+): Map<string, ObjectInfo> {
   const unique = [...new Set(oids)];
-  const types = new Map<string, string>();
-  if (unique.length === 0) return types;
+  const info = new Map<string, ObjectInfo>();
+  if (unique.length === 0) return info;
   const result = spawnSync(git, ['-c', 'core.quotePath=false', 'cat-file', '--batch-check'], {
     cwd: repoRoot,
     env: cleanNoRepoControlsGitEnv(),
@@ -143,7 +148,156 @@ export function objectTypes(
   for (let index = 0; index < unique.length; index += 1) {
     const fields = lines[index].split(' ');
     if (fields[0] !== unique[index] || fields.length !== 3) continue;
-    types.set(fields[0], fields[1]);
+    const size = Number.parseInt(fields[2], 10);
+    if (Number.isSafeInteger(size) && size >= 0) {
+      info.set(fields[0], { type: fields[1], size });
+    }
   }
-  return types;
+  return info;
+}
+
+export function objectTypes(
+  repoRoot: string,
+  oids: readonly string[],
+  git: string
+): Map<string, string> {
+  return new Map(
+    [...objectInfo(repoRoot, oids, git)].map(([oid, info]) => [oid, info.type])
+  );
+}
+
+export interface BoundedBlobRead {
+  blobs: Map<string, Buffer>;
+  oversized: Map<string, number>;
+}
+
+export async function readVerifiedBlobsBounded(
+  repoRoot: string,
+  oids: readonly string[],
+  git: string,
+  keepAtMost: number,
+  discardAtMost: number
+): Promise<BoundedBlobRead> {
+  const unique = [...new Set(oids)];
+  const blobs = new Map<string, Buffer>();
+  const oversized = new Map<string, number>();
+  if (unique.length === 0) return { blobs, oversized };
+  const algorithm = hashAlgorithmForOid(unique[0]);
+  if (algorithm === null || unique.some((oid) => hashAlgorithmForOid(oid) !== algorithm)) {
+    throw objectStoreMismatch('a blob id is neither a consistent sha1 nor sha256 id');
+  }
+
+  const child = spawn(git, ['-c', 'core.quotePath=false', 'cat-file', '--batch'], {
+    cwd: repoRoot,
+    env: cleanNoRepoControlsGitEnv(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk: Buffer) => {
+    if (stderr.length < 16_384) stderr += chunk.toString('utf8');
+  });
+  const exited = new Promise<{ code: number | null; error: Error | null }>((resolve) => {
+    child.once('error', (error) => resolve({ code: null, error }));
+    child.once('close', (code) => resolve({ code, error: null }));
+  });
+  child.stdin.on('error', () => undefined);
+  child.stdin.end(`${unique.join('\n')}\n`);
+
+  let index = 0;
+  let header = Buffer.alloc(0);
+  let remaining = -1;
+  let terminator = false;
+  let hash: ReturnType<typeof createHash> | null = null;
+  let kept: Buffer[] = [];
+  let currentSize = 0;
+  let discarded = 0;
+
+  const finish = (): void => {
+    const oid = unique[index];
+    if (hash === null || hash.digest('hex') !== oid) {
+      throw objectStoreMismatch(`blob ${oid} does not hash to its own id`);
+    }
+    if (currentSize <= keepAtMost) blobs.set(oid, Buffer.concat(kept, currentSize));
+    else oversized.set(oid, currentSize);
+    index += 1;
+    remaining = -1;
+    terminator = false;
+    hash = null;
+    kept = [];
+    currentSize = 0;
+  };
+
+  try {
+    for await (const value of child.stdout) {
+      const chunk = value as Buffer;
+      let offset = 0;
+      while (offset < chunk.length) {
+        if (remaining === -1) {
+          const newline = chunk.indexOf(0x0a, offset);
+          if (newline === -1) {
+            header = Buffer.concat([header, chunk.subarray(offset)]);
+            if (header.length > 1024) throw objectStoreMismatch('git returned an overlong object header');
+            break;
+          }
+          header = Buffer.concat([header, chunk.subarray(offset, newline)]);
+          const fields = header.toString('utf8').split(' ');
+          const oid = unique[index];
+          if (fields.length !== 3 || fields[0] !== oid || fields[1] !== 'blob') {
+            throw objectStoreMismatch(`git returned no usable blob for ${oid}`);
+          }
+          const size = Number.parseInt(fields[2], 10);
+          if (!Number.isSafeInteger(size) || size < 0) {
+            throw objectStoreMismatch(`git returned an invalid blob size for ${oid}`);
+          }
+          currentSize = size;
+          if (size > keepAtMost) {
+            discarded += size;
+            if (discarded > discardAtMost) {
+              throw new ObjectStoreMismatch(
+                `dep-guard: committed dependency inputs exceed the ${discardAtMost} byte oversized-blob ` +
+                  'verification budget. Nothing was scanned.'
+              );
+            }
+          }
+          hash = createHash(algorithm).update(`blob ${size}\0`);
+          remaining = size;
+          terminator = size === 0;
+          header = Buffer.alloc(0);
+          offset = newline + 1;
+          continue;
+        }
+        if (remaining > 0) {
+          const length = Math.min(remaining, chunk.length - offset);
+          const part = chunk.subarray(offset, offset + length);
+          hash?.update(part);
+          if (currentSize <= keepAtMost) kept.push(part);
+          remaining -= length;
+          offset += length;
+          if (remaining === 0) terminator = true;
+          continue;
+        }
+        if (terminator) {
+          if (chunk[offset] !== 0x0a) throw objectStoreMismatch(`blob ${unique[index]} has no terminator`);
+          offset += 1;
+          finish();
+        }
+      }
+    }
+  } catch (error) {
+    child.kill();
+    await exited;
+    throw error;
+  }
+  const status = await exited;
+  if (status.error !== null || status.code !== 0) {
+    throw new ObjectStoreMismatch(
+      `dep-guard: could not read committed blobs with git cat-file --batch: ${
+        stderr.trim() || String(status.error ?? `git exited with status ${String(status.code)}`)
+      }. Nothing was scanned.`
+    );
+  }
+  if (index !== unique.length || remaining !== -1 || header.length !== 0) {
+    throw objectStoreMismatch(`git answered ${index} complete blobs for ${unique.length} requests`);
+  }
+  return { blobs, oversized };
 }

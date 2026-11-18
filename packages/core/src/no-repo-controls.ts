@@ -9,9 +9,11 @@ import { cleanNoRepoControlsGitEnv } from './git-env.js';
 import { isPythonLockfilePath } from './python-lockfiles.js';
 import { isPythonManifestPath } from './python-manifest.js';
 import { DepGuardError } from './types.js';
+import type { RepoState } from './state.js';
 import { isInsideDir, resolveGitBinary } from './utils/git-binary.js';
 import { checkLocalGitConfig, localGitConfigRefusal } from './utils/local-git-config.js';
 import { readVerifiedHeadTree, type VerifiedEntry } from './utils/verified-head-tree.js';
+import { objectInfo, readVerifiedBlobsBounded } from './utils/verified-objects.js';
 
 const CLONE_FRESH = 'Clone the repository fresh and assess the clone.';
 
@@ -31,15 +33,33 @@ export interface PreparedNoRepoControlsRepository {
 export interface NotScannedEntry {
   path: string;
   reason: string;
+  kind: 'submodule' | 'built-in-skip' | 'too-large' | 'unsupported' | 'declined' | 'unparseable';
+  line?: number;
 }
 
 export interface HeadOnlyRepository extends PreparedNoRepoControlsRepository {
   entries: readonly VerifiedEntry[];
   repoControls: { honoured: false; present: string[] };
   notScanned: NotScannedEntry[];
+  excludedPaths: ReadonlySet<string>;
 }
 
-const CONTROL_NAMES = new Set([CONFIG_FILE, LOCAL_CONFIG_FILE, BASELINE_FILE, '.npmrc']);
+const CONTROL_NAMES = new Set(
+  [
+    CONFIG_FILE,
+    LOCAL_CONFIG_FILE,
+    BASELINE_FILE,
+    '.npmrc',
+    '.yarnrc',
+    '.yarnrc.yml',
+    'pnpm-workspace.yaml',
+    'pyproject.toml',
+    'uv.toml',
+    'Pipfile',
+  ].map((name) => name.toLowerCase())
+);
+export const MAX_DEPENDENCY_INPUT_BYTES = 64 * 1024 * 1024;
+export const MAX_OVERSIZED_INPUT_BYTES = 2 * 1024 * 1024 * 1024;
 const LOCKFILE_NAMES = new Set([
   'npm-shrinkwrap.json',
   'package-lock.json',
@@ -285,7 +305,10 @@ export function prepareNoRepoControlsRepository(startDir: string): PreparedNoRep
   return { repoRoot, git: gitBin, head: head.out.trim() };
 }
 
-export function loadHeadOnlyRepository(startDir: string): HeadOnlyRepository {
+export async function loadHeadOnlyRepository(
+  startDir: string,
+  limits: { inputBytes?: number; oversizedBytes?: number } = {}
+): Promise<HeadOnlyRepository> {
   const prepared = prepareNoRepoControlsRepository(startDir);
   let entries: VerifiedEntry[];
   try {
@@ -295,11 +318,46 @@ export function loadHeadOnlyRepository(startDir: string): HeadOnlyRepository {
   }
   const present: string[] = [];
   const notScanned: NotScannedEntry[] = [];
+  const excludedPaths = new Set<string>();
+  const inputLimit = limits.inputBytes ?? MAX_DEPENDENCY_INPUT_BYTES;
+  const oversizedLimit = limits.oversizedBytes ?? MAX_OVERSIZED_INPUT_BYTES;
+  const inputEntries = entries.filter(
+    (entry) => entry.type === 'blob' && dependencyInput(entry.path)
+  );
+  const sizes = objectInfo(
+    prepared.repoRoot,
+    inputEntries.map((entry) => entry.oid),
+    prepared.git
+  );
+  const oversizedEntries = inputEntries.filter(
+    (entry) => (sizes.get(entry.oid)?.size ?? 0) > inputLimit
+  );
+  if (oversizedEntries.length > 0) {
+    await readVerifiedBlobsBounded(
+      prepared.repoRoot,
+      oversizedEntries.map((entry) => entry.oid),
+      prepared.git,
+      0,
+      oversizedLimit
+    );
+    for (const entry of oversizedEntries) {
+      excludedPaths.add(entry.path);
+      notScanned.push({
+        path: entry.path,
+        kind: 'too-large',
+        reason: `dependency input is ${sizes.get(entry.oid)?.size ?? 0} bytes, over the ${inputLimit} byte parse limit`,
+      });
+    }
+  }
   for (const entry of entries) {
     const name = baseName(entry.path);
-    if (CONTROL_NAMES.has(name)) present.push(entry.path);
+    if (CONTROL_NAMES.has(name.toLowerCase())) present.push(entry.path);
     if (entry.type === 'commit') {
-      notScanned.push({ path: entry.path, reason: 'submodule content is not part of this HEAD tree' });
+      notScanned.push({
+        path: entry.path,
+        kind: 'submodule',
+        reason: 'submodule content is not part of this HEAD tree',
+      });
       continue;
     }
     if (entry.type === 'symlink' && dependencyInput(entry.path)) {
@@ -308,23 +366,158 @@ export function loadHeadOnlyRepository(startDir: string): HeadOnlyRepository {
           `The link is not followed. Replace it with a regular committed file. Nothing was scanned.`
       );
     }
-    const segment = dependencyInput(entry.path) ? skippedSegment(entry.path) : null;
+    const segment =
+      dependencyInput(entry.path) && !excludedPaths.has(entry.path)
+        ? skippedSegment(entry.path)
+        : null;
     if (segment !== null) {
       notScanned.push({
         path: entry.path,
+        kind: 'built-in-skip',
         reason: `dependency input under the built-in skipped directory ${segment}`,
       });
     }
     if (name === 'go.mod' || name === 'go.sum') {
-      notScanned.push({ path: entry.path, reason: 'Go dependency files are detected but not parsed' });
+      notScanned.push({
+        path: entry.path,
+        kind: 'unsupported',
+        reason: 'Go dependency files are detected but not parsed',
+      });
     }
   }
-  present.sort();
-  notScanned.sort((left, right) => left.path.localeCompare(right.path));
+  present.sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  notScanned.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   return {
     ...prepared,
     entries,
     repoControls: { honoured: false, present },
     notScanned,
+    excludedPaths,
   };
+}
+
+export function finalizeHeadOnlyNotScanned(
+  repository: HeadOnlyRepository,
+  state: RepoState
+): void {
+  const judged = new Set<string>([
+    ...state.manifests.map((manifest) => manifest.path),
+    ...(state.lockfileInventory ?? [])
+      .filter((entry) => entry.read)
+      .map((entry) => entry.path),
+    ...(state.pythonLockfiles ?? [])
+      .filter((lockfile) => lockfile.unreadable === undefined)
+      .map((lockfile) => lockfile.path),
+  ]);
+  repository.notScanned = repository.notScanned.filter(
+    (entry) => entry.kind !== 'built-in-skip' || !judged.has(entry.path)
+  );
+
+  for (const manifest of state.manifests) {
+    const python = manifest.python;
+    if (python === undefined) continue;
+    for (const exclusion of python.exclusions) {
+      repository.notScanned.push({
+        path: manifest.path,
+        kind: 'declined',
+        ...(exclusion.line === undefined ? {} : { line: exclusion.line }),
+        reason:
+          `Python dependency candidate was not sent to name checks because it was classified as ` +
+          exclusion.cls,
+      });
+    }
+  }
+  for (const lockfile of state.pythonLockfiles ?? []) {
+    if (lockfile.unreadable !== undefined) {
+      repository.notScanned.push({
+        path: lockfile.path,
+        kind: 'unparseable',
+        reason: lockfile.unreadable,
+      });
+    }
+  }
+  for (const entry of state.lockfileInventory ?? []) {
+    const alreadyExplained = repository.notScanned.some(
+      (row) =>
+        row.path === entry.path &&
+        (row.kind === 'unparseable' || row.kind === 'too-large' || row.kind === 'built-in-skip')
+    );
+    if (!entry.read && !alreadyExplained) {
+      repository.notScanned.push({
+        path: entry.path,
+        kind: 'unsupported',
+        reason: 'lockfile format is present but is not parsed for dependency entries',
+      });
+    } else if (entry.read) {
+      repository.notScanned.push({
+        path: entry.path,
+        kind: 'declined',
+        reason: 'whole-HEAD mode has no comparison side; comparison-only lockfile tamper signals were not judged',
+      });
+    }
+  }
+
+  const parentDir = (file: string): string => {
+    const slash = file.lastIndexOf('/');
+    return slash === -1 ? '' : file.slice(0, slash);
+  };
+  const covers = (directory: string, file: string): boolean => {
+    const manifestDir = parentDir(file);
+    return directory === '' || manifestDir === directory || manifestDir.startsWith(`${directory}/`);
+  };
+  const npmLockDirs = new Set(
+    (state.lockfileInventory ?? [])
+      .filter((entry) => entry.read)
+      .map((entry) => parentDir(entry.path))
+  );
+  const pythonLockDirs = new Set(
+    (state.pythonLockfiles ?? [])
+      .filter((entry) => entry.unreadable === undefined)
+      .map((entry) => parentDir(entry.path))
+  );
+  for (const manifest of state.manifests) {
+    if (manifest.deps.length === 0) continue;
+    const covered = [...(manifest.python === undefined ? npmLockDirs : pythonLockDirs)].some((dir) =>
+      covers(dir, manifest.path)
+    );
+    if (!covered) {
+      repository.notScanned.push({
+        path: manifest.path,
+        kind: 'declined',
+        reason: 'manifest has dependencies but no covering supported lockfile; lockfile-only checks were not run',
+      });
+    }
+  }
+  const manifestDirs = new Set(state.manifests.map((manifest) => parentDir(manifest.path)));
+  for (const entry of state.lockfileInventory ?? []) {
+    if (!manifestDirs.has(parentDir(entry.path))) {
+      repository.notScanned.push({
+        path: entry.path,
+        kind: 'declined',
+        reason: 'lockfile has no manifest in its directory; its dependency entries were still judged',
+      });
+    }
+  }
+  for (const entry of state.pythonLockfiles ?? []) {
+    if (!manifestDirs.has(parentDir(entry.path))) {
+      repository.notScanned.push({
+        path: entry.path,
+        kind: 'declined',
+        reason: 'Python lockfile has no manifest in its directory; its dependency names were still judged',
+      });
+    }
+  }
+
+  const seen = new Set<string>();
+  repository.notScanned = repository.notScanned
+    .filter((entry) => {
+      const key = JSON.stringify([entry.path, entry.line ?? null, entry.kind, entry.reason]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => {
+      if (left.path !== right.path) return left.path < right.path ? -1 : 1;
+      return (left.line ?? 0) - (right.line ?? 0);
+    });
 }

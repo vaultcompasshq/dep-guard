@@ -133,6 +133,9 @@ export interface CheckContext {
   // --trust-base run, the judged side's otherwise. Absent on a hand-built
   // context, which then skips no Python name.
   pythonIndex?: PythonIndexRule;
+  // True only for the HEAD-only assessment mode. Checks use this to keep
+  // findings that repository-chosen context would otherwise drop or lower.
+  noRepoControls?: boolean;
   // The whole judged side, for the one check that judges every entry rather
   // than what the change moved: the deny list (checks/deny.ts). Set by
   // scan.ts from the side under judgment; absent on a hand-built context,

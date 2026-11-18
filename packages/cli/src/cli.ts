@@ -179,7 +179,7 @@ interface ScanCliOptions {
   corpusDir?: string;
   online?: boolean;
   onlineBudgetMs?: string;
-  noRepoControls?: boolean;
+  repoControls?: boolean;
 }
 
 interface CheckCliOptions {
@@ -189,7 +189,7 @@ interface CheckCliOptions {
   online?: boolean;
   onlineBudgetMs?: string;
   trustBase?: string;
-  noRepoControls?: boolean;
+  repoControls?: boolean;
 }
 
 interface InitCliOptions {
@@ -198,9 +198,13 @@ interface InitCliOptions {
   json?: boolean;
 }
 
+function noRepoControls(options: { repoControls?: boolean }): boolean {
+  return options.repoControls === false;
+}
+
 function resolveMode(options: ScanCliOptions): ScanMode {
   if (
-    options.noRepoControls === true &&
+    noRepoControls(options) &&
     (options.staged === true || options.base !== undefined || options.trustBase !== undefined)
   ) {
     throw new CliUsageError(
@@ -340,7 +344,7 @@ function buildProgram(): Command {
           online: options.online,
           onlineBudgetMs,
           trustBase: options.trustBase,
-          noRepoControls: options.noRepoControls,
+          noRepoControls: noRepoControls(options),
         });
         emit(result, format);
         reportCouldNotRun(result);
@@ -368,7 +372,7 @@ function buildProgram(): Command {
     .exitOverride()
     .action(async (name: string, options: CheckCliOptions) => {
       try {
-        if (options.noRepoControls === true && options.trustBase !== undefined) {
+        if (noRepoControls(options) && options.trustBase !== undefined) {
           throw new CliUsageError('--no-repo-controls cannot be combined with --trust-base');
         }
         const format = parseFormat(options.format);
@@ -382,7 +386,7 @@ function buildProgram(): Command {
           online: options.online,
           onlineBudgetMs,
           trustBase: options.trustBase,
-          noRepoControls: options.noRepoControls,
+          noRepoControls: noRepoControls(options),
         });
         emit(result, format);
         reportCouldNotRun(result);

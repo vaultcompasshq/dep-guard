@@ -20,6 +20,7 @@ export interface GitResolveEnv {
   env: NodeJS.ProcessEnv;
   platform: NodeJS.Platform;
   isFile: (candidate: string) => boolean;
+  isExecutable?: (candidate: string) => boolean;
 }
 
 export class GitBinaryError extends Error {
@@ -39,7 +40,19 @@ const realWorld = (): GitResolveEnv => ({
       return false;
     }
   },
+  isExecutable: (candidate) => {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  },
 });
+
+function isFullyQualifiedWindowsPath(candidate: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(candidate) || /^[\\/]{2}[^\\/]/.test(candidate);
+}
 
 /** The absolute path of the first `git` on PATH, or throws {@link GitBinaryError}. */
 export function resolveGitBinary(world: GitResolveEnv = realWorld()): string {
@@ -57,9 +70,12 @@ export function resolveGitBinary(world: GitResolveEnv = realWorld()): string {
   for (const entry of raw.split(win ? ';' : ':')) {
     const dir = entry.trim().replace(/^"(.*)"$/, '$1');
     if (dir === '' || !impl.isAbsolute(dir)) continue;
+    if (win && !isFullyQualifiedWindowsPath(dir)) continue;
     for (const extension of names) {
       const candidate = impl.join(dir, `git${extension}`);
-      if (world.isFile(candidate)) return candidate;
+      if (!world.isFile(candidate)) continue;
+      if (!win && world.isExecutable !== undefined && !world.isExecutable(candidate)) continue;
+      return candidate;
     }
   }
   throw new GitBinaryError(

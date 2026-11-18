@@ -112,7 +112,7 @@ export function localGitConfigRefusal(
   if (verdict.reason === 'git') {
     return (
       `${tool}: could not read the repository's local git config (git config --local --list): ` +
-      `${verdict.detail}. Nothing was scanned.`
+      `${verdict.detail}. ${LOCAL_GIT_CONFIG_REMEDY} Nothing was scanned.`
     );
   }
   // eslint-disable-next-line no-control-regex

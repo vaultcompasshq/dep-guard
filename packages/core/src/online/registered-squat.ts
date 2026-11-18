@@ -91,7 +91,7 @@ export async function findRegisteredSquats(
   // pull-request run turns into online-names-unchecked. A lockfile-only
   // name a change adds to an existing lockfile is sent (NewName.freshLockfile).
   const candidates = newRegistryNames(ctx).filter(({ registryName, freshLockfile }) => {
-    if (freshLockfile === true) {
+    if (freshLockfile === true && ctx.noRepoControls !== true) {
       return false;
     }
     if (isInternalName(registryName, ctx.config.internalScopes, ctx.config.internalPrefixes)) {
@@ -143,7 +143,7 @@ export async function findRegisteredSquats(
   const findings: Omit<Finding, 'fingerprint'>[] = [];
   let skippedByDeadline = 0;
 
-  for (const { change, registryName } of candidates) {
+  for (const { change, registryName, freshLockfile } of candidates) {
     // Three states, not two -- see DownloadCountsResult in
     // registry-client.ts. A real count is used as-is. A name in
     // `noRecord` means the downloads fetch confirmed it has no download
@@ -232,6 +232,15 @@ export async function findRegisteredSquats(
         depType: change.depType,
         weeklyDownloads: downloads,
         createdDaysAgo: Math.floor(days),
+        ...(freshLockfile === true
+          ? {
+              repositoryContext: {
+                ignored: true,
+                ordinaryOutcome: 'not-checked',
+                evidence: 'whole-HEAD lockfile has no comparison side',
+              },
+            }
+          : {}),
       },
     });
   }

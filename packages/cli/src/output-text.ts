@@ -240,7 +240,12 @@ export function renderText(result: ScanResult): string {
   }
 
   if (result.findings.length === 0) {
-    lines.push('No findings.');
+    const notScannedCount = result.notScanned?.length ?? 0;
+    lines.push(
+      notScannedCount === 0
+        ? 'No findings.'
+        : `No findings in the dependencies judged; ${notScannedCount} item(s) were not judged or were declined.`
+    );
   } else {
     for (const severity of SEVERITY_DISPLAY_ORDER) {
       const findings = bySeverity.get(severity) ?? [];
@@ -319,6 +324,34 @@ export function renderText(result: ScanResult): string {
       for (const proposal of result.trustBase.proposals) {
         lines.push(`  ${sanitizeText(proposal)}`);
       }
+    }
+  }
+
+  if (result.repoControls !== undefined) {
+    lines.push('');
+    lines.push(`Scanned commit: ${sanitizeText(result.scannedCommit ?? '(unknown)')}`);
+    lines.push(`Scanned root: ${sanitizeText(result.scannedRoot ?? '(unknown)')}`);
+    lines.push('Repository controls: not honoured');
+    if (result.repoControls.present.length === 0) {
+      lines.push('  present: none');
+    } else {
+      for (const present of result.repoControls.present) {
+        lines.push(`  present: ${sanitizeText(present)}`);
+      }
+    }
+    const notScanned = result.notScanned ?? [];
+    lines.push(`Not judged or declined: ${notScanned.length}`);
+    const shown = notScanned.slice(0, 100);
+    for (const entry of shown) {
+      const location = `${entry.path}${entry.line === undefined ? '' : `:${entry.line}`}`;
+      lines.push(
+        `  ${sanitizeText(location)} [${entry.kind}]: ${sanitizeText(entry.reason)}`
+      );
+    }
+    if (shown.length < notScanned.length) {
+      lines.push(
+        `  ${notScanned.length - shown.length} more item(s) not shown; JSON output lists every row.`
+      );
     }
   }
 

@@ -21,6 +21,20 @@ export const MAX_TREE_PATH_BYTES = 512 * 1024 * 1024;
 export const MAX_TREE_DEPTH = 1000;
 const MAX_TREE_OBJECT_BYTES = 512 * 1024 * 1024;
 
+export interface VerifiedTreeLimits {
+  rows: number;
+  pathBytes: number;
+  depth: number;
+  treeObjectBytes: number;
+}
+
+const DEFAULT_LIMITS: VerifiedTreeLimits = {
+  rows: MAX_TREE_ROWS_WALKED,
+  pathBytes: MAX_TREE_PATH_BYTES,
+  depth: MAX_TREE_DEPTH,
+  treeObjectBytes: MAX_TREE_OBJECT_BYTES,
+};
+
 type RowKind = 'tree' | 'file' | 'symlink' | 'gitlink';
 interface Row {
   mode: string;
@@ -33,10 +47,10 @@ export interface RowBudget {
   left: number;
 }
 
-function tooLarge(detail: string): ObjectStoreMismatch {
+function tooLarge(detail: string, limits: VerifiedTreeLimits = DEFAULT_LIMITS): ObjectStoreMismatch {
   return new ObjectStoreMismatch(
-    `dep-guard: the HEAD tree is too large to list: ${detail} (limits: ${MAX_TREE_ROWS_WALKED} tree rows, ` +
-      `${MAX_TREE_PATH_BYTES} path bytes, depth ${MAX_TREE_DEPTH}). Nothing was scanned.`
+    `dep-guard: the HEAD tree is too large to list: ${detail} (limits: ${limits.rows} tree rows, ` +
+      `${limits.pathBytes} path bytes, depth ${limits.depth}). Nothing was scanned.`
   );
 }
 
@@ -100,10 +114,12 @@ export function parseTree(
 }
 
 export function lexicalEntryPath(root: string, relative: string, platformPath: path.PlatformPath = path): string {
-  const segments = relative.split('/');
+  const segments = platformPath.sep === '\\' ? relative.split(/[\\/]/) : relative.split('/');
+  const driveRelative = platformPath.sep === '\\' && /^[A-Za-z]:[^\\/]/.test(relative);
   if (
     relative === '' ||
     segments.some((segment) => segment === '' || segment === '.' || segment === '..') ||
+    driveRelative ||
     platformPath.isAbsolute(relative) ||
     platformPath.resolve(root, relative).startsWith(`${platformPath.resolve(root)}${platformPath.sep}`) === false
   ) {
@@ -114,7 +130,12 @@ export function lexicalEntryPath(root: string, relative: string, platformPath: p
   return platformPath.resolve(root, relative);
 }
 
-export function readVerifiedHeadTree(repoRoot: string, headOid: string, git: string): VerifiedEntry[] {
+export function readVerifiedHeadTree(
+  repoRoot: string,
+  headOid: string,
+  git: string,
+  limits: VerifiedTreeLimits = DEFAULT_LIMITS
+): VerifiedEntry[] {
   const algorithm = hashAlgorithmForOid(headOid);
   if (algorithm === null) throw objectStoreMismatch(`HEAD ${headOid} is not a sha1 or sha256 id`);
   const rawOidBytes = algorithm === 'sha1' ? 20 : 32;
@@ -129,20 +150,20 @@ export function readVerifiedHeadTree(repoRoot: string, headOid: string, git: str
   }
 
   const rowsByTree = new Map<string, Row[]>();
-  const parseBudget: RowBudget = { left: MAX_TREE_ROWS_WALKED };
+  const parseBudget: RowBudget = { left: limits.rows };
   const wanted = (ids: readonly string[]): string[] =>
     [...new Set(ids)].filter((oid) => !rowsByTree.has(oid));
   let next = wanted([treeLine[1]]);
   let rounds = 0;
   let rawTreeBytes = 0;
   while (next.length > 0) {
-    if (++rounds > MAX_TREE_DEPTH) throw tooLarge(`deeper than ${MAX_TREE_DEPTH} directories`);
+    if (++rounds > limits.depth) throw tooLarge(`deeper than ${limits.depth} directories`, limits);
     const children: string[] = [];
     for (const [oid, object] of readVerifiedObjects(repoRoot, next, algorithm, git)) {
       if (object.type !== 'tree') throw objectStoreMismatch(`${object.type} ${oid} is where a tree is named`);
       rawTreeBytes += object.bytes.length;
-      if (rawTreeBytes > MAX_TREE_OBJECT_BYTES) {
-        throw tooLarge(`tree objects exceed ${MAX_TREE_OBJECT_BYTES} bytes`);
+      if (rawTreeBytes > limits.treeObjectBytes) {
+        throw tooLarge(`tree objects exceed ${limits.treeObjectBytes} bytes`, limits);
       }
       const rows = parseTree(object.bytes, rawOidBytes, oid, parseBudget);
       rowsByTree.set(oid, rows);
@@ -166,11 +187,11 @@ export function readVerifiedHeadTree(repoRoot: string, headOid: string, git: str
       continue;
     }
     const row = current.rows[current.index++];
-    if (++walked > MAX_TREE_ROWS_WALKED) throw tooLarge(`over ${MAX_TREE_ROWS_WALKED} tree rows`);
+    if (++walked > limits.rows) throw tooLarge(`over ${limits.rows} tree rows`, limits);
     const relative = `${current.prefix}${row.name}`;
     lexicalEntryPath(repoRoot, relative);
     pathBytes += Buffer.byteLength(relative);
-    if (pathBytes > MAX_TREE_PATH_BYTES) throw tooLarge(`over ${MAX_TREE_PATH_BYTES} path bytes`);
+    if (pathBytes > limits.pathBytes) throw tooLarge(`over ${limits.pathBytes} path bytes`, limits);
     if (seenPaths.has(relative)) {
       throw new ObjectStoreMismatch(
         `dep-guard: the HEAD tree resolves more than one entry to ${JSON.stringify(relative)}. Nothing was scanned.`
@@ -178,7 +199,7 @@ export function readVerifiedHeadTree(repoRoot: string, headOid: string, git: str
     }
     seenPaths.add(relative);
     if (row.kind === 'tree') {
-      if (stack.length >= MAX_TREE_DEPTH) throw tooLarge(`deeper than ${MAX_TREE_DEPTH} directories`);
+      if (stack.length >= limits.depth) throw tooLarge(`deeper than ${limits.depth} directories`, limits);
       const rows = rowsByTree.get(row.oid);
       if (rows === undefined) throw objectStoreMismatch(`tree ${row.oid} was not read`);
       stack.push({ rows, index: 0, prefix: `${relative}/` });

@@ -39,8 +39,8 @@ import {
 } from './state.js';
 import { withoutByteOrderMark } from './text.js';
 import { DepGuardError, type Diagnostic } from './types.js';
-import type { HeadOnlyRepository } from './no-repo-controls.js';
-import { readVerifiedBlobs } from './utils/verified-objects.js';
+import { MAX_DEPENDENCY_INPUT_BYTES, type HeadOnlyRepository } from './no-repo-controls.js';
+import { readVerifiedBlobsBounded } from './utils/verified-objects.js';
 
 // Loads the two sides of a scan out of a repository. Everything below
 // reads bytes and hands them to the existing parsers; no rule logic lives
@@ -742,22 +742,30 @@ function headOnlySource(repository: HeadOnlyRepository): FileSource {
   );
   const listed = new Map([...regular, ...symlinks]);
   const children = buildChildIndex(listed.keys());
-  const readOne = (relPath: string): string | null => {
-    if (baseName(relPath) === NPMRC) return null;
+  const readOne = async (relPath: string): Promise<string | null> => {
+    if (baseName(relPath) === NPMRC || repository.excludedPaths.has(relPath)) return null;
     const oid = listed.get(relPath);
     if (oid === undefined) return null;
-    const bytes = readVerifiedBlobs(repository.repoRoot, [oid], repository.git).get(oid);
+    const bytes = (
+      await readVerifiedBlobsBounded(
+        repository.repoRoot,
+        [oid],
+        repository.git,
+        MAX_DEPENDENCY_INPUT_BYTES,
+        0
+      )
+    ).blobs.get(oid);
     return bytes?.toString('utf8') ?? null;
   };
   return {
     async read(relPath: string): Promise<string | null> {
-      return readOne(relPath);
+      return await readOne(relPath);
     },
     async readMany(relPaths: string[]): Promise<Map<string, string | null>> {
       const result = new Map<string, string | null>();
       const byOid = new Map<string, string[]>();
       for (const relPath of relPaths) {
-        if (baseName(relPath) === NPMRC) {
+        if (baseName(relPath) === NPMRC || repository.excludedPaths.has(relPath)) {
           result.set(relPath, null);
           continue;
         }
@@ -768,7 +776,15 @@ function headOnlySource(repository: HeadOnlyRepository): FileSource {
         }
         byOid.set(oid, [...(byOid.get(oid) ?? []), relPath]);
       }
-      const blobs = readVerifiedBlobs(repository.repoRoot, [...byOid.keys()], repository.git);
+      const blobs = (
+        await readVerifiedBlobsBounded(
+          repository.repoRoot,
+          [...byOid.keys()],
+          repository.git,
+          MAX_DEPENDENCY_INPUT_BYTES,
+          0
+        )
+      ).blobs;
       for (const [oid, paths] of byOid) {
         const text = blobs.get(oid)?.toString('utf8') ?? null;
         for (const relPath of paths) result.set(relPath, text);
@@ -795,7 +811,15 @@ function headOnlySource(repository: HeadOnlyRepository): FileSource {
     async readLink(relPath: string): Promise<string | null> {
       const oid = symlinks.get(relPath);
       if (oid === undefined) return null;
-      return readVerifiedBlobs(repository.repoRoot, [oid], repository.git).get(oid)?.toString('utf8') ?? null;
+      return (
+        await readVerifiedBlobsBounded(
+          repository.repoRoot,
+          [oid],
+          repository.git,
+          MAX_DEPENDENCY_INPUT_BYTES,
+          0
+        )
+      ).blobs.get(oid)?.toString('utf8') ?? null;
     },
     async ignoresCase(): Promise<boolean> {
       return false;
@@ -1751,7 +1775,8 @@ async function loadLockfiles(
   parsedNpm: ReadonlyMap<string, ParsedLockfile> = new Map(),
   // Where a lockfile-parse failure is collected instead of thrown, so the
   // caller can name every one at once. Without it the first one throws.
-  parseFailures?: DepGuardError[]
+  parseFailures?: DepGuardError[],
+  onParseFailure?: (path: string, reason: string) => void
 ): Promise<{ lockfile: ParsedLockfile | null; extraLockfiles: ParsedLockfile[] }> {
   const loaded: ParsedLockfile[] = [];
   for (const [base, load] of LOCKFILE_CANDIDATES) {
@@ -1777,6 +1802,7 @@ async function loadLockfiles(
       if (role.kind === 'judged' || !(err instanceof MissingPackagesMapError)) {
         if (parseFailures !== undefined && err instanceof DepGuardError && err.code === 'lockfile-parse') {
           parseFailures.push(err);
+          onParseFailure?.(name, err.message);
           continue;
         }
         throw err;
@@ -3461,7 +3487,8 @@ async function loadState(
   isIgnoredPath: (relPath: string) => boolean,
   // Every comparison side the run loads, already loaded, for the judged
   // side; none for a comparison side. settleParseFailures checks it.
-  comparisons: readonly LoadedSide[]
+  comparisons: readonly LoadedSide[],
+  onLockfileParseFailure?: (path: string, reason: string) => void
 ): Promise<LoadedSide> {
   if (role.kind === 'comparison' && comparisons.length > 0) {
     throw new Error('internal error: a comparison side was loaded against other sides');
@@ -3730,13 +3757,24 @@ async function loadState(
   const merged: ParsedLockfile[] = [];
   const lockfileParseFailures: DepGuardError[] = [];
   for (const directory of lockfileDirs) {
-    const loaded = await loadLockfiles(source, diagnostics, unread, role, directory, npmLockfiles, lockfileParseFailures);
+    const loaded = await loadLockfiles(
+      source,
+      diagnostics,
+      unread,
+      role,
+      directory,
+      npmLockfiles,
+      lockfileParseFailures,
+      onLockfileParseFailure
+    );
     if (loaded.lockfile !== null) {
       merged.push(loaded.lockfile);
     }
     merged.push(...loaded.extraLockfiles);
   }
-  throwLockfileParseFailures(lockfileParseFailures);
+  if (onLockfileParseFailure === undefined) {
+    throwLockfileParseFailures(lockfileParseFailures);
+  }
   const lockfile = merged.find(isReadLockfile) ?? merged[0] ?? null;
   const extraLockfiles = merged.filter(
     (parsed) => parsed !== lockfile && (parsed.format === 'npm' || parsed.format === 'pnpm')
@@ -4192,15 +4230,24 @@ export async function loadStates(
       throw new DepGuardError('--no-repo-controls cannot be combined with a comparison mode', 'git-error');
     }
     const diagnostics: Diagnostic[] = [];
+    const unparseable = (path: string, reason: string): void => {
+      options.headOnly?.notScanned.push({ path, kind: 'unparseable', reason });
+    };
     const after = await loadState(
       headOnlySource(options.headOnly),
       diagnostics,
       JUDGED,
       '',
       isIgnoredPath,
-      []
+      [],
+      unparseable
     );
-    settleParseFailures([after], '', diagnostics);
+    for (const failure of after.failures) {
+      unparseable(failure.path, failure.reason);
+    }
+    options.headOnly.notScanned.sort((left, right) =>
+      left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+    );
     return { before: null, after: after.state, mode, diagnostics: dedupeDiagnostics(diagnostics) };
   }
   await assertScannablePath(repoRoot);

@@ -102,6 +102,7 @@ import { checkPypiExistence, type PypiExistenceStats } from './online/pypi-exist
 import { applyUvSources, judgedPythonControls, PythonIndexRule } from './python-sources.js';
 import { loadPythonControls } from './python-trust.js';
 import {
+  finalizeHeadOnlyNotScanned,
   loadHeadOnlyRepository,
   type HeadOnlyRepository,
   type NotScannedEntry,
@@ -434,6 +435,7 @@ export interface ScanResult {
   scannedCommit?: string;
   scannedRoot?: string;
   notScanned?: NotScannedEntry[];
+  notScannedCount?: number;
   run: {
     mode: 'staged' | 'base' | 'audit';
     failOn: FailOn;
@@ -513,7 +515,8 @@ function runChecks(
   npmrcDefaultRegistry: string | null,
   npmrcChanged: boolean,
   pythonIndex: PythonIndexRule | null = null,
-  judged: JudgedSide | null = null
+  judged: JudgedSide | null = null,
+  noRepoControls = false
 ): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
   const ctx: CheckContext = {
     corpus,
@@ -524,6 +527,7 @@ function runChecks(
     npmrcChanged,
     ...(pythonIndex === null ? {} : { pythonIndex }),
     ...(judged === null ? {} : { judged }),
+    ...(noRepoControls ? { noRepoControls: true } : {}),
     diagnostics: [],
     allowed: [],
   };
@@ -1697,6 +1701,7 @@ function buildResult(
           scannedCommit: headOnly.head,
           scannedRoot: headOnly.repoRoot,
           notScanned: headOnly.notScanned,
+          notScannedCount: headOnly.notScanned.length,
         }),
     run: {
       mode: info.mode,
@@ -1755,7 +1760,7 @@ export async function scan(opts: {
       'config-invalid'
     );
   }
-  const headOnly = opts.noRepoControls === true ? loadHeadOnlyRepository(opts.repoRoot) : null;
+  const headOnly = opts.noRepoControls === true ? await loadHeadOnlyRepository(opts.repoRoot) : null;
   // Checked before anything else touches opts.repoRoot -- resolveScanRoot
   // spawns git against it, and loadConfig below joins config file names
   // onto it, both of which turn a missing directory or a file-where-a-
@@ -1823,6 +1828,7 @@ export async function scan(opts: {
       workspaceLocalNames: new Set(),
       workspaceLocalNamesByDir: new Map(),
     };
+    finalizeHeadOnlyNotScanned(headOnly, statePair.after);
   }
   statePair.diagnostics.push(...denyListDiagnostics);
 
@@ -2101,7 +2107,8 @@ export async function scan(opts: {
       (side) => side !== null && (side.npmrcContent ?? null) !== (statePair.after.npmrcContent ?? null)
     ) || (controls?.npmrcChanged ?? false),
     pythonIndex,
-    judgedSideOf(statePair.after)
+    judgedSideOf(statePair.after),
+    headOnly !== null
   );
   // A --base or --trust-base run is the pull-request/CI shape (issue #75):
   // never a commit hook, so the online budget's default is minutes rather
@@ -2145,7 +2152,7 @@ export async function scan(opts: {
   // installing manifests are held against.
   const comparisonRef =
     controls !== null ? controls.ref : opts.mode.kind === 'base' ? opts.mode.ref : opts.mode.kind === 'staged' ? 'HEAD' : null;
-  const couldNotRun = await settleDenyCoverage({
+  let couldNotRun = await settleDenyCoverage({
     root,
     comparisonRef,
     config,
@@ -2155,6 +2162,19 @@ export async function scan(opts: {
     couldNotRun: settledOnline.couldNotRun,
     diagnostics,
   });
+  if (headOnly !== null && couldNotRun === null) {
+    const incomplete = headOnly.notScanned.filter(
+      (entry) => entry.kind === 'too-large' || entry.kind === 'unparseable'
+    );
+    if (incomplete.length > 0) {
+      couldNotRun = {
+        code: 'head-inputs-not-judged',
+        message:
+          `${incomplete.length} committed dependency input(s) were too large or unparseable and were not ` +
+          'judged; see notScanned for every path',
+      };
+    }
+  }
   const lockfileByManifest = new Map<string, string>();
   for (const change of delta.changes) {
     if (change.lockfilePath !== undefined && !lockfileByManifest.has(change.manifestPath)) {
@@ -2323,7 +2343,7 @@ export async function checkSingle(opts: {
   }
 
   const startedAt = Date.now();
-  const headOnly = opts.noRepoControls === true ? loadHeadOnlyRepository(opts.repoRoot) : null;
+  const headOnly = opts.noRepoControls === true ? await loadHeadOnlyRepository(opts.repoRoot) : null;
   // Same reasoning as the check at the top of scan(): a missing directory
   // or a file where a directory belongs has to be reported as
   // path-missing, before loadConfig below turns it into a confusing
@@ -2351,7 +2371,17 @@ export async function checkSingle(opts: {
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const delta = syntheticDelta(opts.name);
 
-  const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map(), null, false);
+  const { findings: checkedFindings, ctx } = runChecks(
+    corpus,
+    config,
+    delta,
+    new Map(),
+    null,
+    false,
+    null,
+    null,
+    headOnly !== null
+  );
   // The deny list judges the one name asked about. No version is given, so a
   // versioned ban matches by name and says so (checks/deny.ts).
   checkedFindings.push(...denyCheckSingle(opts.name, ctx));

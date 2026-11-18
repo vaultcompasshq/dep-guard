@@ -68,9 +68,28 @@ describe('local git config allowlist', () => {
       'Clone the repository fresh and assess the clone.'
     );
   });
+
+  test('a failed local config read also carries the clone-fresh remedy', () => {
+    expect(
+      localGitConfigRefusal(
+        { ok: false, reason: 'git', detail: 'config could not be read' },
+        'dep-guard'
+      )
+    ).toContain('Clone the repository fresh and assess the clone.');
+  });
 });
 
 describe('absolute git binary resolution', () => {
+  test('refuses when no executable git exists on an absolute PATH entry', () => {
+    expect(() =>
+      resolveGitBinary({
+        env: { PATH: '/missing' },
+        platform: 'linux',
+        isFile: () => false,
+      })
+    ).toThrow('could not find git on PATH');
+  });
+
   test('skips empty and relative PATH entries and returns the first absolute regular file', () => {
     const world: GitResolveEnv = {
       env: { PATH: ':relative:/safe/one:/safe/two' },
@@ -79,6 +98,17 @@ describe('absolute git binary resolution', () => {
     };
 
     expect(resolveGitBinary(world)).toBe('/safe/two/git');
+  });
+
+  test('on POSIX skips a regular file without execute permission', () => {
+    const world: GitResolveEnv = {
+      env: { PATH: '/not-executable:/safe' },
+      platform: 'linux',
+      isFile: () => true,
+      isExecutable: (candidate) => candidate === '/safe/git',
+    };
+
+    expect(resolveGitBinary(world)).toBe('/safe/git');
   });
 
   test('on Windows considers exe and com only, even when PATHEXT names scripts first', () => {
@@ -99,6 +129,21 @@ describe('absolute git binary resolution', () => {
       'C:\\safe\\git.exe',
       'C:\\safe\\git.com',
     ]);
+  });
+
+  test('on Windows skips rooted and drive-relative PATH entries', () => {
+    const seen: string[] = [];
+    const world: GitResolveEnv = {
+      env: { Path: '\\rooted;C:relative;C:\\safe', PATHEXT: '.EXE' },
+      platform: 'win32',
+      isFile: (candidate) => {
+        seen.push(candidate);
+        return true;
+      },
+    };
+
+    expect(resolveGitBinary(world)).toBe('C:\\safe\\git.exe');
+    expect(seen).toEqual(['C:\\safe\\git.exe']);
   });
 
   test('detects a resolved binary at or below the assessed directory', () => {

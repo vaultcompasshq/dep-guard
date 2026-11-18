@@ -5644,3 +5644,49 @@ entries with a URL; nothing backs a pnpm entry with no tarball beyond its
 integrity hash, nor a Python lockfile's names. dep-guard reads files and does
 not run at install time. docs/deny-list.md, "What the deny list cannot see",
 has the limits per format.
+
+## No repository controls means verified HEAD and visible gaps (2026-11-18)
+
+`prepareNoRepoControlsRepository` resolves one absolute git binary outside the
+judged root, checks the local config allowlist before every other git call,
+requires the physical current directory to be the reported root, refuses an
+ancestor `.git` entry, and accepts only the repository's own plain object
+store. `readVerifiedHeadTree` then verifies the commit, every raw tree, and
+every blob by object id. Its lexical walk rejects invalid modes, type
+disagreements, duplicate decoded paths, paths outside the root, and bounded
+walk overflows. `readVerifiedBlobsBounded` hashes oversized inputs without
+retaining them and enforces the aggregate discard limit. Pinned by tests
+`checks a real repository and names the first refused local key`, `refuses an
+ancestor .git %s without running git there`, `uses only the allowed git
+commands and reads config first`, `refuses a loose commit whose bytes no longer
+match its id`, `reads regular-file and tree modes by their type bits`, `refuses
+duplicate decoded paths and accepts odd unambiguous names`, and `bounds wide,
+deep and repeatedly shared trees while walking`.
+
+`headOnlySource` is the only file source in this mode. It reads no working-tree
+path, and `scan` replaces repository controls with built-in defaults before
+building the delta. Repository allow, ignore, local overlay, baseline, fail
+threshold, registry pins, workspace-local names, install allowlists, Python
+source rewrites, and Python index declarations cannot remove a finding. A
+repository-selected context that would otherwise lower or skip a finding is
+either ignored and marked on the kept finding or recorded in `notScanned` with
+its path and reason. Pinned by tests `produces the same JSON after the entire
+working tree is replaced`, `does not use filesystem APIs on judged working-tree
+paths`, `ignores a repository %s that ordinarily hides a finding`, `uses the
+built-in fail threshold instead of the repository
+threshold`, `ignores a committed baseline that ordinarily suppresses the
+finding`, `ignores a private npmrc scope pin that ordinarily suppresses the
+name check`, `a lockfile host cannot suppress the publish-age finding under
+no-repo-controls`, and `whole-HEAD lockfile names still receive the
+registered-squat check`, and `an alias edge and neighboring name field cannot
+remove the lockfile key`.
+
+Every report format carries `repoControls`, `scannedCommit`, `scannedRoot`,
+`notScanned`, and the exact `notScannedCount`. A clean text verdict is qualified
+when any path was not judged or any contextual decision was declined; JSON
+lists every row and SARIF repeats the run facts in its properties. Unparseable
+or oversized dependency inputs make the report incomplete and exit 2. Pinned
+by tests `text and SARIF carry the same qualified no-repo-controls facts`,
+`reports an unparseable committed %s and exits incomplete`, `lists a
+manifest skipped under a built-in directory and qualifies the result`, and
+`lists a lockfile that has no manifest in its directory`.
