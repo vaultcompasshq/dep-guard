@@ -312,7 +312,8 @@ function lockEntryNames(ctx: CheckContext): DepChange[] {
     if (format !== 'npm' && format !== 'pnpm') {
       continue;
     }
-    if (acceptedTransitiveAliasTarget(entryChange) !== null) {
+    const acceptedAliasTarget = acceptedTransitiveAliasTarget(entryChange);
+    if (acceptedAliasTarget !== null && ctx.noRepoControls !== true) {
       continue;
     }
     // pnpm writes a local directory dependency's version as "file:<dir>" or
@@ -349,7 +350,7 @@ function lockEntryNames(ctx: CheckContext): DepChange[] {
     // never one with no location.
     const installsField =
       entryChange.after.unreadLocation !== true && (url === undefined || entryChange.after.lookupName === field);
-    const keyIsFolder =
+    const keyIsFolderOrdinarily =
       field !== null &&
       installsField &&
       ((entryChange.aliasTargets ?? []).includes(field) || entryChange.packageName === field);
@@ -358,7 +359,10 @@ function lockEntryNames(ctx: CheckContext): DepChange[] {
     // installedFromRegistry asks for the field as the installed name, so it
     // holds only when the earlier entry carried this same field.
     const fieldIsNew = field !== null && !earlier.some((before) => installedFromRegistry(before, key, field));
-    const names = [...(keyIsNew && !keyIsFolder ? [key] : []), ...(field !== null && fieldIsNew ? [field] : [])];
+    const names = [
+      ...(keyIsNew && (!keyIsFolderOrdinarily || ctx.noRepoControls === true) ? [key] : []),
+      ...(field !== null && fieldIsNew ? [field] : []),
+    ];
     for (const name of names) {
       changes.push({
         name: entryChange.name,
@@ -374,6 +378,15 @@ function lockEntryNames(ctx: CheckContext): DepChange[] {
         lockfilePath: entryChange.lockfilePath,
         lockfileFormat: format,
         ...(entryChange.after.inBundle === true ? { bundled: true as const } : {}),
+        ...(ctx.noRepoControls === true && name === key && keyIsFolderOrdinarily
+          ? {
+              repositoryEvidence: [
+                acceptedAliasTarget === null
+                  ? 'lockfile neighboring name field'
+                  : 'lockfile alias edge and neighboring name field',
+              ],
+            }
+          : {}),
       });
     }
   }

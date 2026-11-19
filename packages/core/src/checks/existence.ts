@@ -81,6 +81,15 @@ export const existenceCheck: Check = (ctx) => {
         depType: change.depType,
         protocol: change.protocol,
         corpusBuiltAt: ctx.corpus.builtAt,
+        ...(change.repositoryEvidence === undefined
+          ? {}
+          : {
+              repositoryContext: {
+                ignored: true,
+                ordinaryOutcome: 'not-checked',
+                evidence: change.repositoryEvidence,
+              },
+            }),
       },
     });
   }

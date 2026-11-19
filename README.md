@@ -403,6 +403,33 @@ and the head tree is the thing being judged. The guide also covers the
 Action's handling of it, protecting the workflow file, and requiring a human
 approval.
 
+## Assessing an untrusted repository (`--no-repo-controls`)
+
+Run `dep-guard scan --no-repo-controls` from the physical root of a repository
+whose working tree and `.git` directory you do not trust. Install dep-guard
+outside that repository and invoke the installed binary directly. Do not use
+`npx`, or `pnpm exec` from inside the untrusted checkout, because package
+manager command resolution can execute repository-supplied code before
+dep-guard starts. A repository nested in another git work tree is refused.
+
+This mode judges the verified HEAD commit, not untracked files or uncommitted
+edits. It reads manifests and supported lockfiles from hash-checked git objects,
+uses the built-in defaults, and does not honour repository config, local config,
+baselines, allow entries, ignore paths, workspace exemptions, registry pins,
+Python index declarations, or install allowlists. Control files present in HEAD
+are named in the report. A symlinked dependency input is refused; submodules,
+unsupported inputs, built-in skipped paths, unparseable or oversized inputs,
+and contextual declines are listed as not judged. An unparseable or oversized
+input makes the run incomplete and exits 2.
+
+The operator's command-line choices still apply: `--format`, `--fail-on`,
+`--corpus-dir`, `--online`, `--no-online`, and `--online-budget-ms`. Online
+lookups use dep-guard's fixed public npm and PyPI endpoints; repository `.npmrc`,
+lockfile hosts, and Python index settings cannot select the destination.
+`--base`, `--staged`, and `--trust-base` are mutually exclusive with this mode.
+`dep-guard check <name> --no-repo-controls` applies the same repository guards
+and built-in rule inputs to its single proposed name.
+
 ## SARIF output (`--format sarif`)
 
 ```
@@ -449,6 +476,7 @@ dep-guard check <name>      # is this one safe to add
 dep-guard init              # install the pre-commit hook
 
 dep-guard scan --base origin/main --trust-base origin/main   # judging a pull request
+dep-guard scan --no-repo-controls                            # assess an untrusted checkout
 ```
 
 `--corpus-dir <dir>` is optional on every command: it points at a corpus you

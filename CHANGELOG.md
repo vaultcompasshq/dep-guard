@@ -10,6 +10,10 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Added
+
+- `scan` and `check` accept `--no-repo-controls` for assessing an untrusted checkout. The mode refuses unsafe local git configuration and ambiguous or redirected repositories, reads only a hash-verified HEAD tree through an absolute external git binary, uses built-in rule defaults, reports repository controls as present but not honoured, and lists every skipped, declined, unsupported, oversized, or unparseable input in text, JSON, and SARIF.
+
 ### Changed
 
 - The CI conductor action pin and the @vaultcompass/conductor devDependency move to 0.19.1, and the vault-guard devDependency moves to 1.13.5 where the repository carries one. conductor 0.19.1 installs vault-guard 1.13.5 by default.

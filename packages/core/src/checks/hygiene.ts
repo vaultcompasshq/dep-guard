@@ -95,6 +95,12 @@ function isTypeOnlyPackage(registryName: string): boolean {
   );
 }
 
+function ordinarySeverity(change: DepChange): Severity | null {
+  const declared = SEVERITY_BY_DEP_TYPE[change.depType];
+  if (declared === null) return null;
+  return isTypeOnlyPackage(change.registryName) ? 'low' : declared;
+}
+
 const SEVERITY_RANK: Readonly<Record<Severity, number>> = {
   critical: 4,
   high: 3,
@@ -276,13 +282,14 @@ export const hygieneCheck: Check = (ctx) => {
       continue;
     }
     const declaredSeverity = SEVERITY_BY_DEP_TYPE[change.depType];
-    if (declaredSeverity === null) {
+    const normalSeverity = ordinarySeverity(change);
+    if (normalSeverity === null && ctx.noRepoControls !== true) {
       continue;
     }
     if (allowClears(ctx, change.registryName)) {
       continue;
     }
-    const severity = isTypeOnlyPackage(change.registryName) ? 'low' : declaredSeverity;
+    const severity: Severity = ctx.noRepoControls === true ? 'medium' : (normalSeverity as Severity);
 
     const key = JSON.stringify([change.manifestPath, change.registryName]);
     const existing = seen.get(key);
@@ -298,8 +305,11 @@ export const hygieneCheck: Check = (ctx) => {
       // carries the wildcard when it is in more than one.
       const kept = findings[existing];
       const keptDepType = (kept.details as Record<string, unknown>).depType as DepType;
-      const keptDeclaredSeverity = SEVERITY_BY_DEP_TYPE[keptDepType] as Severity;
-      if (SEVERITY_RANK[declaredSeverity] > SEVERITY_RANK[keptDeclaredSeverity]) {
+      const keptDeclaredSeverity = SEVERITY_BY_DEP_TYPE[keptDepType];
+      const declaredRank = declaredSeverity === null ? 0 : SEVERITY_RANK[declaredSeverity];
+      const keptDeclaredRank =
+        keptDeclaredSeverity === null ? 0 : SEVERITY_RANK[keptDeclaredSeverity];
+      if (declaredRank > keptDeclaredRank) {
         kept.severity = severity;
         kept.message = hygieneMessage(change);
         const details = kept.details as Record<string, unknown>;
@@ -320,7 +330,21 @@ export const hygieneCheck: Check = (ctx) => {
       // depType is here because the severity is decided by it, and without
       // it a reader cannot tell why one wildcard reported low and another
       // medium.
-      details: { specifier: change.specifier, kind: change.kind, depType: change.depType },
+      details: {
+        specifier: change.specifier,
+        kind: change.kind,
+        depType: change.depType,
+        ...(ctx.noRepoControls === true && normalSeverity !== 'medium'
+          ? {
+              repositoryContext: {
+                ignored: true,
+                ordinaryOutcome:
+                  normalSeverity === null ? 'not-reported' : `severity-${normalSeverity}`,
+                evidence: change.depType === 'dependencies' ? 'package-name' : 'dependency-section',
+              },
+            }
+          : {}),
+      },
     });
   }
 

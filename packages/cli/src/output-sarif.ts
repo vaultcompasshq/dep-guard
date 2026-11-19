@@ -255,6 +255,15 @@ export function renderSarif(result: ScanResult, version: string): string {
           ...(result.run.online.unchecked === undefined ? {} : { onlineUnchecked: result.run.online.unchecked.count }),
           allowed: result.allowed,
           allowedNames: result.allowedNames,
+          ...(result.repoControls === undefined
+            ? {}
+            : {
+                repoControls: result.repoControls,
+                scannedCommit: result.scannedCommit,
+                scannedRoot: result.scannedRoot,
+                notScanned: result.notScanned ?? [],
+                notScannedCount: result.notScanned?.length ?? 0,
+              }),
         },
         // One notification per proposed control-input change, and the key
         // is absent entirely outside pull-request mode so a scan without

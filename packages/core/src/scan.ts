@@ -24,7 +24,13 @@ import {
   type DenyCoverage,
 } from './checks/deny.js';
 import type { Check, CheckContext, DenyEntry, JudgedSide, ResolvedConfig } from './checks/types.js';
-import { CONFIG_FILE, LOCAL_CONFIG_FILE, loadConfig, readDenyLeniently } from './config.js';
+import {
+  CONFIG_FILE,
+  LOCAL_CONFIG_FILE,
+  loadConfig,
+  loadConfigFromTexts,
+  readDenyLeniently,
+} from './config.js';
 import type { Corpus } from './corpus.js';
 import { loadCorpus } from './corpus.js';
 import { computeDelta, lockfilesOf } from './delta.js';
@@ -95,6 +101,13 @@ import { fetchPypiProject } from './online/pypi-client.js';
 import { checkPypiExistence, type PypiExistenceStats } from './online/pypi-existence.js';
 import { applyUvSources, judgedPythonControls, PythonIndexRule } from './python-sources.js';
 import { loadPythonControls } from './python-trust.js';
+import {
+  finalizeHeadOnlyNotScanned,
+  loadHeadOnlyRepository,
+  NoRepoControlsError,
+  type HeadOnlyRepository,
+  type NotScannedEntry,
+} from './no-repo-controls.js';
 
 // The version of this installed package, for a message that has to say which
 // dep-guard read the repository. package.json sits one level above both src/
@@ -419,6 +432,11 @@ export interface ScanResult {
   // is the point -- pull-request mode is a mode you enter, and a consumer
   // that never enters it should not have to learn a new key.
   trustBase?: TrustBaseReport;
+  repoControls?: { honoured: false; present: string[] };
+  scannedCommit?: string;
+  scannedRoot?: string;
+  notScanned?: NotScannedEntry[];
+  notScannedCount?: number;
   run: {
     mode: 'staged' | 'base' | 'audit';
     failOn: FailOn;
@@ -498,7 +516,9 @@ function runChecks(
   npmrcDefaultRegistry: string | null,
   npmrcChanged: boolean,
   pythonIndex: PythonIndexRule | null = null,
-  judged: JudgedSide | null = null
+  judged: JudgedSide | null = null,
+  noRepoControls = false,
+  confusionNpmrcPins: ReadonlyMap<string, string> | null = null
 ): { findings: Omit<Finding, 'fingerprint'>[]; ctx: CheckContext } {
   const ctx: CheckContext = {
     corpus,
@@ -509,6 +529,8 @@ function runChecks(
     npmrcChanged,
     ...(pythonIndex === null ? {} : { pythonIndex }),
     ...(judged === null ? {} : { judged }),
+    ...(noRepoControls ? { noRepoControls: true } : {}),
+    ...(confusionNpmrcPins === null ? {} : { confusionNpmrcRegistryPins: confusionNpmrcPins }),
     diagnostics: [],
     allowed: [],
   };
@@ -1640,7 +1662,8 @@ function buildResult(
     ignoreKept: 0,
     madeProjects: [],
     applied: false,
-  }
+  },
+  headOnly: HeadOnlyRepository | null = null
 ): ScanResult {
   const { blockingMatches, exitCode } = evaluateGate(findings, config.failOn);
   const distinctAllowed = [...new Set(allowedNames)].sort();
@@ -1674,6 +1697,15 @@ function buildResult(
             ignoredPathsMadeProjects: ignoreRule.madeProjects.map((made) => made.path),
           },
         }),
+    ...(headOnly === null
+      ? {}
+      : {
+          repoControls: headOnly.repoControls,
+          scannedCommit: headOnly.head,
+          scannedRoot: headOnly.repoRoot,
+          notScanned: headOnly.notScanned,
+          notScannedCount: headOnly.notScanned.length,
+        }),
     run: {
       mode: info.mode,
       failOn: config.failOn,
@@ -1696,6 +1728,27 @@ function buildResult(
 // The full pipeline: loadConfig -> loadCorpus -> loadStates -> computeDelta
 // -> run all six checks -> fingerprint -> ignorePaths/baseline filter ->
 // evaluateGate.
+// Under --no-repo-controls a refusal raised by a shared git or object-store
+// helper is a plain Error; it is re-raised as the mode's own refusal so the
+// CLI reports it as one, with exit 2 and a single prefix.
+async function asNoRepoControlsRefusal<T>(work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof DepGuardError) throw error;
+    throw new NoRepoControlsError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+// What a whole-HEAD assessment counts as judged: a parsed manifest (npm or
+// Python), a read npm or pnpm lockfile, or a read Python lockfile.
+function headOnlyJudgedSomething(state: RepoState): boolean {
+  return (
+    sideResolvedSomething(state) ||
+    (state.pythonLockfiles ?? []).some((lockfile) => lockfile.unreadable === undefined)
+  );
+}
+
 function sideResolvedSomething(state: RepoState): boolean {
   if (state.manifests.length > 0) {
     return true;
@@ -1722,8 +1775,33 @@ export async function scan(opts: {
   // ignored. Independent of opts.mode.ref: --base decides WHAT changed,
   // --trust-base decides by WHOSE RULES it is judged. See trust-base.ts.
   trustBase?: string;
+  noRepoControls?: boolean;
+  // Under noRepoControls only: the directory the operator runs from. The
+  // CLI passes process.cwd(); it must be the repository root itself, and
+  // repoRoot must name that root or a directory inside it. Absent, repoRoot
+  // must be the root.
+  workingDirectory?: string;
 }): Promise<ScanResult> {
   const startedAt = Date.now();
+  if (opts.noRepoControls === true && opts.online === true) {
+    throw new DepGuardError(
+      'online checks would send names from a repository you do not trust to public registries; ' +
+        'run without --online, or without --no-repo-controls on a checkout you trust',
+      'config-invalid'
+    );
+  }
+  if (opts.noRepoControls === true && (opts.trustBase !== undefined || opts.mode.kind !== 'audit')) {
+    throw new DepGuardError(
+      '--no-repo-controls cannot be combined with --trust-base, --base or --staged',
+      'config-invalid'
+    );
+  }
+  const headOnly =
+    opts.noRepoControls === true
+      ? await asNoRepoControlsRefusal(() =>
+          loadHeadOnlyRepository(opts.repoRoot, {}, opts.workingDirectory)
+        )
+      : null;
   // Checked before anything else touches opts.repoRoot -- resolveScanRoot
   // spawns git against it, and loadConfig below joins config file names
   // onto it, both of which turn a missing directory or a file-where-a-
@@ -1733,7 +1811,7 @@ export async function scan(opts: {
   // future direct caller), so this is belt-and-suspenders, not a moved
   // check -- but it has to run first here for scan()'s own error to be
   // the right one.
-  await assertScannablePath(opts.repoRoot);
+  if (headOnly === null) await assertScannablePath(opts.repoRoot);
   // Manifests always resolve against the git root, in every mode
   // (git-source.ts anchors every path there) -- config and the baseline
   // have to be read from that SAME root, not from whatever directory
@@ -1743,17 +1821,19 @@ export async function scan(opts: {
   // rather than reusing its result, so loadStates still gets the raw
   // opts.repoRoot and can still raise its own scan-anchor-differs notice
   // when the two disagree.
-  const root = await resolveScanRoot(opts.repoRoot, opts.mode);
+  const root = headOnly?.repoRoot ?? (await resolveScanRoot(opts.repoRoot, opts.mode));
   // Manifests under this prefix are the scan. Empty when the named path
   // is the git root. Config and the baseline stay on `root` either way.
-  const prefix = await relativeScanPrefix(opts.repoRoot, root);
+  const prefix = headOnly === null ? await relativeScanPrefix(opts.repoRoot, root) : '';
   // Runs before the corpus is loaded and before any state is read, so an
   // unusable trust base is could-not-run with NOTHING scanned, which is
   // what the exit-2 message promises. Null outside pull-request mode, and
   // then every line below reads exactly as it did before this flag
   // existed.
   const controls =
-    opts.trustBase === undefined ? null : await loadTrustedControls(root, opts.trustBase);
+    headOnly !== null || opts.trustBase === undefined
+      ? null
+      : await loadTrustedControls(root, opts.trustBase);
   // Issue #64's companion refusal to assertTrustBaseUsable's own: an
   // explicit --base of HEAD is not itself a trust-base misconfiguration,
   // so loadTrustedControls above would not have caught it, but it is
@@ -1766,13 +1846,32 @@ export async function scan(opts: {
   }
   const denyListDiagnostics: Diagnostic[] = [];
   const config = applyFailOnOverride(
-    controls?.config ?? (await applyComparisonDenyList(root, opts.mode, loadConfig(root), denyListDiagnostics)),
+    headOnly === null
+      ? controls?.config ??
+          (await applyComparisonDenyList(root, opts.mode, loadConfig(root), denyListDiagnostics))
+      : loadConfigFromTexts(null, null, 'built-in defaults'),
     opts.failOn
   );
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const isIgnoredPath = (repoPath: string): boolean =>
     matchingIgnoreEntries(repoPath, config.ignorePaths).length > 0;
-  const statePair = await loadStates(opts.repoRoot, opts.mode, { isIgnoredPath });
+  const loadSides = () =>
+    loadStates(headOnly === null ? opts.repoRoot : root, opts.mode, {
+      isIgnoredPath,
+      ...(headOnly === null ? {} : { headOnly }),
+    });
+  const statePair = headOnly === null ? await loadSides() : await asNoRepoControlsRefusal(loadSides);
+  if (headOnly !== null) {
+    statePair.after = {
+      ...statePair.after,
+      npmrcContent: null,
+      npmrcRegistryPins: new Map(),
+      npmrcDefaultRegistry: null,
+      workspaceLocalNames: new Set(),
+      workspaceLocalNamesByDir: new Map(),
+    };
+    finalizeHeadOnlyNotScanned(headOnly, statePair.after);
+  }
   statePair.diagnostics.push(...denyListDiagnostics);
 
   // Ported from a sibling scanner's whole-tree "examined zero files is
@@ -1811,7 +1910,7 @@ export async function scan(opts: {
   // normal not-yet-staged file as a misrooted scan on every commit through
   // the init pre-commit hook (`dep-guard scan --staged`). The sibling
   // scanner makes this same exclusion for the same reason.
-  if (opts.mode.kind !== 'staged' && !sideResolvedSomething(statePair.after)) {
+  if (headOnly === null && opts.mode.kind !== 'staged' && !sideResolvedSomething(statePair.after)) {
     const manifestOnDisk = await probeManifestOnDisk(root, prefix);
     if (manifestOnDisk) {
       throw new DepGuardError(
@@ -1889,12 +1988,14 @@ export async function scan(opts: {
       controls.proposals.push(loaded.proposal);
     }
   }
-  applyUvSources(
-    statePair.after.manifests,
-    pythonControls,
-    statePair.diagnostics,
-    new Set(statePair.after.pythonArchiveFiles ?? [])
-  );
+  if (headOnly === null) {
+    applyUvSources(
+      statePair.after.manifests,
+      pythonControls,
+      statePair.diagnostics,
+      new Set(statePair.after.pythonArchiveFiles ?? [])
+    );
+  }
   // Every comparison side gets the same rewrite, by its own sources and
   // members, so a dependency whose git or url source did not move is the
   // same dependency on both sides. Applied to the judged side only, an
@@ -1906,7 +2007,8 @@ export async function scan(opts: {
       applyUvSources(side.manifests, judgedPythonControls(side.manifests), [], new Set(side.pythonArchiveFiles ?? []));
     }
   }
-  const pythonIndex = new PythonIndexRule(statePair.after.manifests, pythonControls);
+  const pythonIndex =
+    headOnly === null ? new PythonIndexRule(statePair.after.manifests, pythonControls) : null;
   // The reference side of the ignorePaths rule (applyPathFilters): the
   // trust base on a --trust-base run, and only the trust base, even with
   // --staged, where trustState is null for the lockfile rules and the trust
@@ -2007,7 +2109,8 @@ export async function scan(opts: {
   // moving the on-disk read earlier would change which error a repository
   // with BOTH a malformed baseline and an unreadable base ref reports, and
   // outside pull-request mode nothing about this function changes.
-  const baseline = controls === null ? loadBaseline(root) : controls.baseline;
+  const baseline =
+    headOnly !== null ? new Set<string>() : controls === null ? loadBaseline(root) : controls.baseline;
 
   // The scope pins are a CONTROL INPUT, so in pull-request mode they come
   // from the base ref like the config and the baseline do.
@@ -2030,15 +2133,25 @@ export async function scan(opts: {
     corpus,
     config,
     delta,
-    controls === null ? statePair.after.npmrcRegistryPins : controls.npmrcPins,
-    controls === null ? statePair.after.npmrcDefaultRegistry : controls.npmrcDefaultRegistry,
+    headOnly !== null
+      ? new Map()
+      : controls === null
+        ? statePair.after.npmrcRegistryPins
+        : controls.npmrcPins,
+    headOnly !== null
+      ? null
+      : controls === null
+        ? statePair.after.npmrcDefaultRegistry
+        : controls.npmrcDefaultRegistry,
     // The judged side's .npmrc against every comparison side: the --base
     // or HEAD side by bytes, and the trust base by its own comparison.
     [statePair.before, trustState].some(
       (side) => side !== null && (side.npmrcContent ?? null) !== (statePair.after.npmrcContent ?? null)
     ) || (controls?.npmrcChanged ?? false),
     pythonIndex,
-    judgedSideOf(statePair.after)
+    judgedSideOf(statePair.after),
+    headOnly !== null,
+    headOnly === null ? null : headOnly.npmrcRegistryPins
   );
   // A --base or --trust-base run is the pull-request/CI shape (issue #75):
   // never a commit hook, so the online budget's default is minutes rather
@@ -2082,7 +2195,7 @@ export async function scan(opts: {
   // installing manifests are held against.
   const comparisonRef =
     controls !== null ? controls.ref : opts.mode.kind === 'base' ? opts.mode.ref : opts.mode.kind === 'staged' ? 'HEAD' : null;
-  const couldNotRun = await settleDenyCoverage({
+  let couldNotRun = await settleDenyCoverage({
     root,
     comparisonRef,
     config,
@@ -2092,6 +2205,31 @@ export async function scan(opts: {
     couldNotRun: settledOnline.couldNotRun,
     diagnostics,
   });
+  if (headOnly !== null && couldNotRun === null) {
+    const incomplete = headOnly.notScanned.filter(
+      (entry) => entry.kind === 'too-large' || entry.kind === 'unparseable'
+    );
+    if (incomplete.length > 0) {
+      couldNotRun = {
+        code: 'head-inputs-not-judged',
+        message:
+          `${incomplete.length} committed dependency input(s) were too large or unparseable and were not ` +
+          'judged; see notScanned for every path',
+      };
+    }
+  }
+  if (headOnly !== null && couldNotRun === null && !headOnlyJudgedSomething(statePair.after)) {
+    // A clean pass here would mean only that nothing was read. Checked after the
+    // too-large or unparseable verdict above, which names the cause more
+    // precisely; here every input was skipped or of an unsupported
+    // ecosystem, or there was none: notScanned says which.
+    couldNotRun = {
+      code: 'head-nothing-judged',
+      message:
+        'nothing was judged: no committed manifest or lockfile in HEAD was read under ' +
+        '--no-repo-controls; see notScanned for what was found and why it was not judged',
+    };
+  }
   const lockfileByManifest = new Map<string, string>();
   for (const change of delta.changes) {
     if (change.lockfilePath !== undefined && !lockfileByManifest.has(change.manifestPath)) {
@@ -2141,7 +2279,8 @@ export async function scan(opts: {
       couldNotRun,
     },
     controls,
-    filtered
+    filtered,
+    headOnly
   );
 }
 
@@ -2241,6 +2380,12 @@ export async function checkSingle(opts: {
   // checkSingle, is not applied -- a synthetic manifest path makes a
   // fingerprint match meaningless (see applyPathFilters above).
   trustBase?: string;
+  noRepoControls?: boolean;
+  // Under noRepoControls only: the directory the operator runs from. The
+  // CLI passes process.cwd(); it must be the repository root itself, and
+  // repoRoot must name that root or a directory inside it. Absent, repoRoot
+  // must be the root.
+  workingDirectory?: string;
 }): Promise<ScanResult> {
   // An empty (or whitespace-only) name has no meaningful answer. Reporting
   // "safe" for it -- which an empty name would otherwise do, via a
@@ -2250,29 +2395,65 @@ export async function checkSingle(opts: {
   if (opts.name.trim().length === 0) {
     throw new DepGuardError('checkSingle: "name" must not be empty or whitespace-only', 'name-invalid');
   }
+  if (opts.noRepoControls === true && opts.online === true) {
+    throw new DepGuardError(
+      'online checks would send names from a repository you do not trust to public registries; ' +
+        'run without --online, or without --no-repo-controls on a checkout you trust',
+      'config-invalid'
+    );
+  }
+  if (opts.noRepoControls === true && opts.trustBase !== undefined) {
+    throw new DepGuardError(
+      '--no-repo-controls cannot be combined with --trust-base',
+      'config-invalid'
+    );
+  }
 
   const startedAt = Date.now();
+  const headOnly =
+    opts.noRepoControls === true
+      ? await asNoRepoControlsRefusal(() =>
+          loadHeadOnlyRepository(opts.repoRoot, {}, opts.workingDirectory)
+        )
+      : null;
   // Same reasoning as the check at the top of scan(): a missing directory
   // or a file where a directory belongs has to be reported as
   // path-missing, before loadConfig below turns it into a confusing
   // config-read error by joining a config file name onto a path that was
   // never a directory. assertScannablePath only checks the path itself,
   // so this does not make checkSingle require a git repository.
-  await assertScannablePath(opts.repoRoot);
+  if (headOnly === null) await assertScannablePath(opts.repoRoot);
   // Same reasoning as scan() above -- config has to be read from the
   // repository root, not from wherever opts.repoRoot happens to point, or
   // a subdirectory call would silently miss the repo's allow list,
   // internalScopes, and every other config key. Resolved the tolerant
   // (audit-mode) way: checkSingle must not require being inside a git
   // repository just to read config.
-  const root = await resolveScanRoot(opts.repoRoot, { kind: 'audit' });
+  const root = headOnly?.repoRoot ?? (await resolveScanRoot(opts.repoRoot, { kind: 'audit' }));
   const controls =
-    opts.trustBase === undefined ? null : await loadTrustedControls(root, opts.trustBase);
-  const config = applyFailOnOverride(controls?.config ?? loadConfig(root), opts.failOn);
+    headOnly !== null || opts.trustBase === undefined
+      ? null
+      : await loadTrustedControls(root, opts.trustBase);
+  const config = applyFailOnOverride(
+    headOnly === null
+      ? controls?.config ?? loadConfig(root)
+      : loadConfigFromTexts(null, null, 'built-in defaults'),
+    opts.failOn
+  );
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const delta = syntheticDelta(opts.name);
 
-  const { findings: checkedFindings, ctx } = runChecks(corpus, config, delta, new Map(), null, false);
+  const { findings: checkedFindings, ctx } = runChecks(
+    corpus,
+    config,
+    delta,
+    new Map(),
+    null,
+    false,
+    null,
+    null,
+    headOnly !== null
+  );
   // The deny list judges the one name asked about. No version is given, so a
   // versioned ban matches by name and says so (checks/deny.ts).
   checkedFindings.push(...denyCheckSingle(opts.name, ctx));
@@ -2327,6 +2508,8 @@ export async function checkSingle(opts: {
       ecosystems,
       couldNotRun: settledOnline.couldNotRun,
     },
-    controls
+    controls,
+    { ignoreKept: 0, madeProjects: [], applied: false },
+    headOnly
   );
 }

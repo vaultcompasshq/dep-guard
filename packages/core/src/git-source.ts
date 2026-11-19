@@ -39,6 +39,12 @@ import {
 } from './state.js';
 import { withoutByteOrderMark } from './text.js';
 import { DepGuardError, type Diagnostic } from './types.js';
+import {
+  NoRepoControlsError,
+  recordHeadOnlyNotScanned,
+  type HeadOnlyRepository,
+} from './no-repo-controls.js';
+import { readVerifiedBlobsBounded } from './utils/verified-objects.js';
 
 // Loads the two sides of a scan out of a repository. Everything below
 // reads bytes and hands them to the existing parsers; no rule logic lives
@@ -723,6 +729,147 @@ function gitSource(
     // different directories. The path is its own identity here.
     async identifyDir(relPath: string): Promise<string | null> {
       return relPath;
+    },
+  };
+}
+
+function headOnlySource(repository: HeadOnlyRepository): FileSource {
+  const regular = new Map(
+    repository.entries
+      .filter((entry) => entry.type === 'blob')
+      .map((entry) => [entry.path, entry.oid] as const)
+  );
+  const symlinks = new Map(
+    repository.entries
+      .filter((entry) => entry.type === 'symlink')
+      .map((entry) => [entry.path, entry.oid] as const)
+  );
+  const listed = new Map([...regular, ...symlinks]);
+  const children = buildChildIndex(listed.keys());
+  const cached = new Map<string, Buffer>();
+  const verifiedOversized = new Set<string>();
+  let retainedBytes = repository.retainedBytesBeforeSource;
+  let oversizedBytes = repository.oversizedBytesBeforeSource;
+  const tooLarge = async (relPath: string, oid: string): Promise<boolean> => {
+    const size = repository.objectSizes.get(oid);
+    if (size === undefined) {
+      throw new NoRepoControlsError(
+        `refusing to run: committed input ${relPath} has no verified object size. ` +
+          'Nothing was scanned.'
+      );
+    }
+    if (size <= repository.inputBytesLimit) return false;
+    if (!verifiedOversized.has(oid)) {
+      if (oversizedBytes + size > repository.oversizedBytesLimit) {
+        throw new NoRepoControlsError(
+          `refusing to run: committed dependency inputs exceed the ` +
+            `${repository.oversizedBytesLimit} byte oversized-blob verification budget. Nothing was scanned.`
+        );
+      }
+      await readVerifiedBlobsBounded(
+        repository.repoRoot,
+        [oid],
+        repository.git,
+        0,
+        size
+      );
+      verifiedOversized.add(oid);
+      oversizedBytes += size;
+    }
+    recordHeadOnlyNotScanned(repository, {
+      path: relPath,
+      kind: 'too-large',
+      reason:
+        `dependency input is ${size} bytes, over the ${repository.inputBytesLimit} byte parse limit`,
+    });
+    return true;
+  };
+  const readOids = async (oids: readonly string[]): Promise<void> => {
+    const unread = [...new Set(oids)].filter((oid) => !cached.has(oid));
+    if (unread.length === 0) return;
+    const added = unread.reduce((total, oid) => total + (repository.objectSizes.get(oid) ?? 0), 0);
+    if (retainedBytes + added > repository.totalInputBytesLimit) {
+      throw new NoRepoControlsError(
+        `refusing to run: committed dependency inputs exceed the ` +
+          `${repository.totalInputBytesLimit} byte total retained-input budget while following ` +
+          'dependency-file references. Nothing was scanned.'
+      );
+    }
+    const read = await readVerifiedBlobsBounded(
+      repository.repoRoot,
+      unread,
+      repository.git,
+      repository.inputBytesLimit,
+      0,
+      repository.totalInputBytesLimit - retainedBytes
+    );
+    for (const [oid, bytes] of read.blobs) cached.set(oid, bytes);
+    retainedBytes += added;
+  };
+  const readOne = async (relPath: string): Promise<string | null> => {
+    if (baseName(relPath) === NPMRC || repository.excludedPaths.has(relPath)) return null;
+    const oid = listed.get(relPath);
+    if (oid === undefined) return null;
+    if (await tooLarge(relPath, oid)) return null;
+    await readOids([oid]);
+    return cached.get(oid)?.toString('utf8') ?? null;
+  };
+  return {
+    async read(relPath: string): Promise<string | null> {
+      return await readOne(relPath);
+    },
+    async readMany(relPaths: string[]): Promise<Map<string, string | null>> {
+      const result = new Map<string, string | null>();
+      const byOid = new Map<string, string[]>();
+      for (const relPath of relPaths) {
+        if (baseName(relPath) === NPMRC || repository.excludedPaths.has(relPath)) {
+          result.set(relPath, null);
+          continue;
+        }
+        const oid = listed.get(relPath);
+        if (oid === undefined) {
+          result.set(relPath, null);
+          continue;
+        }
+        if (await tooLarge(relPath, oid)) {
+          result.set(relPath, null);
+          continue;
+        }
+        byOid.set(oid, [...(byOid.get(oid) ?? []), relPath]);
+      }
+      await readOids([...byOid.keys()]);
+      for (const [oid, paths] of byOid) {
+        const text = cached.get(oid)?.toString('utf8') ?? null;
+        for (const relPath of paths) result.set(relPath, text);
+      }
+      return result;
+    },
+    async listChildDirs(dir: string): Promise<string[]> {
+      return children.get(dir) ?? [];
+    },
+    async identifyDir(relPath: string): Promise<string | null> {
+      return relPath;
+    },
+    async listFiles(): Promise<string[]> {
+      return [...listed.keys()];
+    },
+    async lockfileInventory(): Promise<Array<{ path: string; blobId: string | null }>> {
+      return [...listed]
+        .filter(([filePath]) => isLockfileName(filePath))
+        .map(([filePath, oid]) => ({ path: filePath, blobId: oid }));
+    },
+    async isSymlink(relPath: string): Promise<boolean> {
+      return symlinks.has(relPath);
+    },
+    async readLink(relPath: string): Promise<string | null> {
+      const oid = symlinks.get(relPath);
+      if (oid === undefined) return null;
+      if (await tooLarge(relPath, oid)) return null;
+      await readOids([oid]);
+      return cached.get(oid)?.toString('utf8') ?? null;
+    },
+    async ignoresCase(): Promise<boolean> {
+      return false;
     },
   };
 }
@@ -1675,7 +1822,8 @@ async function loadLockfiles(
   parsedNpm: ReadonlyMap<string, ParsedLockfile> = new Map(),
   // Where a lockfile-parse failure is collected instead of thrown, so the
   // caller can name every one at once. Without it the first one throws.
-  parseFailures?: DepGuardError[]
+  parseFailures?: DepGuardError[],
+  onParseFailure?: (path: string, reason: string) => void
 ): Promise<{ lockfile: ParsedLockfile | null; extraLockfiles: ParsedLockfile[] }> {
   const loaded: ParsedLockfile[] = [];
   for (const [base, load] of LOCKFILE_CANDIDATES) {
@@ -1701,6 +1849,7 @@ async function loadLockfiles(
       if (role.kind === 'judged' || !(err instanceof MissingPackagesMapError)) {
         if (parseFailures !== undefined && err instanceof DepGuardError && err.code === 'lockfile-parse') {
           parseFailures.push(err);
+          onParseFailure?.(name, err.message);
           continue;
         }
         throw err;
@@ -3385,7 +3534,8 @@ async function loadState(
   isIgnoredPath: (relPath: string) => boolean,
   // Every comparison side the run loads, already loaded, for the judged
   // side; none for a comparison side. settleParseFailures checks it.
-  comparisons: readonly LoadedSide[]
+  comparisons: readonly LoadedSide[],
+  onLockfileParseFailure?: (path: string, reason: string) => void
 ): Promise<LoadedSide> {
   if (role.kind === 'comparison' && comparisons.length > 0) {
     throw new Error('internal error: a comparison side was loaded against other sides');
@@ -3654,13 +3804,24 @@ async function loadState(
   const merged: ParsedLockfile[] = [];
   const lockfileParseFailures: DepGuardError[] = [];
   for (const directory of lockfileDirs) {
-    const loaded = await loadLockfiles(source, diagnostics, unread, role, directory, npmLockfiles, lockfileParseFailures);
+    const loaded = await loadLockfiles(
+      source,
+      diagnostics,
+      unread,
+      role,
+      directory,
+      npmLockfiles,
+      lockfileParseFailures,
+      onLockfileParseFailure
+    );
     if (loaded.lockfile !== null) {
       merged.push(loaded.lockfile);
     }
     merged.push(...loaded.extraLockfiles);
   }
-  throwLockfileParseFailures(lockfileParseFailures);
+  if (onLockfileParseFailure === undefined) {
+    throwLockfileParseFailures(lockfileParseFailures);
+  }
   const lockfile = merged.find(isReadLockfile) ?? merged[0] ?? null;
   const extraLockfiles = merged.filter(
     (parsed) => parsed !== lockfile && (parsed.format === 'npm' || parsed.format === 'pnpm')
@@ -4105,9 +4266,37 @@ export async function refsNameSameTree(repoRoot: string, a: string, b: string): 
 export async function loadStates(
   repoRoot: string,
   mode: ScanMode,
-  options: { isIgnoredPath?: (relPath: string) => boolean } = {}
+  options: {
+    isIgnoredPath?: (relPath: string) => boolean;
+    headOnly?: HeadOnlyRepository;
+  } = {}
 ): Promise<StatePair> {
   const isIgnoredPath = options.isIgnoredPath ?? (() => false);
+  if (options.headOnly !== undefined) {
+    if (mode.kind !== 'audit') {
+      throw new DepGuardError('--no-repo-controls cannot be combined with a comparison mode', 'git-error');
+    }
+    const diagnostics: Diagnostic[] = [];
+    const unparseable = (path: string, reason: string): void => {
+      options.headOnly?.notScanned.push({ path, kind: 'unparseable', reason });
+    };
+    const after = await loadState(
+      headOnlySource(options.headOnly),
+      diagnostics,
+      JUDGED,
+      '',
+      isIgnoredPath,
+      [],
+      unparseable
+    );
+    for (const failure of after.failures) {
+      unparseable(failure.path, failure.reason);
+    }
+    options.headOnly.notScanned.sort((left, right) =>
+      left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+    );
+    return { before: null, after: after.state, mode, diagnostics: dedupeDiagnostics(diagnostics) };
+  }
   await assertScannablePath(repoRoot);
   const diagnostics: Diagnostic[] = [];
 

@@ -145,7 +145,11 @@ function pinMismatch(
   if (scope === null) {
     return null;
   }
-  const pin = ctx.npmrcRegistryPins.get(scope);
+  // Under --no-repo-controls the ordinary pins are empty (the committed
+  // .npmrc is not a control there) and the committed scope pins arrive as
+  // data on confusionNpmrcRegistryPins. This rule can only ADD a finding,
+  // so reading them here cannot clear anything.
+  const pin = (ctx.confusionNpmrcRegistryPins ?? ctx.npmrcRegistryPins).get(scope);
   if (pin === undefined) {
     return null;
   }

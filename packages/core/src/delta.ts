@@ -39,6 +39,9 @@ export interface DepChange {
   // "inBundle" (checks/candidates.ts): it ships inside its parent's
   // tarball. Message wording only.
   bundled?: true;
+  // Set only by --no-repo-controls when repository-authored neighboring
+  // fields would ordinarily have removed this identity from a name check.
+  repositoryEvidence?: string[];
   before?: LockEntry;
   after?: LockEntry;
   // The specifier text on the comparison side, when the line was already

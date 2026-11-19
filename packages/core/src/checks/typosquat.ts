@@ -513,6 +513,13 @@ export const typosquatCheck: Check = (ctx) => {
     if (match.distance !== undefined) {
       details.distance = match.distance;
     }
+    if (change.repositoryEvidence !== undefined) {
+      details.repositoryContext = {
+        ignored: true,
+        ordinaryOutcome: 'not-checked',
+        evidence: change.repositoryEvidence,
+      };
+    }
 
     findings.push({
       ruleId: 'typosquat',

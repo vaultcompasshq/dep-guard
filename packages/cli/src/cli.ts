@@ -166,6 +166,10 @@ const TRUST_BASE_FLAG_DESCRIPTION =
   'ref is also a comparison side for the lockfile set rule. Not the same as --base, which ' +
   'decides what the change is compared against';
 
+const NO_REPO_CONTROLS_FLAG_DESCRIPTION =
+  'assess every supported dependency in the verified HEAD tree using built-in defaults; ' +
+  'ignore repository config, baseline, allow, ignore and registry controls';
+
 interface ScanCliOptions {
   staged?: boolean;
   base?: string;
@@ -175,6 +179,7 @@ interface ScanCliOptions {
   corpusDir?: string;
   online?: boolean;
   onlineBudgetMs?: string;
+  repoControls?: boolean;
 }
 
 interface CheckCliOptions {
@@ -184,6 +189,7 @@ interface CheckCliOptions {
   online?: boolean;
   onlineBudgetMs?: string;
   trustBase?: string;
+  repoControls?: boolean;
 }
 
 interface InitCliOptions {
@@ -192,7 +198,19 @@ interface InitCliOptions {
   json?: boolean;
 }
 
+function noRepoControls(options: { repoControls?: boolean }): boolean {
+  return options.repoControls === false;
+}
+
 function resolveMode(options: ScanCliOptions): ScanMode {
+  if (
+    noRepoControls(options) &&
+    (options.staged === true || options.base !== undefined || options.trustBase !== undefined)
+  ) {
+    throw new CliUsageError(
+      '--no-repo-controls cannot be combined with --trust-base, --base or --staged'
+    );
+  }
   if (options.staged && options.base !== undefined) {
     throw new CliUsageError('--staged and --base cannot be used together');
   }
@@ -301,6 +319,7 @@ function buildProgram(): Command {
     .option('--staged', 'compare the git index against HEAD')
     .option('--base <ref>', 'compare the working tree against a git ref')
     .option('--trust-base <ref>', TRUST_BASE_FLAG_DESCRIPTION)
+    .option('--no-repo-controls', NO_REPO_CONTROLS_FLAG_DESCRIPTION)
     .option('--format <format>', 'output format: text, json, or sarif', 'text')
     .option(
       '--fail-on <level>',
@@ -325,6 +344,8 @@ function buildProgram(): Command {
           online: options.online,
           onlineBudgetMs,
           trustBase: options.trustBase,
+          noRepoControls: noRepoControls(options),
+          ...(noRepoControls(options) ? { workingDirectory: process.cwd() } : {}),
         });
         emit(result, format);
         reportCouldNotRun(result);
@@ -339,6 +360,7 @@ function buildProgram(): Command {
     .description('Check whether a single package name is safe to add')
     .argument('<name>', 'package name to check')
     .option('--trust-base <ref>', TRUST_BASE_FLAG_DESCRIPTION)
+    .option('--no-repo-controls', NO_REPO_CONTROLS_FLAG_DESCRIPTION)
     .option('--format <format>', 'output format: text, json, or sarif', 'text')
     .option(
       '--fail-on <level>',
@@ -351,6 +373,9 @@ function buildProgram(): Command {
     .exitOverride()
     .action(async (name: string, options: CheckCliOptions) => {
       try {
+        if (noRepoControls(options) && options.trustBase !== undefined) {
+          throw new CliUsageError('--no-repo-controls cannot be combined with --trust-base');
+        }
         const format = parseFormat(options.format);
         const failOn = parseFailOn(options.failOn);
         const onlineBudgetMs = parseOnlineBudgetMs(options.onlineBudgetMs);
@@ -362,6 +387,8 @@ function buildProgram(): Command {
           online: options.online,
           onlineBudgetMs,
           trustBase: options.trustBase,
+          noRepoControls: noRepoControls(options),
+          ...(noRepoControls(options) ? { workingDirectory: process.cwd() } : {}),
         });
         emit(result, format);
         reportCouldNotRun(result);
